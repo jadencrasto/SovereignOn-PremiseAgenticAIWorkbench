@@ -1,0 +1,16 @@
+# config/tools.yaml
+# -----------------
+# Tool enablement configuration for the Sovereign AI Workbench.
+# Loaded at application startup by the ToolRegistry.
+
+tools:
+  document_search:
+    enabled: true
+  file_list:
+    enabled: true
+  file_read:
+    enabled: true
+  calculator:
+    enabled: true
+  file_write:
+    enabled: true

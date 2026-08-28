@@ -1,14 +1,70 @@
 import React, { useState } from 'react';
-import type { ChatMessage } from '../../types';
+import type { ChatMessage, ToolEvent } from '../../types';
 import { MarkdownContent } from './MarkdownContent';
 import { SourceCard } from './SourceCard';
-import { Bot, User, Copy, Check, RotateCcw, AlertTriangle, Layers } from 'lucide-react';
+import { Bot, User, Copy, Check, RotateCcw, AlertTriangle, Layers, Wrench, CheckCircle2, XCircle } from 'lucide-react';
 import { Badge } from '../common/Badge';
 
 interface MessageItemProps {
   message: ChatMessage;
   onRetry?: (content: string) => void;
 }
+
+// Tool Activity Timeline component
+const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
+  if (!events || events.length === 0) return null;
+
+  return (
+    <div className="mb-3 p-3 rounded-lg bg-[#0a0f1a] border border-slate-800/80">
+      <div className="flex items-center gap-1.5 text-xs font-mono font-medium text-slate-400 mb-2">
+        <Wrench className="w-3.5 h-3.5 text-amber-400" />
+        <span>Agent Tool Activity</span>
+      </div>
+      <div className="space-y-1.5">
+        {events.map((event, idx) => (
+          <div key={idx} className="flex items-start gap-2 text-xs">
+            {event.type === 'tool_start' ? (
+              <>
+                <span className="w-4 h-4 mt-0.5 flex items-center justify-center shrink-0">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                </span>
+                <div>
+                  <span className="font-mono font-semibold text-amber-300">{event.tool}</span>
+                  {event.arguments && Object.keys(event.arguments).length > 0 && (
+                    <span className="text-slate-500 ml-1.5">
+                      {Object.entries(event.arguments).map(([k, v]) => (
+                        <span key={k} className="ml-1">
+                          <span className="text-slate-600">{k}:</span>{' '}
+                          <span className="text-slate-400">{String(v).substring(0, 60)}</span>
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                {event.success ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <span className="font-mono font-semibold text-slate-300">{event.tool}</span>
+                  {event.summary && (
+                    <span className={`ml-1.5 ${event.success ? 'text-emerald-400/80' : 'text-rose-400/80'}`}>
+                      — {event.summary}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) => {
   const [copied, setCopied] = useState(false);
@@ -44,6 +100,8 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) =>
   }
 
   // Assistant Message
+  const hasToolEvents = message.toolEvents && message.toolEvents.length > 0;
+
   return (
     <div className="flex gap-3.5 max-w-4xl mx-auto px-4 py-3">
       {/* Avatar */}
@@ -60,6 +118,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) =>
             {message.model_used && (
               <Badge variant="slate" className="text-[10px]">
                 {message.model_used}
+              </Badge>
+            )}
+            {hasToolEvents && (
+              <Badge variant="amber" className="text-[10px] flex items-center gap-1">
+                <Wrench className="w-2.5 h-2.5" />
+                {message.toolEvents!.filter(e => e.type === 'tool_result').length} Tool{message.toolEvents!.filter(e => e.type === 'tool_result').length !== 1 ? 's' : ''}
               </Badge>
             )}
             {message.sources && message.sources.length > 0 && (
@@ -98,13 +162,18 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) =>
             </div>
           ) : (
             <>
+              {/* Tool Activity Timeline */}
+              {hasToolEvents && <ToolActivity events={message.toolEvents!} />}
+
               {message.content ? (
                 <MarkdownContent content={message.content} />
               ) : (
                 message.isStreaming && (
                   <div className="flex items-center gap-2 text-xs text-slate-400 font-mono py-1">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Synthesizing response from local model...</span>
+                    <span>
+                      {hasToolEvents ? 'Executing tools and reasoning...' : 'Synthesizing response from local model...'}
+                    </span>
                   </div>
                 )
               )}

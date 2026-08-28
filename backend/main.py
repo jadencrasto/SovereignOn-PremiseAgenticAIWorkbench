@@ -1,7 +1,7 @@
 """
 backend/main.py
 ---------------
-FastAPI application factory and entry point — Phase 2.
+FastAPI application factory and entry point — Phase 4.
 
 Startup:
   - Runtime directories created
@@ -12,7 +12,8 @@ Startup:
   - VectorStore initialised (ChromaDB persistent local)
   - Retriever initialised
   - DocumentService wired together
-  - AgentEngine initialised and wired to DocumentService
+  - ToolRegistry instantiated with 5 local tools
+  - AgentEngine initialised and wired to DocumentService + ToolRegistry
   - All resources stored on app.state
 
 Shutdown:
@@ -24,6 +25,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -40,6 +42,15 @@ from backend.schemas.chat import HealthResponse
 from backend.api.chat import router as chat_router
 from backend.api.models import router as models_router
 from backend.api.documents import router as documents_router
+from backend.api.tools import router as tools_router
+
+# Tool imports
+from backend.tools.registry import ToolRegistry, ToolDefinition
+from backend.tools.calculator import CalculatorInput, execute_calculator
+from backend.tools.document_search import DocumentSearchInput, create_document_search
+from backend.tools.file_list import FileListInput, create_file_list
+from backend.tools.file_read import FileReadInput, create_file_read
+from backend.tools.file_write import FileWriteInput, create_file_write
 
 # ---------------------------------------------------------------------------
 # Logging — configure before anything else logs
@@ -51,6 +62,117 @@ setup_logging(
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Tool configuration loader
+# ---------------------------------------------------------------------------
+
+def _load_tools_config() -> dict:
+    """Load config/tools.yaml, returning {} on error."""
+    path = settings.config_dir / "tools.yaml"
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            return data.get("tools", {})
+    except FileNotFoundError:
+        logger.warning("tools.yaml not found at %s — all tools enabled by default", path)
+        return {}
+    except Exception as exc:
+        logger.error("Failed to load tools.yaml: %s", exc)
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: dict) -> None:
+    """Register all Phase 4 tools with the registry."""
+
+    def _is_enabled(name: str) -> bool:
+        return tools_config.get(name, {}).get("enabled", True)
+
+    # 1. document_search
+    registry.register(ToolDefinition(
+        name="document_search",
+        description=(
+            "Search the local document knowledge base for relevant passages. "
+            "Use this when the user asks about information in uploaded documents. "
+            "Returns semantically similar text chunks with filenames, scores, and page numbers."
+        ),
+        input_schema=DocumentSearchInput,
+        execute_fn=create_document_search(retriever),
+        category="Information Retrieval",
+        read_only=True,
+        enabled=_is_enabled("document_search"),
+    ))
+
+    # 2. file_list
+    registry.register(ToolDefinition(
+        name="file_list",
+        description=(
+            "List files available in the local workspace (data/uploads/ directory). "
+            "Use this when the user asks what files are available, or you need to discover filenames. "
+            "Returns filenames, sizes, and extensions."
+        ),
+        input_schema=FileListInput,
+        execute_fn=create_file_list(settings.upload_dir),
+        category="File Operations",
+        read_only=True,
+        enabled=_is_enabled("file_list"),
+    ))
+
+    # 3. file_read
+    registry.register(ToolDefinition(
+        name="file_read",
+        description=(
+            "Read the text content of a file from the local workspace (data/uploads/ directory). "
+            "Use this when the user asks to read, view, or inspect a specific file. "
+            "Only supports text-based files (.txt, .md, .csv, .json, .yaml, etc.). "
+            "For PDF/DOCX analysis, use document_search instead."
+        ),
+        input_schema=FileReadInput,
+        execute_fn=create_file_read(settings.upload_dir),
+        category="File Operations",
+        read_only=True,
+        enabled=_is_enabled("file_read"),
+    ))
+
+    # 4. calculator
+    registry.register(ToolDefinition(
+        name="calculator",
+        description=(
+            "Evaluate arithmetic expressions safely. "
+            "Use this for any mathematical calculations the user requests. "
+            "Supports: +, -, *, /, //, %, ** (exponentiation), and parentheses. "
+            "Input is a string expression like '125 * 840 * 1.18'."
+        ),
+        input_schema=CalculatorInput,
+        execute_fn=execute_calculator,
+        category="Computation",
+        read_only=True,
+        enabled=_is_enabled("calculator"),
+    ))
+
+    # 5. file_write
+    registry.register(ToolDefinition(
+        name="file_write",
+        description=(
+            "Create a new text file in the sandbox directory (data/sandbox/). "
+            "Use this when the user asks to save, export, or write results to a file. "
+            "Cannot overwrite existing files. Cannot write outside data/sandbox/."
+        ),
+        input_schema=FileWriteInput,
+        execute_fn=create_file_write(settings.sandbox_dir),
+        category="File Operations",
+        read_only=False,
+        requires_confirmation=True,
+        enabled=_is_enabled("file_write"),
+    ))
+
+    logger.info("Registered %d tools (%d enabled)",
+                len(registry.list_tools()), len(registry.list_enabled_tools()))
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +232,18 @@ async def lifespan(app: FastAPI):
         len(doc_service.list_documents()),
     )
 
+    # ---- Tool registry (Phase 4) ----
+    tool_registry = ToolRegistry()
+    tools_config = _load_tools_config()
+    _register_tools(tool_registry, retriever, tools_config)
+
     # ---- Agent engine ----
     engine = AgentEngine(
         settings=settings,
         router=model_router,
         memory=memory,
         doc_service=doc_service,
+        tool_registry=tool_registry,
     )
 
     # ---- Ollama chat health check ----
@@ -131,6 +259,7 @@ async def lifespan(app: FastAPI):
     app.state.model_router = model_router
     app.state.engine = engine
     app.state.doc_service = doc_service
+    app.state.tool_registry = tool_registry
     app.state.ollama_ok = ollama_ok
     app.state.embed_ok = embed_ok
 
@@ -179,6 +308,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(models_router)
     app.include_router(documents_router)
+    app.include_router(tools_router)
 
     # ---- Health endpoint ----
     @app.get(

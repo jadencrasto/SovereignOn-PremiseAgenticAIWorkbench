@@ -1,4 +1,4 @@
-import type { StreamChunkPayload } from '../types';
+import type { StreamChunkPayload, ToolEvent } from '../types';
 
 export class ApiError extends Error {
   status: number;
@@ -59,6 +59,7 @@ export async function streamSSE(
     onSources: (sources: any[]) => void;
     onDone: (sessionId: string, modelUsed: string) => void;
     onError: (error: string) => void;
+    onToolEvent?: (event: ToolEvent) => void;
   },
   signal?: AbortSignal
 ): Promise<void> {
@@ -120,7 +121,20 @@ export async function streamSSE(
             callbacks.onDone(chunk.session_id || '', chunk.model_used || '');
           } else if (chunk.type === 'error') {
             callbacks.onError(chunk.content || 'An error occurred during generation');
+          } else if (chunk.type === 'tool_start' || chunk.type === 'tool_result') {
+            // Phase 4: Tool events
+            if (callbacks.onToolEvent) {
+              const toolEvent: ToolEvent = {
+                type: chunk.type,
+                tool: chunk.tool || '',
+                arguments: chunk.tool_args,
+                success: chunk.success,
+                summary: chunk.summary,
+              };
+              callbacks.onToolEvent(toolEvent);
+            }
           }
+          // agent_status events are silently consumed (no UI action needed yet)
         } catch (parseError) {
           console.warn('Failed to parse SSE line:', jsonStr, parseError);
         }

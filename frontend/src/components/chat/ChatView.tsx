@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback } from 'react';
-import type { ChatMessage, SourceReference } from '../../types';
+import type { ChatMessage, SourceReference, ToolEvent } from '../../types';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { useWorkbench } from '../../context/WorkbenchContext';
@@ -32,6 +32,7 @@ export const ChatView: React.FC = () => {
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         model_used: selectedModel,
         sources: [],
+        toolEvents: [],
         isStreaming: true,
       };
 
@@ -63,6 +64,15 @@ export const ChatView: React.FC = () => {
               setMessages((prev) =>
                 prev.map((msg) =>
                   msg.id === assistantId ? { ...msg, sources } : msg
+                )
+              );
+            },
+            onToolEvent: (event: ToolEvent) => {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId
+                    ? { ...msg, toolEvents: [...(msg.toolEvents || []), event] }
+                    : msg
                 )
               );
             },

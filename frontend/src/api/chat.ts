@@ -3,6 +3,7 @@ import type {
   ChatRequestPayload,
   ChatResponsePayload,
   SourceReference,
+  ToolEvent,
 } from '../types';
 
 export async function sendChatSync(
@@ -21,6 +22,7 @@ export async function streamChat(
     onSources: (sources: SourceReference[]) => void;
     onDone: (sessionId: string, modelUsed: string) => void;
     onError: (error: string) => void;
+    onToolEvent?: (event: ToolEvent) => void;
   },
   signal?: AbortSignal
 ): Promise<void> {

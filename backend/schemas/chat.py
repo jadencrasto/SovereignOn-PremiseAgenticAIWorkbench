@@ -57,6 +57,7 @@ class ChatRequest(BaseModel):
     - model       : optional override of the default model
                     (e.g. "ollama/qwen2.5:7b").
     - stream      : if True, the response is SSE; otherwise JSON.
+    - tools_enabled : if True (default), the agent may use tools.
     """
     session_id: Optional[str] = Field(
         default=None,
@@ -68,6 +69,10 @@ class ChatRequest(BaseModel):
         description="Override model in 'provider/model' format, e.g. 'ollama/qwen2.5:7b'",
     )
     stream: bool = Field(default=True)
+    tools_enabled: Optional[bool] = Field(
+        default=True,
+        description="Enable agentic tool execution. Set to false for plain chat.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -90,16 +95,24 @@ class StreamChunk(BaseModel):
     A single chunk sent over the SSE stream.
 
     type values:
-      'delta'    — partial assistant text
-      'done'     — stream finished; content holds final session_id
-      'sources'  — sent just before 'done' with retrieved evidence list
-      'error'    — something went wrong; content holds the error message
+      'delta'        — partial assistant text
+      'done'         — stream finished; content holds final session_id
+      'sources'      — sent just before 'done' with retrieved evidence list
+      'error'        — something went wrong; content holds the error message
+      'tool_start'   — agent is executing a tool
+      'tool_result'  — tool execution completed
+      'agent_status' — agent state update (e.g. "thinking", "planning")
     """
-    type: str  # 'delta' | 'done' | 'sources' | 'error'
+    type: str  # 'delta' | 'done' | 'sources' | 'error' | 'tool_start' | 'tool_result' | 'agent_status'
     content: str
     session_id: Optional[str] = None
     model_used: Optional[str] = None
     sources: Optional[List[_SourceRef]] = None
+    # Tool event fields
+    tool: Optional[str] = None
+    tool_args: Optional[dict] = None
+    success: Optional[bool] = None
+    summary: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

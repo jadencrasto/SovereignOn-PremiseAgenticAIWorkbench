@@ -10,6 +10,15 @@ export interface SourceReference {
   file_type?: string;
 }
 
+// Phase 4: Tool event types
+export interface ToolEvent {
+  type: 'tool_start' | 'tool_result';
+  tool: string;
+  arguments?: Record<string, string>;
+  success?: boolean;
+  summary?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -17,6 +26,7 @@ export interface ChatMessage {
   timestamp: string;
   model_used?: string;
   sources?: SourceReference[];
+  toolEvents?: ToolEvent[];
   isStreaming?: boolean;
   error?: boolean;
 }
@@ -26,6 +36,7 @@ export interface ChatRequestPayload {
   message: string;
   model?: string;
   stream?: boolean;
+  tools_enabled?: boolean;
 }
 
 export interface ChatResponsePayload {
@@ -39,11 +50,16 @@ export interface ChatResponsePayload {
 }
 
 export interface StreamChunkPayload {
-  type: 'delta' | 'sources' | 'done' | 'error';
+  type: 'delta' | 'sources' | 'done' | 'error' | 'tool_start' | 'tool_result' | 'agent_status';
   content: string;
   session_id?: string;
   model_used?: string;
   sources?: SourceReference[];
+  // Tool event fields
+  tool?: string;
+  tool_args?: Record<string, string>;
+  success?: boolean;
+  summary?: string;
 }
 
 export interface DocumentItem {
@@ -85,6 +101,22 @@ export interface HealthResponse {
   model_provider: string;
   default_model: string;
   ollama_url: string;
+}
+
+// Phase 4: Tool info from GET /api/tools
+export interface ToolInfo {
+  name: string;
+  description: string;
+  category: string;
+  input_schema: Record<string, any>;
+  read_only: boolean;
+  requires_confirmation: boolean;
+  enabled: boolean;
+}
+
+export interface ToolsListResponse {
+  tools: ToolInfo[];
+  total: number;
 }
 
 export type ActiveTab = 'chat' | 'documents' | 'models' | 'tools' | 'settings';

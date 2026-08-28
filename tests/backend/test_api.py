@@ -126,18 +126,18 @@ class TestChatNonStreaming:
 
 class TestChatStreaming:
     def test_stream_returns_200(self, client):
-        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True}) as r:
+        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True, "tools_enabled": False}) as r:
             assert r.status_code == 200
             assert "text/event-stream" in r.headers["content-type"]
 
     def test_stream_emits_sse_events(self, client):
-        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True}) as r:
+        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True, "tools_enabled": False}) as r:
             events = list(r.iter_lines())
         data_lines = [l for l in events if l.startswith("data: ")]
         assert len(data_lines) > 0
 
     def test_stream_final_event_is_done(self, client):
-        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True}) as r:
+        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True, "tools_enabled": False}) as r:
             lines = list(r.iter_lines())
         data_lines = [l[6:] for l in lines if l.startswith("data: ")]
         last = json.loads(data_lines[-1])
@@ -145,7 +145,7 @@ class TestChatStreaming:
         assert "session_id" in last
 
     def test_stream_has_delta_events(self, client):
-        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True}) as r:
+        with client.stream("POST", "/api/chat", json={"message": "Hello!", "stream": True, "tools_enabled": False}) as r:
             lines = list(r.iter_lines())
         data_lines = [json.loads(l[6:]) for l in lines if l.startswith("data: ")]
         delta_events = [e for e in data_lines if e["type"] == "delta"]
