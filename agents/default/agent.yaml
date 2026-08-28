@@ -1,0 +1,31 @@
+# Default Agent — Sovereign On-Premise Agentic AI Workbench
+# This is the general-purpose assistant agent used in the MVP.
+
+name: default
+display_name: "Sovereign Assistant"
+description: >
+  General-purpose AI assistant with document reasoning, file operations,
+  and code execution capabilities. Operates fully on-premise.
+
+# Model preferences (can be overridden by user at runtime)
+model:
+  default: ollama/qwen2.5:7b
+  fallback:
+    - ollama/llava:7b
+
+# Tools this agent is allowed to use
+tools:
+  - file_read
+  - file_write
+  - file_list
+  - code_execute
+
+# RAG settings
+rag:
+  enabled: true
+  top_k: 5
+
+# Agent loop settings
+max_iterations: 10        # max tool-call loops before forced stop
+max_tokens: 4096          # max response tokens per turn
+temperature: 0.7

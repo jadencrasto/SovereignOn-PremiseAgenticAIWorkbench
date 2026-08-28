@@ -1,0 +1,46 @@
+# Model Routing Configuration — Sovereign On-Premise Agentic AI Workbench
+# -----------------------------------------------------------------------
+# This file defines available model providers and routing rules.
+# Environment variables are referenced with ${VAR_NAME} syntax.
+# The backend config.py loads and resolves these at startup.
+
+providers:
+  ollama:
+    type: ollama
+    base_url: ${OLLAMA_BASE_URL}
+    models:
+      - qwen2.5:7b
+      - llava:7b
+    embedding_models:
+      - nomic-embed-text
+
+  # Uncomment to enable OpenAI-compatible provider
+  # openai:
+  #   type: openai_compatible
+  #   base_url: ${OPENAI_BASE_URL}
+  #   api_key: ${OPENAI_API_KEY}
+  #   models:
+  #     - gpt-4o
+  #     - gpt-4o-mini
+
+  # Uncomment to enable OpenRouter
+  # openrouter:
+  #   type: openai_compatible
+  #   base_url: ${OPENROUTER_BASE_URL}
+  #   api_key: ${OPENROUTER_API_KEY}
+  #   models:
+  #     - anthropic/claude-sonnet-4
+  #     - meta-llama/llama-3-70b-instruct
+
+# Default model used when none is specified
+default_model: ollama/qwen2.5:7b
+
+# Fallback chain — tried in order if the primary model fails
+fallback_chain:
+  - ollama/qwen2.5:7b
+  - ollama/llava:7b
+
+# Embedding model for RAG pipeline
+embedding:
+  provider: ollama
+  model: nomic-embed-text
