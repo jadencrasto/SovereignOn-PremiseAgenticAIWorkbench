@@ -208,7 +208,7 @@ export interface ToolsListResponse {
   total: number;
 }
 
-export type ActiveTab = 'chat' | 'documents' | 'models' | 'tools' | 'settings' | 'tasks';
+export type ActiveTab = 'chat' | 'documents' | 'models' | 'tools' | 'settings' | 'tasks' | 'audit' | 'health' | 'security';
 
 // Phase 5: Allowed image MIME types for client-side validation
 export const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
@@ -278,4 +278,89 @@ export interface TaskDetail {
 export interface TaskListResponse {
   tasks: TaskSummary[];
   total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7: Authentication, RBAC, Audit & Observability Types
+// ---------------------------------------------------------------------------
+
+export type UserRole = 'admin' | 'operator' | 'viewer';
+
+export interface User {
+  id: string;
+  username: string;
+  role: UserRole;
+  is_active: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at?: string | null;
+}
+
+export interface AuditEvent {
+  event_id: string;
+  timestamp: string;
+  session_id?: string | null;
+  user_id?: string | null;
+  role?: string | null;
+  event_type: string;
+  action?: string | null;
+  resource?: string | null;
+  tool?: string | null;
+  task_id?: string | null;
+  step_id?: string | null;
+  success: boolean;
+  duration_ms?: number | null;
+  metadata: Record<string, any>;
+  failure_reason?: string | null;
+  request_id?: string | null;
+}
+
+export interface AuditSummary {
+  total_events: number;
+  failed_events: number;
+  denied_actions: number;
+  tool_executions: number;
+  auth_failures: number;
+}
+
+export interface AuditListResponse {
+  events: AuditEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface SecurityDiagnosticItem {
+  id: string;
+  category: string;
+  title: string;
+  status: 'PASS' | 'WARN' | 'FAIL';
+  details: string;
+  remediation?: string;
+}
+
+export interface SecurityStatusResponse {
+  overall_status: 'PASS' | 'WARN' | 'FAIL';
+  diagnostics: SecurityDiagnosticItem[];
+}
+
+export interface ComponentHealth {
+  name: string;
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  details: string;
+  latency_ms?: number | null;
+}
+
+export interface ReadinessResponse {
+  ready: boolean;
+  status: string;
+  components: ComponentHealth[];
+  cached: boolean;
+}
+
+export interface TaskMonitoringSummary {
+  total_tasks: number;
+  stale_tasks: number;
+  counts_by_status: Record<string, number>;
+  grouped_tasks: Record<string, any[]>;
 }

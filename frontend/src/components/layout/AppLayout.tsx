@@ -9,6 +9,9 @@ import { ModelsView } from '../models/ModelsView';
 import { ToolsView } from '../tools/ToolsView';
 import { SettingsView } from '../settings/SettingsView';
 import { TaskHistoryView } from '../tasks/TaskHistoryView';
+import { AuditDashboard } from '../audit/AuditDashboard';
+import { SystemHealth } from '../health/SystemHealth';
+import { SecurityDiagnostics } from '../security/SecurityDiagnostics';
 
 export const AppLayout: React.FC = () => {
   const { activeTab } = useWorkbench();
@@ -28,6 +31,9 @@ export const AppLayout: React.FC = () => {
           {activeTab === 'documents' && <DocumentsView />}
           {activeTab === 'models' && <ModelsView />}
           {activeTab === 'tools' && <ToolsView />}
+          {activeTab === 'audit' && <AuditDashboard />}
+          {activeTab === 'health' && <SystemHealth />}
+          {activeTab === 'security' && <SecurityDiagnostics />}
           {activeTab === 'settings' && <SettingsView />}
         </main>
       </div>

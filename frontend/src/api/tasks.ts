@@ -69,3 +69,10 @@ export async function fetchTaskApprovals(
     `/api/tasks/${encodeURIComponent(taskId)}/approvals`
   );
 }
+
+/**
+ * Phase 7: Fetch task operational monitoring summary.
+ */
+export async function fetchTaskMonitoringSummary(): Promise<any> {
+  return apiRequest<any>('/api/tasks/monitor');
+}

@@ -118,17 +118,19 @@ class ToolRegistry:
         name: str,
         arguments: Dict[str, Any],
         session_id: str = "",
+        user_role: Optional[str] = None,
     ) -> ToolResult:
         """
-        Validate arguments and execute a tool.
+        Validate arguments, enforce RBAC permissions, and execute a tool.
 
         Steps:
             1. Check tool exists
             2. Check tool is enabled
-            3. Validate arguments via Pydantic
-            4. Execute the tool function
-            5. Log audit entry
-            6. Return structured ToolResult
+            3. Enforce RBAC permission (if user_role provided)
+            4. Validate arguments via Pydantic
+            5. Execute the tool function
+            6. Log audit entry
+            7. Return structured ToolResult
 
         Never raises — all failures are captured in ToolResult.
         """
@@ -148,6 +150,28 @@ class ToolRegistry:
                 tool=name, success=False,
                 error=f"Tool '{name}' is currently disabled.",
             )
+
+        # --- Enforce RBAC (Phase 7) ---
+        if user_role is not None:
+            from backend.auth.models import UserRole, Permission, has_permission
+            # Viewer cannot execute any tool
+            if user_role == UserRole.VIEWER.value:
+                return ToolResult(
+                    tool=name, success=False,
+                    error=f"Permission denied: role '{user_role}' cannot execute tools.",
+                )
+            # Mutating tool requires EXECUTE_WRITE_TOOLS
+            if not tool.read_only and not has_permission(user_role, Permission.EXECUTE_WRITE_TOOLS):
+                return ToolResult(
+                    tool=name, success=False,
+                    error=f"Permission denied: role '{user_role}' cannot execute mutating tool '{name}'.",
+                )
+            # Non-mutating tool requires EXECUTE_READ_TOOLS
+            if tool.read_only and not has_permission(user_role, Permission.EXECUTE_READ_TOOLS):
+                return ToolResult(
+                    tool=name, success=False,
+                    error=f"Permission denied: role '{user_role}' cannot execute tool '{name}'.",
+                )
 
         # --- Validate arguments ---
         try:
@@ -169,7 +193,15 @@ class ToolRegistry:
 
         # --- Execute ---
         try:
-            result = await tool.execute_fn(validated)
+            import inspect
+            if inspect.iscoroutinefunction(tool.execute_fn):
+                result = await tool.execute_fn(validated)
+            else:
+                res = tool.execute_fn(validated)
+                if inspect.iscoroutine(res):
+                    result = await res
+                else:
+                    result = res
             duration = (time.monotonic() - t0) * 1000
 
             self._audit_log(
@@ -260,6 +292,12 @@ class ToolRegistry:
     # Audit logging
     # ------------------------------------------------------------------
 
+    _audit_logger: Any = None
+
+    def set_audit_logger(self, audit_logger: Any) -> None:
+        """Inject the centralized AuditLogger (Phase 7)."""
+        self._audit_logger = audit_logger
+
     def _audit_log(
         self,
         session_id: str,
@@ -290,6 +328,21 @@ class ToolRegistry:
             logger.info("TOOL_AUDIT | %s", json.dumps(audit))
         else:
             logger.warning("TOOL_AUDIT | %s", json.dumps(audit))
+
+        # Phase 7: Persist into centralized audit table
+        if self._audit_logger:
+            try:
+                self._audit_logger.log(
+                    event_type="tool.execution",
+                    tool=tool_name,
+                    session_id=session_id,
+                    success=success,
+                    duration_ms=round(duration_ms, 2),
+                    failure_reason=result_summary if not success else None,
+                    metadata={"arguments": safe_args, "summary": result_summary[:200]},
+                )
+            except Exception as exc:
+                logger.error("Failed to forward tool execution to AuditLogger: %s", exc)
 
     @staticmethod
     def _summarize_result(result: Any) -> str:

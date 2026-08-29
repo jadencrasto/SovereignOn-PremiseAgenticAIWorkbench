@@ -20,7 +20,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from backend.tools.safety import sanitize_filename
+from backend.tools.safety import atomic_write_file, sanitize_filename, validate_path_within
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,10 @@ class FileWriteInput(BaseModel):
         min_length=1,
         description="Text content to write to the file.",
     )
+    overwrite: bool = Field(
+        default=False,
+        description="Whether to overwrite the file if it already exists.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +64,7 @@ def create_file_write(sandbox_dir: Path) -> callable:
     """
 
     async def execute_file_write(args: FileWriteInput) -> dict:
-        """Create an output file in the sandbox directory."""
+        """Create an output file atomically in the sandbox directory."""
         # Validate content size
         content_bytes = args.content.encode("utf-8")
         if len(content_bytes) > _MAX_WRITE_BYTES:
@@ -72,20 +76,19 @@ def create_file_write(sandbox_dir: Path) -> callable:
         # Sanitize filename
         safe_name = sanitize_filename(args.filename)
 
-        # Ensure sandbox exists
-        sandbox_dir.mkdir(parents=True, exist_ok=True)
+        # Validate path stays strictly inside sandbox_dir
+        target = validate_path_within(safe_name, sandbox_dir)
 
-        # Generate unique name if file exists
-        target = sandbox_dir / safe_name
-        if target.exists():
+        # If file exists and overwrite is False, generate unique filename
+        if target.exists() and not args.overwrite:
             stem = Path(safe_name).stem
             suffix = Path(safe_name).suffix
             unique_id = uuid.uuid4().hex[:8]
             safe_name = f"{stem}_{unique_id}{suffix}"
-            target = sandbox_dir / safe_name
+            target = validate_path_within(safe_name, sandbox_dir)
 
-        # Write file
-        target.write_bytes(content_bytes)
+        # Write file atomically
+        atomic_write_file(target, args.content, encoding="utf-8", overwrite=True)
 
         rel_path = f"data/sandbox/{safe_name}"
         logger.info(

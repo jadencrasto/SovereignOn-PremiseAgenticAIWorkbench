@@ -93,6 +93,11 @@ class ApprovalManager:
     ) -> None:
         self._store = store
         self._timeout_seconds = timeout_seconds
+        self._audit_logger: Any = None
+
+    def set_audit_logger(self, audit_logger: Any) -> None:
+        """Inject the centralized AuditLogger (Phase 7)."""
+        self._audit_logger = audit_logger
 
     def request_approval(
         self,
@@ -104,12 +109,15 @@ class ApprovalManager:
         reason: str = "",
     ) -> ApprovalRequest:
         """
-        Create a new approval request and persist it.
+        Create and persist a pending approval request.
+
+        The arguments are hashed deterministically with SHA-256.  When the
+        step is later executed, the arguments MUST hash to the same value,
+        otherwise execution is rejected.
         """
+        args_hash = compute_arguments_hash(task_id, step_id, tool_name, arguments)
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=self._timeout_seconds)
-
-        args_hash = compute_arguments_hash(task_id, step_id, tool_name, arguments)
 
         approval = ApprovalRequest(
             task_id=task_id,
@@ -140,9 +148,21 @@ class ApprovalManager:
             "risk_level": risk_level,
         })
 
+        if self._audit_logger:
+            self._audit_logger.log(
+                event_type="task.approval_requested",
+                action="approval_requested",
+                resource=f"task:{task_id}/step:{step_id}",
+                tool=tool_name,
+                task_id=task_id,
+                step_id=step_id,
+                success=True,
+                metadata={"risk_level": risk_level, "reason": reason, "hash": args_hash[:16]},
+            )
+
         return approval
 
-    def approve(self, approval_id: str) -> ApprovalRequest:
+    def approve(self, approval_id: str, user_id: Optional[str] = None) -> ApprovalRequest:
         """
         Approve a pending request.
 
@@ -174,9 +194,22 @@ class ApprovalManager:
             "risk_level": approval.risk_level,
         })
 
+        if self._audit_logger:
+            self._audit_logger.log(
+                event_type="task.approval_granted",
+                action="approval_granted",
+                resource=f"task:{approval.task_id}/step:{approval.step_id}",
+                tool=approval.tool_name,
+                task_id=approval.task_id,
+                step_id=approval.step_id,
+                user_id=user_id,
+                success=True,
+                metadata={"approval_id": approval_id},
+            )
+
         return approval
 
-    def reject(self, approval_id: str, reason: str = "") -> ApprovalRequest:
+    def reject(self, approval_id: str, reason: str = "", user_id: Optional[str] = None) -> ApprovalRequest:
         """
         Reject a pending request.
         """
@@ -204,6 +237,20 @@ class ApprovalManager:
             "risk_level": approval.risk_level,
             "result_summary": reason[:200],
         })
+
+        if self._audit_logger:
+            self._audit_logger.log(
+                event_type="task.approval_rejected",
+                action="approval_rejected",
+                resource=f"task:{approval.task_id}/step:{approval.step_id}",
+                tool=approval.tool_name,
+                task_id=approval.task_id,
+                step_id=approval.step_id,
+                user_id=user_id,
+                success=False,
+                failure_reason=reason or "Rejected by operator",
+                metadata={"approval_id": approval_id, "reason": reason[:200]},
+            )
 
         return approval
 
@@ -234,20 +281,19 @@ class ApprovalManager:
         step_id: str,
         tool_name: str,
         arguments: Dict[str, Any],
+        tool_registry: Any = None,
     ) -> bool:
         """
-        Verify that an approved approval matches the exact execution context.
+        Verify that an approval is valid and cryptographically bound to the
+        exact operation about to be executed.
 
-        This MUST be called before executing an approved step.
-        Recomputes the arguments hash and compares with the approved hash.
+        Recomputes the SHA-256 hash from the current arguments and compares
+        it to the hash that was approved.
 
-        Returns True only if ALL of the following match:
-            - approval exists and is 'approved'
-            - approval is not expired
-            - task_id matches
-            - step_id matches
-            - tool_name matches
-            - arguments hash matches (recomputed from current arguments)
+        Phase 7: Also verifies that the tool is still registered and enabled
+        in ToolRegistry (closing the config drift gap).
+
+        Returns True only if all checks pass.
         """
         row = self._store.get_approval(approval_id)
         if row is None:
@@ -295,6 +341,18 @@ class ApprovalManager:
                 approval_id, approval.tool_name, tool_name,
             )
             return False
+
+        # Phase 7: ToolRegistry config drift check
+        if tool_registry is not None:
+            tool = tool_registry.get(tool_name) if hasattr(tool_registry, "get") else (
+                tool_registry.get_tool(tool_name) if hasattr(tool_registry, "get_tool") else None
+            )
+            if not tool or not getattr(tool, "enabled", True):
+                logger.warning(
+                    "approval_verify_failed | approval=%s reason=tool_disabled_or_missing tool=%s",
+                    approval_id, tool_name,
+                )
+                return False
 
         # Recompute hash from current arguments and compare
         current_hash = compute_arguments_hash(task_id, step_id, tool_name, arguments)

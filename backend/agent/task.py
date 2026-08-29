@@ -37,21 +37,25 @@ class TaskStatus:
     EXECUTING = "executing"
     COMPLETED = "completed"
     FAILED = "failed"
+    FAILED_TIMEOUT = "failed_timeout"
+    FAILED_INTERRUPTED = "failed_interrupted"
     CANCELLED = "cancelled"
 
 
 # Allowed state transitions
 _VALID_TASK_TRANSITIONS = {
-    TaskStatus.PENDING: {TaskStatus.PLANNING, TaskStatus.CANCELLED},
-    TaskStatus.PLANNING: {TaskStatus.AWAITING_APPROVAL, TaskStatus.EXECUTING, TaskStatus.FAILED, TaskStatus.CANCELLED},
-    TaskStatus.AWAITING_APPROVAL: {TaskStatus.EXECUTING, TaskStatus.CANCELLED, TaskStatus.FAILED},
+    TaskStatus.PENDING: {TaskStatus.PLANNING, TaskStatus.CANCELLED, TaskStatus.FAILED_INTERRUPTED},
+    TaskStatus.PLANNING: {TaskStatus.AWAITING_APPROVAL, TaskStatus.EXECUTING, TaskStatus.FAILED, TaskStatus.FAILED_TIMEOUT, TaskStatus.FAILED_INTERRUPTED, TaskStatus.CANCELLED},
+    TaskStatus.AWAITING_APPROVAL: {TaskStatus.EXECUTING, TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.FAILED_TIMEOUT, TaskStatus.FAILED_INTERRUPTED},
     TaskStatus.EXECUTING: {
-        TaskStatus.COMPLETED, TaskStatus.FAILED,
-        TaskStatus.AWAITING_APPROVAL, TaskStatus.CANCELLED,
+        TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.FAILED_TIMEOUT,
+        TaskStatus.FAILED_INTERRUPTED, TaskStatus.AWAITING_APPROVAL, TaskStatus.CANCELLED,
     },
-    TaskStatus.COMPLETED: set(),   # terminal
-    TaskStatus.FAILED: set(),      # terminal
-    TaskStatus.CANCELLED: set(),   # terminal
+    TaskStatus.COMPLETED: set(),           # terminal
+    TaskStatus.FAILED: set(),              # terminal
+    TaskStatus.FAILED_TIMEOUT: set(),      # terminal
+    TaskStatus.FAILED_INTERRUPTED: set(),  # terminal
+    TaskStatus.CANCELLED: set(),           # terminal
 }
 
 _VALID_STEP_TRANSITIONS = {
@@ -308,6 +312,130 @@ class TaskManager:
             "completed_at": task.completed_at,
         })
 
+    def recover_tasks_on_startup(
+        self,
+        tool_registry: Any = None,
+        approval_manager: Any = None,
+    ) -> Dict[str, int]:
+        """
+        Scan and recover tasks on server restart per Phase 7 restart recovery rules:
+        - EXECUTING: Mark FAILED_INTERRUPTED (never auto-resume in-flight side effects).
+        - AWAITING_APPROVAL: Re-verify approval binding against current plan & current ToolRegistry state.
+          If tool was disabled or changed, invalidate approval to force re-approval.
+        - PLANNING / QUEUED: Safe to leave for replanning/validation on resume.
+
+        Returns counts of recovered/updated tasks.
+        """
+        counts = {"interrupted": 0, "re_approval_required": 0, "active": 0}
+        active_tasks = self._store.list_tasks()
+
+        for t_row in active_tasks:
+            status = t_row.get("status")
+            task_id = t_row.get("task_id")
+
+            if status == TaskStatus.EXECUTING:
+                # Mark as interrupted — cannot assume in-flight state completed safely
+                self.update_status(
+                    task_id,
+                    TaskStatus.FAILED_INTERRUPTED,
+                    error="Task execution was interrupted by a server restart. Manual review or replanning required.",
+                )
+                counts["interrupted"] += 1
+                logger.warning("Task %s recovered: Marked FAILED_INTERRUPTED due to restart.", task_id)
+
+            elif status == TaskStatus.AWAITING_APPROVAL:
+                # Re-verify approval against current ToolRegistry state
+                if tool_registry and approval_manager:
+                    pending = approval_manager.get_pending_for_task(task_id)
+                    if pending:
+                        tool = tool_registry.get(pending.tool_name) if hasattr(tool_registry, "get") else (
+                            tool_registry.get_tool(pending.tool_name) if hasattr(tool_registry, "get_tool") else None
+                        )
+                        if not tool or not tool.enabled:
+                            # Tool disabled or missing — invalidate pending approval
+                            approval_manager.reject(
+                                pending.approval_id,
+                                reason="Tool configuration changed or tool disabled during server restart. Re-approval required.",
+                            )
+                            counts["re_approval_required"] += 1
+                            logger.warning(
+                                "Task %s approval invalidated: Tool '%s' disabled or missing on restart.",
+                                task_id, pending.tool_name,
+                            )
+                counts["active"] += 1
+
+            elif status in (TaskStatus.PENDING, TaskStatus.PLANNING):
+                counts["active"] += 1
+
+        return counts
+
+    def get_monitoring_summary(self, stale_threshold_seconds: int = 3600) -> Dict[str, Any]:
+        """
+        Return operational task monitoring metrics:
+        - Tasks grouped by status.
+        - Stale task count (non-terminal tasks updated > threshold ago).
+        - Recent task details with execution duration.
+        """
+        all_tasks = self.list_tasks(limit=100)
+        now = datetime.now(timezone.utc)
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {
+            TaskStatus.PENDING: [],
+            TaskStatus.PLANNING: [],
+            TaskStatus.AWAITING_APPROVAL: [],
+            TaskStatus.EXECUTING: [],
+            TaskStatus.COMPLETED: [],
+            TaskStatus.FAILED: [],
+            TaskStatus.FAILED_TIMEOUT: [],
+            TaskStatus.FAILED_INTERRUPTED: [],
+            TaskStatus.CANCELLED: [],
+        }
+
+        stale_count = 0
+
+        for t in all_tasks:
+            t_status = t.status
+            if t_status not in grouped:
+                grouped[t_status] = []
+
+            # Check staleness for non-terminal states
+            is_stale = False
+            if t_status in (TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.AWAITING_APPROVAL, TaskStatus.EXECUTING):
+                try:
+                    updated_at = datetime.fromisoformat(t.updated_at)
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+                    diff = (now - updated_at).total_seconds()
+                    if diff > stale_threshold_seconds:
+                        is_stale = True
+                        stale_count += 1
+                except Exception as exc:
+                    logger.warning("Failed checking task staleness: %s", exc)
+
+            step_count = len(t.plan.steps) if t.plan and t.plan.steps else 0
+            completed_steps = sum(1 for s in t.plan.steps if s.status == "completed") if t.plan and t.plan.steps else 0
+
+            grouped[t_status].append({
+                "task_id": t.task_id,
+                "session_id": t.session_id,
+                "user_request": t.user_request[:150],
+                "status": t.status,
+                "step_count": step_count,
+                "completed_steps": completed_steps,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "completed_at": t.completed_at,
+                "is_stale": is_stale,
+                "error": t.error,
+            })
+
+        return {
+            "total_tasks": len(all_tasks),
+            "stale_tasks": stale_count,
+            "counts_by_status": {k: len(v) for k, v in grouped.items()},
+            "grouped_tasks": grouped,
+        }
+
     @staticmethod
     def _from_row(row: Dict[str, Any]) -> TaskState:
         """Reconstruct TaskState from a database row."""
@@ -316,7 +444,7 @@ class TaskManager:
             try:
                 plan = AgentPlan.model_validate_json(row["plan_json"])
             except Exception as exc:
-                logger.warning("Failed to parse plan JSON for task %s: %s", row["task_id"], exc)
+                logger.warning("Failed to parse plan JSON for task %s: %s", row.get("task_id"), exc)
 
         return TaskState(
             task_id=row["task_id"],

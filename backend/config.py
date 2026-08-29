@@ -87,12 +87,29 @@ class Settings(BaseSettings):
     log_dir: Path = Field(default=PROJECT_ROOT / "data" / "logs")
 
     # ------------------------------------------------------------------
-    # Phase 6: Task persistence
+    # Phase 6 & 7: Task persistence & Timeouts
     # ------------------------------------------------------------------
     tasks_dir: Path = Field(default=PROJECT_ROOT / "data" / "tasks")
     tasks_db_path: Path = Field(default=PROJECT_ROOT / "data" / "tasks" / "tasks.db")
     approval_timeout_seconds: int = Field(default=300)
     max_plan_steps: int = Field(default=10)
+    tool_timeout_seconds: int = Field(default=30)
+    model_timeout_seconds: int = Field(default=120)
+
+    # ------------------------------------------------------------------
+    # Phase 7: Local Authentication & RBAC
+    # ------------------------------------------------------------------
+    auth_enabled: bool = Field(default=True)
+    auth_idle_timeout_seconds: int = Field(default=28800)       # 8 hours
+    auth_max_session_seconds: int = Field(default=86400)         # 24 hours
+    auth_lockout_attempts: int = Field(default=5)
+    auth_lockout_window_seconds: int = Field(default=900)        # 15 minutes
+
+    # ------------------------------------------------------------------
+    # Phase 7: Audit Logging
+    # ------------------------------------------------------------------
+    audit_retention_days: int = Field(default=180)
+    audit_max_rows: int = Field(default=50000)
 
     # ------------------------------------------------------------------
     # Agent config paths

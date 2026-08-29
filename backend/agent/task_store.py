@@ -135,7 +135,7 @@ class TaskStore:
                         task.get("result"),
                         task.get("error"),
                         task.get("created_at", now),
-                        now,
+                        task.get("updated_at", now),
                         task.get("completed_at"),
                     ),
                 )

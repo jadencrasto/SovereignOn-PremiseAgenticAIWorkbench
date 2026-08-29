@@ -55,6 +55,25 @@ def get_engine(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/tasks/monitor — Operational Monitoring (Phase 7)
+# ---------------------------------------------------------------------------
+
+@router.get("/monitor", summary="Operational task monitoring metrics (Phase 7)")
+async def monitor_tasks(
+    request: Request,
+    stale_threshold_seconds: int = Query(default=3600, ge=60, le=86400),
+    task_manager=Depends(get_task_manager),
+):
+    """
+    Return operational aggregation of all agent tasks:
+    - Grouped by lifecycle status (including timeout & interrupted)
+    - Stale task counts
+    - Total task metrics
+    """
+    return task_manager.get_monitoring_summary(stale_threshold_seconds=stale_threshold_seconds)
+
+
+# ---------------------------------------------------------------------------
 # GET /api/tasks — list tasks
 # ---------------------------------------------------------------------------
 
