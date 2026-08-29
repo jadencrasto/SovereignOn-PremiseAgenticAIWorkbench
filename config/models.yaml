@@ -1,8 +1,7 @@
 # Model Routing Configuration — Sovereign On-Premise Agentic AI Workbench
 # -----------------------------------------------------------------------
 # This file defines available model providers and routing rules.
-# Environment variables are referenced with ${VAR_NAME} syntax.
-# The backend config.py loads and resolves these at startup.
+# Phase 5: capabilities section added to each model for capability-based routing.
 
 providers:
   ollama:
@@ -44,3 +43,29 @@ fallback_chain:
 embedding:
   provider: ollama
   model: nomic-embed-text
+
+# Phase 5: Model capabilities for capability-based routing
+# Each key is the full "provider/model" identifier
+models:
+  ollama/qwen2.5:7b:
+    capabilities:
+      - chat
+    description: "General-purpose local reasoning model with strong instruction following"
+
+  ollama/llava:7b:
+    capabilities:
+      - chat
+      - vision
+    description: "Multimodal vision + text model for image understanding"
+
+  ollama/nomic-embed-text:
+    capabilities:
+      - embedding
+    description: "Dense text embedding model powering the local RAG pipeline"
+
+# Phase 5: Capability routing rules
+# Defines which model to use for each capability
+capability_routing:
+  chat: ollama/qwen2.5:7b
+  vision: ollama/llava:7b
+  embedding: ollama/nomic-embed-text

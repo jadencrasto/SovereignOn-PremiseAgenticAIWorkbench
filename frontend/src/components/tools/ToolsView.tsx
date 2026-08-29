@@ -120,15 +120,26 @@ export const ToolsView: React.FC = () => {
                   </div>
 
                   <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
                       <span className={tool.read_only ? 'text-emerald-400' : 'text-amber-400'}>
                         {tool.read_only ? '● Read-Only' : '● Mutating'}
                       </span>
-                      {tool.requires_confirmation && (
-                        <span className="text-amber-400/70">Requires Confirmation</span>
+                      <span className={`px-1.5 py-0.2 text-[10px] uppercase font-semibold rounded border ${
+                        tool.risk_level === 'high'
+                          ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                          : tool.risk_level === 'medium'
+                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                          : 'bg-sky-500/10 text-sky-400 border-sky-500/30'
+                      }`}>
+                        {tool.risk_level || 'low'} Risk
+                      </span>
+                      {tool.requires_approval && (
+                        <span className="px-1.5 py-0.2 text-[10px] uppercase font-semibold rounded bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                          Approval Gate
+                        </span>
                       )}
                     </div>
-                    <span className="text-slate-500">Registry ID: {tool.name}</span>
+                    <span className="text-slate-500 text-[11px]">ID: {tool.name}</span>
                   </div>
                 </div>
               );

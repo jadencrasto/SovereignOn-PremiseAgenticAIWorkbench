@@ -36,6 +36,8 @@ async def list_tools(request: Request):
             input_schema=schema,
             read_only=tool.read_only,
             requires_confirmation=tool.requires_confirmation,
+            requires_approval=tool.requires_approval,
+            risk_level=tool.risk_level,
             enabled=tool.enabled,
         ))
 

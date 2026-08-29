@@ -5,6 +5,10 @@ Pydantic models for the chat API.
 
 These are the data contracts between the frontend and backend.
 No internal implementation details leak through these schemas.
+
+Phase 5 additions (fully backward-compatible):
+  - ImageAttachment — metadata for an uploaded image (no base64 returned to client)
+  - Multimodal chat request fields for /api/chat/multimodal
 """
 
 from __future__ import annotations
@@ -35,6 +39,25 @@ class MessageRole(str, Enum):
     system = "system"
     user = "user"
     assistant = "assistant"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Image attachment metadata
+# ---------------------------------------------------------------------------
+
+class ImageAttachment(BaseModel):
+    """
+    Metadata for an image attached to a multimodal chat request.
+
+    IMPORTANT: Base64 image data is NEVER returned here.
+    Only minimal metadata is exposed to the client.
+    """
+    attachment_id: str = Field(description="Unique ID for this image attachment")
+    filename: str = Field(description="Sanitized filename")
+    mime_type: str = Field(description="Detected MIME type, e.g. 'image/png'")
+    size_bytes: int = Field(description="File size in bytes")
+    width: Optional[int] = Field(default=None, description="Image width in pixels (if detected)")
+    height: Optional[int] = Field(default=None, description="Image height in pixels (if detected)")
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +96,10 @@ class ChatRequest(BaseModel):
         default=True,
         description="Enable agentic tool execution. Set to false for plain chat.",
     )
+    planning_enabled: Optional[bool] = Field(
+        default=True,
+        description="Phase 6: Enable agent planning for complex multi-step requests.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +128,9 @@ class StreamChunk(BaseModel):
       'error'        — something went wrong; content holds the error message
       'tool_start'   — agent is executing a tool
       'tool_result'  — tool execution completed
-      'agent_status' — agent state update (e.g. "thinking", "planning")
+      'agent_status' — agent state update (e.g. "thinking", "analyzing_image")
     """
-    type: str  # 'delta' | 'done' | 'sources' | 'error' | 'tool_start' | 'tool_result' | 'agent_status'
+    type: str  # 'delta' | 'done' | 'sources' | 'error' | 'tool_start' | 'tool_result' | 'agent_status' | 'plan_created' | 'plan_step' | 'approval_required' | 'approval_granted' | 'approval_rejected' | 'task_started' | 'task_completed' | 'task_failed' | 'task_cancelled'
     content: str
     session_id: Optional[str] = None
     model_used: Optional[str] = None
@@ -113,6 +140,8 @@ class StreamChunk(BaseModel):
     tool_args: Optional[dict] = None
     success: Optional[bool] = None
     summary: Optional[str] = None
+    # Phase 5: image attachment metadata (multimodal responses)
+    attachment: Optional[ImageAttachment] = None
 
 
 # ---------------------------------------------------------------------------

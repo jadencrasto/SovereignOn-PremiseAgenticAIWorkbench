@@ -1,6 +1,6 @@
 import React from 'react';
 import { useWorkbench } from '../../context/WorkbenchContext';
-import { Cpu, CheckCircle2, Zap, RefreshCw } from 'lucide-react';
+import { Cpu, CheckCircle2, Zap, RefreshCw, Eye, MessageSquare, Database, ArrowRight } from 'lucide-react';
 import { Badge } from '../common/Badge';
 
 export const ModelsView: React.FC = () => {
@@ -176,6 +176,61 @@ export const ModelsView: React.FC = () => {
               </div>
             );
           })}
+        </div>
+        {/* Phase 5: Capability Routing Section */}
+        <div className="rounded-xl border border-slate-800 bg-[#0d1424]/60 p-5 space-y-4">
+          <div className="flex items-center gap-2 pb-3 border-b border-slate-800/80">
+            <Cpu className="w-4 h-4 text-emerald-400" />
+            <h2 className="text-sm font-semibold text-white">Active Capability Routing</h2>
+          </div>
+          <div className="space-y-2.5">
+            {[
+              {
+                capability: 'Chat / Reasoning',
+                model: 'qwen2.5:7b',
+                route: 'ollama/qwen2.5:7b',
+                icon: MessageSquare,
+                color: 'text-emerald-400',
+                desc: 'Text instructions, tool loop, RAG synthesis',
+              },
+              {
+                capability: 'Vision (Image Analysis)',
+                model: 'llava:7b',
+                route: 'ollama/llava:7b',
+                icon: Eye,
+                color: 'text-blue-400',
+                desc: 'Local multimodal image understanding — Step 1 of 2-step pipeline',
+              },
+              {
+                capability: 'Embeddings (RAG)',
+                model: 'nomic-embed-text',
+                route: 'ollama/nomic-embed-text',
+                icon: Database,
+                color: 'text-purple-400',
+                desc: 'Dense text embeddings for ChromaDB vector search',
+              },
+            ].map(({ capability, model, icon: Icon, color, desc }) => (
+              <div
+                key={capability}
+                className="flex items-center gap-4 p-3 rounded-lg bg-[#090d16] border border-slate-800"
+              >
+                <div className={`w-8 h-8 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center shrink-0 ${color}`}>
+                  <Icon className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-200">{capability}</span>
+                    <ArrowRight className="w-3 h-3 text-slate-600" />
+                    <span className={`text-xs font-mono font-bold ${color}`}>{model}</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">{desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-600 font-mono">
+            Two-step vision architecture: llava:7b generates visual observation → qwen2.5:7b reasons + uses tools
+          </p>
         </div>
       </div>
     </div>

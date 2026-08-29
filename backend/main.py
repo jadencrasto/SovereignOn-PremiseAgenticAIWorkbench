@@ -1,10 +1,10 @@
 """
 backend/main.py
 ---------------
-FastAPI application factory and entry point — Phase 4.
+FastAPI application factory and entry point — Phase 5.
 
 Startup:
-  - Runtime directories created
+  - Runtime directories created (including data/uploads/images/ for Phase 5)
   - Logging configured
   - ModelRouter instantiated
   - ConversationMemory initialised
@@ -43,6 +43,7 @@ from backend.api.chat import router as chat_router
 from backend.api.models import router as models_router
 from backend.api.documents import router as documents_router
 from backend.api.tools import router as tools_router
+from backend.api.tasks import router as tasks_router
 
 # Tool imports
 from backend.tools.registry import ToolRegistry, ToolDefinition
@@ -51,6 +52,13 @@ from backend.tools.document_search import DocumentSearchInput, create_document_s
 from backend.tools.file_list import FileListInput, create_file_list
 from backend.tools.file_read import FileReadInput, create_file_read
 from backend.tools.file_write import FileWriteInput, create_file_write
+
+# Phase 6 imports
+from backend.agent.task_store import TaskStore
+from backend.agent.task import TaskManager
+from backend.agent.planner import AgentPlanner
+from backend.agent.plan_validator import PlanValidator
+from backend.agent.approval import ApprovalManager
 
 # ---------------------------------------------------------------------------
 # Logging — configure before anything else logs
@@ -87,11 +95,12 @@ def _load_tools_config() -> dict:
 # Tool registration
 # ---------------------------------------------------------------------------
 
-def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: dict) -> None:
+def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: dict = None) -> None:
     """Register all Phase 4 tools with the registry."""
+    tools_cfg = tools_config or {}
 
     def _is_enabled(name: str) -> bool:
-        return tools_config.get(name, {}).get("enabled", True)
+        return tools_cfg.get(name, {}).get("enabled", True)
 
     # 1. document_search
     registry.register(ToolDefinition(
@@ -105,6 +114,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         execute_fn=create_document_search(retriever),
         category="Information Retrieval",
         read_only=True,
+        risk_level="low",
+        requires_approval=False,
         enabled=_is_enabled("document_search"),
     ))
 
@@ -120,6 +131,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         execute_fn=create_file_list(settings.upload_dir),
         category="File Operations",
         read_only=True,
+        risk_level="low",
+        requires_approval=False,
         enabled=_is_enabled("file_list"),
     ))
 
@@ -136,6 +149,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         execute_fn=create_file_read(settings.upload_dir),
         category="File Operations",
         read_only=True,
+        risk_level="medium",
+        requires_approval=False,
         enabled=_is_enabled("file_read"),
     ))
 
@@ -152,6 +167,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         execute_fn=execute_calculator,
         category="Computation",
         read_only=True,
+        risk_level="low",
+        requires_approval=False,
         enabled=_is_enabled("calculator"),
     ))
 
@@ -168,6 +185,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         category="File Operations",
         read_only=False,
         requires_confirmation=True,
+        risk_level="high",
+        requires_approval=True,
         enabled=_is_enabled("file_write"),
     ))
 
@@ -183,8 +202,11 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
 async def lifespan(app: FastAPI):
     logger.info("=== %s v%s starting (%s) ===", settings.app_name, settings.app_version, settings.app_env)
 
-    # Ensure runtime directories exist
+    # Ensure runtime directories exist (Phase 5: also creates data/uploads/images/)
     settings.ensure_dirs()
+    images_dir = settings.upload_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Image storage directory: %s", images_dir)
 
     # ---- Model router ----
     model_router = ModelRouter(settings)
@@ -255,6 +277,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Ollama chat provider not reachable at %s.", settings.ollama_base_url)
 
+    # ---- Phase 6: Task persistence + planning ----
+    task_store = TaskStore(db_path=settings.tasks_db_path)
+    task_manager = TaskManager(store=task_store)
+    planner = AgentPlanner(max_plan_steps=settings.max_plan_steps)
+    plan_validator = PlanValidator(
+        tool_registry=tool_registry,
+        max_plan_steps=settings.max_plan_steps,
+    )
+    approval_manager = ApprovalManager(
+        store=task_store,
+        timeout_seconds=settings.approval_timeout_seconds,
+    )
+
+    # Wire Phase 6 components into the engine
+    engine.set_task_manager(task_manager)
+    engine.set_planner(planner)
+    engine.set_plan_validator(plan_validator)
+    engine.set_approval_manager(approval_manager)
+
+    logger.info(
+        "Phase 6 initialised | tasks_db=%s max_plan_steps=%d approval_timeout=%ds",
+        settings.tasks_db_path, settings.max_plan_steps, settings.approval_timeout_seconds,
+    )
+
     # ---- Attach to app.state ----
     app.state.model_router = model_router
     app.state.engine = engine
@@ -262,6 +308,11 @@ async def lifespan(app: FastAPI):
     app.state.tool_registry = tool_registry
     app.state.ollama_ok = ollama_ok
     app.state.embed_ok = embed_ok
+    app.state.upload_dir = settings.upload_dir  # Phase 5: for multimodal image storage
+    # Phase 6 state
+    app.state.task_manager = task_manager
+    app.state.task_store = task_store
+    app.state.approval_manager = approval_manager
 
     logger.info("Startup complete — listening on %s:%d", settings.backend_host, settings.backend_port)
 
@@ -309,6 +360,7 @@ def create_app() -> FastAPI:
     app.include_router(models_router)
     app.include_router(documents_router)
     app.include_router(tools_router)
+    app.include_router(tasks_router)
 
     # ---- Health endpoint ----
     @app.get(

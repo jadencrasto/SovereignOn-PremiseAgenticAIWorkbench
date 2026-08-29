@@ -39,6 +39,8 @@ class ToolDefinition:
     category: str = "general"
     read_only: bool = True
     requires_confirmation: bool = False
+    requires_approval: bool = False         # Phase 6: planning approval gate
+    risk_level: str = "low"                 # Phase 6: "low" | "medium" | "high"
     enabled: bool = True
 
 

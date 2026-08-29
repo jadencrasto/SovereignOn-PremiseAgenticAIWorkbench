@@ -13,13 +13,20 @@ Usage:
     provider = router.get_provider("ollama")
     model    = router.resolve_model("ollama/qwen2.5:7b")  # → "qwen2.5:7b"
     default  = router.default_model_id               # → "ollama/qwen2.5:7b"
+
+Phase 5 additions:
+    resolve_chat_model()      → (provider, "qwen2.5:7b")
+    resolve_vision_model()    → (provider, "llava:7b")
+    resolve_embedding_model() → (provider, "nomic-embed-text")
+    get_model_capabilities(model_id) → ["chat", "vision"]
+    list_models_with_capabilities()  → enriched model list for API
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -43,7 +50,7 @@ class ModelRouter:
         self._provider_cache: Dict[str, BaseModelProvider] = {}
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — existing (Phase 1–4, unchanged)
     # ------------------------------------------------------------------
 
     @property
@@ -106,6 +113,117 @@ class ModelRouter:
                 logger.warning("Could not list models for %s: %s", provider_name, exc)
                 results[provider_name] = []
         return results
+
+    # ------------------------------------------------------------------
+    # Public API — Phase 5: Capability-based routing
+    # ------------------------------------------------------------------
+
+    def get_model_capabilities(self, model_id: str) -> List[str]:
+        """
+        Return the capabilities list for a given model ID.
+
+        Args:
+            model_id: Full 'provider/model' string, e.g. 'ollama/llava:7b'
+
+        Returns:
+            List of capability strings, e.g. ['chat', 'vision'].
+            Returns [] if model is not in config.
+        """
+        models_config = self._config.get("models", {})
+        model_conf = models_config.get(model_id, {})
+        return list(model_conf.get("capabilities", []))
+
+    def resolve_by_capability(self, capability: str) -> Tuple[BaseModelProvider, str]:
+        """
+        Resolve to (provider, model_name) for the given capability.
+
+        Reads from models.yaml capability_routing section.
+
+        Args:
+            capability: 'chat' | 'vision' | 'embedding'
+
+        Returns:
+            (provider_adapter, model_name)
+
+        Raises:
+            ValueError: If no model is configured for the capability.
+        """
+        routing = self._config.get("capability_routing", {})
+        model_id = routing.get(capability)
+        if not model_id:
+            # Fall back: scan models config for first model with this capability
+            models_config = self._config.get("models", {})
+            for mid, mconf in models_config.items():
+                if capability in mconf.get("capabilities", []):
+                    model_id = mid
+                    break
+
+        if not model_id:
+            raise ValueError(
+                f"No model configured for capability '{capability}'. "
+                f"Check config/models.yaml capability_routing section."
+            )
+
+        return self.get_provider_for_model(model_id)
+
+    def resolve_chat_model(self) -> Tuple[BaseModelProvider, str]:
+        """Return (provider, model_name) for text chat (qwen2.5:7b)."""
+        return self.resolve_by_capability("chat")
+
+    def resolve_vision_model(self) -> Tuple[BaseModelProvider, str]:
+        """Return (provider, model_name) for vision (llava:7b)."""
+        return self.resolve_by_capability("vision")
+
+    def resolve_embedding_model(self) -> Tuple[BaseModelProvider, str]:
+        """Return (provider, model_name) for embeddings (nomic-embed-text)."""
+        return self.resolve_by_capability("embedding")
+
+    async def list_models_with_capabilities(self) -> List[Dict]:
+        """
+        Return a list of model dicts enriched with capabilities.
+
+        Used by GET /api/models to expose capability metadata to the frontend.
+
+        Returns:
+            [
+                {
+                    "id": "ollama/qwen2.5:7b",
+                    "name": "qwen2.5:7b",
+                    "provider": "ollama",
+                    "capabilities": ["chat"],
+                    "installed": True,
+                },
+                ...
+            ]
+        """
+        # Get actually-installed models from live Ollama
+        available_raw = await self.list_available_models()
+        installed_names: set = set()
+        for provider_name, model_list in available_raw.items():
+            for m in model_list:
+                installed_names.add(f"{provider_name}/{m}")
+                # Also add without provider prefix for matching
+                installed_names.add(m)
+
+        models_config = self._config.get("models", {})
+        result = []
+
+        for model_id, mconf in models_config.items():
+            provider_name, model_name = self.resolve_model(model_id)
+            is_installed = (
+                model_id in installed_names
+                or model_name in installed_names
+            )
+            result.append({
+                "id": model_id,
+                "name": model_name,
+                "provider": provider_name,
+                "capabilities": list(mconf.get("capabilities", [])),
+                "description": mconf.get("description", ""),
+                "installed": is_installed,
+            })
+
+        return result
 
     # ------------------------------------------------------------------
     # Internal helpers

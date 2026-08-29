@@ -1,16 +1,26 @@
 # config/tools.yaml
 # -----------------
-# Tool enablement configuration for the Sovereign AI Workbench.
+# Tool enablement and risk configuration for the Sovereign AI Workbench.
 # Loaded at application startup by the ToolRegistry.
 
 tools:
   document_search:
     enabled: true
+    risk_level: low
+    requires_approval: false
   file_list:
     enabled: true
+    risk_level: low
+    requires_approval: false
   file_read:
     enabled: true
+    risk_level: medium
+    requires_approval: false
   calculator:
     enabled: true
+    risk_level: low
+    requires_approval: false
   file_write:
     enabled: true
+    risk_level: high
+    requires_approval: true

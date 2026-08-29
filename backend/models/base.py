@@ -11,6 +11,14 @@ Design principles:
 - No Ollama-specific implementation details here.
 - Structured request/response types so callers are type-safe.
 - AsyncIterator for streaming keeps things composable.
+
+Phase 5 additions (backward-compatible):
+- Message.images — optional list of base64-encoded image strings for
+  multimodal (vision) requests. Defaults to empty list so all existing
+  text-only callers work without modification.
+- ChatRequest.images — convenience field forwarded to the first user
+  message when building the Ollama payload. Providers that do not support
+  vision simply ignore non-empty images lists.
 """
 
 from __future__ import annotations
@@ -29,6 +37,9 @@ class Message:
     """A single conversation message."""
     role: str          # "system" | "user" | "assistant"
     content: str
+    # Phase 5: optional base64-encoded images for multimodal messages.
+    # Empty list → text-only message (100% backward compatible).
+    images: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -42,6 +53,10 @@ class ChatRequest:
     temperature: float = 0.7
     max_tokens: Optional[int] = None
     stream: bool = False
+    # Phase 5: base64-encoded images attached to the latest user message.
+    # When non-empty the provider must use a vision-capable model.
+    # Empty list → pure text request (100% backward compatible).
+    images: List[str] = field(default_factory=list)
 
 
 @dataclass

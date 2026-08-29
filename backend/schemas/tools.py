@@ -18,6 +18,8 @@ class ToolInfoResponse(BaseModel):
     input_schema: Dict[str, Any]
     read_only: bool
     requires_confirmation: bool
+    requires_approval: bool = False        # Phase 6
+    risk_level: str = "low"               # Phase 6
     enabled: bool
 
 

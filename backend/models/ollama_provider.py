@@ -10,6 +10,11 @@ API endpoints used:
   POST /api/chat          — chat completion (streaming & non-streaming)
   GET  /api/tags          — list locally available models
   GET  /                  — health check (root returns Ollama version string)
+
+Phase 5: vision support
+  When a Message carries non-empty .images, they are forwarded in Ollama's
+  expected format: {"role": ..., "content": ..., "images": [<base64>, ...]}.
+  Text-only messages are sent without an 'images' key — identical to Phase 4.
 """
 
 from __future__ import annotations
@@ -60,7 +65,11 @@ class OllamaProvider(BaseModelProvider):
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """Non-streaming chat completion.  Waits for full response."""
         payload = self._build_payload(request, stream=False)
-        logger.debug("Ollama chat: model=%s messages=%d", request.model, len(request.messages))
+        has_images = any(m.images for m in request.messages) or bool(request.images)
+        logger.debug(
+            "Ollama chat: model=%s messages=%d vision=%s",
+            request.model, len(request.messages), has_images,
+        )
         try:
             resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
@@ -91,10 +100,15 @@ class OllamaProvider(BaseModelProvider):
 
         Ollama sends one JSON object per line while streaming.
         Each line has {"message": {"content": "..."}, "done": false/true}.
+
+        Phase 5: vision images are included in the payload when present;
+        the streaming protocol is identical regardless.
         """
         payload = self._build_payload(request, stream=True)
+        has_images = any(m.images for m in request.messages) or bool(request.images)
         logger.debug(
-            "Ollama stream: model=%s messages=%d", request.model, len(request.messages)
+            "Ollama stream: model=%s messages=%d vision=%s",
+            request.model, len(request.messages), has_images,
         )
         try:
             async with self._client.stream(
@@ -151,11 +165,33 @@ class OllamaProvider(BaseModelProvider):
 
     @staticmethod
     def _build_payload(request: ChatRequest, stream: bool) -> dict:
-        """Convert a generic ChatRequest to the Ollama /api/chat payload."""
-        messages = [
-            {"role": m.role, "content": m.content}
-            for m in request.messages
-        ]
+        """
+        Convert a generic ChatRequest to the Ollama /api/chat payload.
+
+        Phase 5 vision support:
+          - If a Message has non-empty .images, include 'images' key in
+            that message dict (Ollama's multimodal format).
+          - If ChatRequest.images is non-empty, attach them to the LAST
+            user message in the list (the current user turn).
+          - Text-only messages produce identical output to Phase 4 (no
+            'images' key present).
+        """
+        messages = []
+        for m in request.messages:
+            msg_dict: dict = {"role": m.role, "content": m.content}
+            if m.images:
+                # Images already attached directly to this Message object
+                msg_dict["images"] = list(m.images)
+            messages.append(msg_dict)
+
+        # If ChatRequest.images is set, attach to the last user message
+        if request.images:
+            for msg_dict in reversed(messages):
+                if msg_dict["role"] == "user":
+                    existing = msg_dict.get("images", [])
+                    msg_dict["images"] = existing + list(request.images)
+                    break
+
         payload: dict = {
             "model": request.model,
             "messages": messages,

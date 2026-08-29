@@ -8,6 +8,7 @@ import { DocumentsView } from '../documents/DocumentsView';
 import { ModelsView } from '../models/ModelsView';
 import { ToolsView } from '../tools/ToolsView';
 import { SettingsView } from '../settings/SettingsView';
+import { TaskHistoryView } from '../tasks/TaskHistoryView';
 
 export const AppLayout: React.FC = () => {
   const { activeTab } = useWorkbench();
@@ -23,6 +24,7 @@ export const AppLayout: React.FC = () => {
         {/* Main Content View */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#090d16]">
           {activeTab === 'chat' && <ChatView />}
+          {activeTab === 'tasks' && <TaskHistoryView />}
           {activeTab === 'documents' && <DocumentsView />}
           {activeTab === 'models' && <ModelsView />}
           {activeTab === 'tools' && <ToolsView />}

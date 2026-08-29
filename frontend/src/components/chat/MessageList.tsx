@@ -8,9 +8,11 @@ interface MessageListProps {
   messages: ChatMessage[];
   onSelectPrompt?: (prompt: string) => void;
   onRetry?: (content: string) => void;
+  onApprove?: (taskId: string) => void;
+  onReject?: (taskId: string) => void;
 }
 
-export const MessageList: React.FC<MessageListProps> = ({ messages, onSelectPrompt, onRetry }) => {
+export const MessageList: React.FC<MessageListProps> = ({ messages, onSelectPrompt, onRetry, onApprove, onReject }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const { documents, selectedModel } = useWorkbench();
 
@@ -84,7 +86,13 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, onSelectProm
   return (
     <div className="flex-1 overflow-y-auto py-4 space-y-2">
       {messages.map((msg) => (
-        <MessageItem key={msg.id} message={msg} onRetry={onRetry} />
+        <MessageItem
+          key={msg.id}
+          message={msg}
+          onRetry={onRetry}
+          onApprove={onApprove}
+          onReject={onReject}
+        />
       ))}
       <div ref={bottomRef} />
     </div>

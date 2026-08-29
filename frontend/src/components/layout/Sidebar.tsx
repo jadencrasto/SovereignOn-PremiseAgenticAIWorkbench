@@ -9,6 +9,7 @@ import {
   Settings,
   ShieldCheck,
   HardDrive,
+  ListTodo,
 } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
@@ -16,6 +17,7 @@ export const Sidebar: React.FC = () => {
 
   const navItems: { id: ActiveTab; label: string; icon: React.FC<{ className?: string }>; count?: number }[] = [
     { id: 'chat', label: 'Agent Chat', icon: MessageSquare },
+    { id: 'tasks', label: 'Agent Tasks', icon: ListTodo },
     { id: 'documents', label: 'Documents & RAG', icon: FileText, count: documents.length },
     { id: 'models', label: 'Local Models', icon: Cpu },
     { id: 'tools', label: 'Tool Registry', icon: Wrench },

@@ -87,6 +87,14 @@ class Settings(BaseSettings):
     log_dir: Path = Field(default=PROJECT_ROOT / "data" / "logs")
 
     # ------------------------------------------------------------------
+    # Phase 6: Task persistence
+    # ------------------------------------------------------------------
+    tasks_dir: Path = Field(default=PROJECT_ROOT / "data" / "tasks")
+    tasks_db_path: Path = Field(default=PROJECT_ROOT / "data" / "tasks" / "tasks.db")
+    approval_timeout_seconds: int = Field(default=300)
+    max_plan_steps: int = Field(default=10)
+
+    # ------------------------------------------------------------------
     # Agent config paths
     # ------------------------------------------------------------------
     agents_dir: Path = Field(default=PROJECT_ROOT / "agents")
@@ -94,7 +102,7 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         """Create all runtime directories that must exist before startup."""
-        for d in [self.upload_dir, self.log_dir, self.sandbox_dir, self.chroma_persist_dir]:
+        for d in [self.upload_dir, self.log_dir, self.sandbox_dir, self.chroma_persist_dir, self.tasks_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
     def get_log_level(self) -> int:

@@ -5,13 +5,23 @@ name: default
 display_name: "Sovereign Assistant"
 description: >
   General-purpose AI assistant with document reasoning, file operations,
-  and code execution capabilities. Operates fully on-premise.
+  image understanding, computation capabilities, and enterprise task planning.
+  Operates fully on-premise.
 
 # Model preferences (can be overridden by user at runtime)
 model:
   default: ollama/qwen2.5:7b
   fallback:
     - ollama/llava:7b
+
+# Phase 5: Vision / Multimodal configuration
+vision:
+  enabled: true
+  model: ollama/llava:7b         # Local vision model for image analysis
+  max_image_size_mb: 10          # Maximum accepted image size
+  # Two-step architecture:
+  # 1. llava:7b analyzes the image → produces visual_observation text
+  # 2. qwen2.5:7b receives observation + runs tool loop + produces final answer
 
 # Tools this agent is allowed to use
 tools:
@@ -30,3 +40,23 @@ rag:
 max_tool_iterations: 5   # max tool-call loops before forced stop
 max_tokens: 4096          # max response tokens per turn
 temperature: 0.7
+
+# Phase 6: Planning & approval configuration
+planning:
+  enabled: true
+  max_plan_steps: 10       # Maximum steps in a generated plan
+  temperature: 0.3         # Lower temperature for structured plan output
+
+approval:
+  default_timeout_seconds: 300   # 5 minutes before pending approval expires
+  require_for_write: true        # file_write always requires approval
+  require_for_high_risk: true    # Any high-risk tool requires approval
+
+tasks:
+  persist: true                  # Store tasks in SQLite (survives restarts)
+  max_active_tasks: 20           # Maximum concurrent active tasks per session
+
+execution:
+  max_steps_per_task: 10         # Maximum execution steps per task
+  max_tool_calls_per_task: 15    # Maximum total tool invocations per task
+  max_duration_seconds: 300      # Maximum wall-clock time per task

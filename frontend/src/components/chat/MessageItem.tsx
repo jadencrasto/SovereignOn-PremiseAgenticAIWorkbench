@@ -2,12 +2,16 @@ import React, { useState } from 'react';
 import type { ChatMessage, ToolEvent } from '../../types';
 import { MarkdownContent } from './MarkdownContent';
 import { SourceCard } from './SourceCard';
-import { Bot, User, Copy, Check, RotateCcw, AlertTriangle, Layers, Wrench, CheckCircle2, XCircle } from 'lucide-react';
+import { Bot, User, Copy, Check, RotateCcw, AlertTriangle, Layers, Wrench, CheckCircle2, XCircle, ImageIcon } from 'lucide-react';
 import { Badge } from '../common/Badge';
+import { PlanTimeline } from '../agent/PlanTimeline';
+import { ApprovalCard } from '../agent/ApprovalCard';
 
 interface MessageItemProps {
   message: ChatMessage;
   onRetry?: (content: string) => void;
+  onApprove?: (taskId: string) => void;
+  onReject?: (taskId: string) => void;
 }
 
 // Tool Activity Timeline component
@@ -66,7 +70,7 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
   );
 };
 
-export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) => {
+export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onApprove, onReject }) => {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === 'user';
 
@@ -88,6 +92,28 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) =>
             <span className="text-[10px] font-mono text-slate-500">{message.timestamp}</span>
             <span className="text-xs font-semibold text-slate-300">Operator</span>
           </div>
+
+          {/* Phase 5: Image attachment thumbnail */}
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="mb-2 flex flex-col items-end gap-1.5 w-full">
+              {message.attachments.map((att) => (
+                <div key={att.id} className="max-w-xs rounded-xl overflow-hidden border border-blue-600/30 shadow-sm">
+                  <img
+                    src={att.objectUrl}
+                    alt={att.filename}
+                    className="w-full max-h-48 object-cover"
+                    style={{ display: 'block' }}
+                  />
+                  <div className="flex items-center gap-1.5 px-2 py-1 bg-blue-950/60 text-[10px] font-mono text-blue-400">
+                    <ImageIcon className="w-2.5 h-2.5" />
+                    <span className="truncate max-w-[180px]">{att.filename}</span>
+                    <span className="text-slate-500 ml-auto">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="p-3.5 rounded-xl rounded-tr-sm bg-blue-600/20 border border-blue-500/30 text-slate-100 text-sm leading-relaxed shadow-sm">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
@@ -164,6 +190,31 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry }) =>
             <>
               {/* Tool Activity Timeline */}
               {hasToolEvents && <ToolActivity events={message.toolEvents!} />}
+
+              {/* Phase 6: Plan Timeline */}
+              {message.plan && message.plan.steps && message.plan.steps.length > 0 && (
+                <PlanTimeline
+                  taskId={message.plan.taskId}
+                  objective={message.plan.objective}
+                  steps={message.plan.steps}
+                />
+              )}
+
+              {/* Phase 6: Approval Card */}
+              {message.pendingApproval && onApprove && onReject && (
+                <ApprovalCard
+                  taskId={message.pendingApproval.task_id}
+                  stepId={message.pendingApproval.step_id}
+                  approvalId={message.pendingApproval.approval_id}
+                  toolName={message.pendingApproval.tool_name}
+                  arguments={message.pendingApproval.arguments_hash ? (message.pendingApproval as any).arguments || {} : {}}
+                  riskLevel={message.pendingApproval.risk_level}
+                  reason={message.pendingApproval.reason}
+                  expiresAt={message.pendingApproval.expires_at}
+                  onApprove={onApprove}
+                  onReject={onReject}
+                />
+              )}
 
               {message.content ? (
                 <MarkdownContent content={message.content} />
