@@ -52,10 +52,19 @@ Open [http://localhost:5173](http://localhost:5173)
 | 4 | Tool registry (5 tools) + agent tool-loop + SSE tool events | ✅ Complete |
 | 5 | LLaVA vision pipeline + `/api/chat/multimodal` + image UI | ✅ Complete |
 | 6 | Enterprise Agent Planning + PlanValidator + Human Approval + SQLite Task Store | ✅ Complete |
+| 7 | Enterprise Hardening + Argon2id Auth + Dual-Boundary RBAC + CSRF + Audit Logging | ✅ Complete |
+| 8 | SIH Industrial Evaluation Suite + Benchmark Dataset + Master Evaluation Runner | ✅ Complete |
 
 ---
 
-## Phase 6 — Enterprise Agent Planning & Human Approval
+## Phase 7 & 8 — Enterprise Hardening & SIH Evaluation Suite
+
+### Security & Governance Guarantees
+- **Dual-Boundary RBAC:** Strict role enforcement at FastAPI route boundaries AND tool dispatch engine (`ADMIN`, `OPERATOR`, `VIEWER`).
+- **Cryptographic Approval Binding:** Human-in-the-loop approvals bound via SHA-256 to `(task_id, step_id, tool_name, arguments)`.
+- **Zero Cloud Egress:** 100% on-premise execution with local Ollama LLMs and ChromaDB vector embeddings.
+- **Double-Submit CSRF & Argon2id Sessions:** Enterprise authentication and credential protection.
+- **Auditable Sandbox:** Comprehensive filesystem sandbox with Windows reserved device / UNC path rejection and atomic file writes.
 
 ### Architecture
 
@@ -87,19 +96,18 @@ User Multi-Step Request
                                  Recompute & Verify Hash ──(Match)──► Execute Step
 ```
 
-### Core Security & Governance Guarantees
-- **The LLM is Never Self-Authorizing:** Proposing a tool call is merely a proposal. The deterministic backend evaluates every plan before execution.
-- **Deterministic Complexity Heuristic:** Bypasses planning for simple questions / single actions and invokes the planner only for multi-step dependent workflows.
-- **Cryptographic Approval Binding:** Human approvals are bound via SHA-256 to `(task_id, step_id, tool_name, arguments)`. If arguments or context are modified after approval, execution is rejected.
-- **Persistent Task Execution:** All task states and pending approvals are persisted in SQLite WAL mode and survive backend restarts.
-- **Mandatory Approval for Mutating Operations:** High-risk actions (`file_write`) can never execute autonomously without operator authorization.
-
 ### API Endpoints
 
 | Method | Endpoint | Notes |
 |--------|----------|-------|
+| `POST` | `/api/auth/login` | Session login with Argon2id credentials |
+| `POST` | `/api/auth/logout` | Revokes current session token |
+| `GET`  | `/api/auth/me` | Returns authenticated user profile & RBAC role |
 | `POST` | `/api/chat` | JSON — supports `planning_enabled` flag (defaults to true) |
 | `POST` | `/api/chat/multimodal` | Multipart FormData — image + text message |
+| `GET`  | `/api/documents` | List indexed documents in ChromaDB |
+| `POST` | `/api/documents` | Upload & ingest document into ChromaDB |
+| `DELETE`| `/api/documents/{doc_id}` | Delete indexed document |
 | `GET`  | `/api/tasks` | List recent tasks with status, step counts, and timestamps |
 | `GET`  | `/api/tasks/{task_id}` | Full task details, step breakdown, and audit results |
 | `POST` | `/api/tasks/{task_id}/approve` | Resumes a paused task following operator approval/rejection |
@@ -107,42 +115,28 @@ User Multi-Step Request
 | `GET`  | `/api/tasks/{task_id}/approvals` | Approval audit trail for a task |
 | `GET`  | `/api/tools` | Returns tools with `risk_level` and `requires_approval` |
 | `GET`  | `/api/models` | Returns models with `capabilities` and `capability_routing` |
+| `GET`  | `/api/health/live` | Health liveness probe |
+| `GET`  | `/api/health/ready` | Health readiness probe checking Ollama and ChromaDB |
 
 ---
 
-## Project Structure
+## Running the SIH Evaluation Suite
+To execute the consolidated 8-suite benchmark runner:
 
-```
-frontend/
-  src/components/
-    agent/          PlanTimeline & ApprovalCard components
-    tasks/          TaskHistoryView persistent task dashboard
-    chat/           ChatView, MessageList, MessageItem with plan/approval support
-    tools/          ToolsView with risk classifications
-    settings/       SettingsView with orchestration runtime stats
-backend/
-  agent/
-    planner.py        AgentPlanner & deterministic complexity heuristic
-    plan_validator.py PlanValidator deterministic safety validator
-    task.py           TaskManager & strict state machine
-    task_store.py     SQLite WAL persistence layer
-    approval.py       ApprovalManager with SHA-256 hash binding
-    engine.py         AgentEngine with run_agent_task() & resume_agent_task()
-  api/
-    chat.py           Chat endpoints & planning SSE generator
-    tasks.py          Tasks & approvals REST endpoints
-    tools.py          Tool registry endpoints
-data/
-  tasks/tasks.db      SQLite persistent database for tasks & approvals
-  uploads/images/     Isolated image store (UUID filenames)
-  chromadb/           Persistent vector store
-tests/backend/        Full test suite (245+ tests, all passing)
+```bash
+python -m eval.run_all
 ```
 
-## Running Tests
+Outputs are automatically generated and saved in `eval/results/`:
+- `consolidated_report_latest.md`: Human-readable Markdown scorecard.
+- `consolidated_report_latest.json`: Machine-readable benchmark telemetry.
+
+## Running Backend Unit & Integration Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-Expected: **245+ passed, 0 failed**
+Expected: **325 passed, 1 skipped (100% pass rate)**.
+
+
