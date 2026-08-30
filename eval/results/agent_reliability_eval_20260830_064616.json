@@ -1,0 +1,88 @@
+{
+  "suite_name": "Agent Reliability & Fault Injection Benchmark",
+  "timestamp": "2026-08-30T06:46:16Z",
+  "environment": "Air-Gapped In-Memory & SQLite WAL",
+  "total_cases": 7,
+  "passed": 7,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.2544060999935027,
+  "summary_metrics": {
+    "Passed_Scenarios": 7,
+    "Total_Scenarios": 7,
+    "Reliability_Score_Percent": 100.0
+  },
+  "test_cases": [
+    {
+      "test_id": "REL-01",
+      "name": "Model Unavailable Resilience",
+      "category": "fault_injection",
+      "status": "PASS",
+      "duration_ms": 22.78709999518469,
+      "metrics": {},
+      "details": "Task transitioned safely to FAILED with descriptive connection error",
+      "error": null
+    },
+    {
+      "test_id": "REL-02",
+      "name": "Tool Exception Safety",
+      "category": "error_handling",
+      "status": "PASS",
+      "duration_ms": 0.3203000233042985,
+      "metrics": {},
+      "details": "Tool exception caught cleanly and converted to structured ToolResult failure",
+      "error": null
+    },
+    {
+      "test_id": "REL-03",
+      "name": "Malformed Argument Rejection",
+      "category": "input_validation",
+      "status": "PASS",
+      "duration_ms": 0.5532999930437654,
+      "metrics": {},
+      "details": "Pydantic validation rejected malformed tool input without crashing",
+      "error": null
+    },
+    {
+      "test_id": "REL-04",
+      "name": "Approval Rejection Handling",
+      "category": "human_in_the_loop",
+      "status": "PASS",
+      "duration_ms": 84.93690000614151,
+      "metrics": {},
+      "details": "Approval rejection safely transitions step to skipped and task to cancelled",
+      "error": null
+    },
+    {
+      "test_id": "REL-05",
+      "name": "Task Cancellation Verification",
+      "category": "lifecycle_control",
+      "status": "PASS",
+      "duration_ms": 28.67060000426136,
+      "metrics": {},
+      "details": "Running task cancelled immediately and flagged as cancelled",
+      "error": null
+    },
+    {
+      "test_id": "REL-06",
+      "name": "Server Restart Crash Recovery",
+      "category": "fault_recovery",
+      "status": "PASS",
+      "duration_ms": 30.931000015698373,
+      "metrics": {},
+      "details": "In-flight executing task recovered to FAILED_INTERRUPTED on restart",
+      "error": null
+    },
+    {
+      "test_id": "REL-07",
+      "name": "Approval Drift Rejection",
+      "category": "security_binding",
+      "status": "PASS",
+      "duration_ms": 46.68410000158474,
+      "metrics": {},
+      "details": "Approved step rejected when underlying tool was disabled post-approval",
+      "error": null
+    }
+  ],
+  "errors": []
+}

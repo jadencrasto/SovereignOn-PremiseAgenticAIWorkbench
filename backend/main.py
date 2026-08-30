@@ -210,34 +210,36 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    active_settings = getattr(app.state, "settings", settings)
+
     # 0. Fail-fast configuration validation
-    validator = ConfigValidator(settings)
+    validator = ConfigValidator(active_settings)
     validator.enforce_or_exit()
 
-    logger.info("=== %s v%s starting (%s) ===", settings.app_name, settings.app_version, settings.app_env)
+    logger.info("=== %s v%s starting (%s) ===", active_settings.app_name, active_settings.app_version, active_settings.app_env)
 
     # Ensure runtime directories exist
-    settings.ensure_dirs()
-    images_dir = settings.upload_dir / "images"
+    active_settings.ensure_dirs()
+    images_dir = active_settings.upload_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Image storage directory: %s", images_dir)
 
     # ---- Phase 7: Local Authentication & Audit Systems ----
-    auth_store = AuthStore(db_path=settings.tasks_db_path)
+    auth_store = AuthStore(db_path=active_settings.tasks_db_path)
     session_manager = SessionManager(
         store=auth_store,
-        idle_timeout_seconds=settings.auth_idle_timeout_seconds,
-        absolute_timeout_seconds=settings.auth_max_session_seconds,
+        idle_timeout_seconds=active_settings.auth_idle_timeout_seconds,
+        absolute_timeout_seconds=active_settings.auth_max_session_seconds,
     )
     brute_force_protector = BruteForceProtector(
         store=auth_store,
-        max_attempts=settings.auth_lockout_attempts,
-        lockout_window_seconds=settings.auth_lockout_window_seconds,
+        max_attempts=active_settings.auth_lockout_attempts,
+        lockout_window_seconds=active_settings.auth_lockout_window_seconds,
     )
     audit_logger = AuditLogger(
-        db_path=settings.tasks_db_path,
-        retention_days=settings.audit_retention_days,
-        max_rows=settings.audit_max_rows,
+        db_path=active_settings.tasks_db_path,
+        retention_days=active_settings.audit_retention_days,
+        max_rows=active_settings.audit_max_rows,
     )
 
     # First-run admin initialization & Startup Banner
@@ -393,24 +395,23 @@ async def lifespan(app: FastAPI):
 
 
 # ---------------------------------------------------------------------------
-# Application factory
-# ---------------------------------------------------------------------------
-
-def create_app() -> FastAPI:
+def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     import uuid
     from fastapi import Request
 
+    active_settings = custom_settings or settings
     app = FastAPI(
         title="Sovereign On-Premise Agentic AI Workbench",
         description=(
             "SIH26117 — A sovereign, on-premise agentic AI workbench for local "
             "document reasoning, tool execution, and provider-agnostic model routing."
         ),
-        version=settings.app_version,
+        version=active_settings.app_version,
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+    app.state.settings = active_settings
 
     # ---- Request ID & Context Tracing Middleware (Phase 7) ----
     @app.middleware("http")
@@ -427,7 +428,7 @@ def create_app() -> FastAPI:
     # ---- CORS ----
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
+        allow_origins=active_settings.cors_origins_list,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

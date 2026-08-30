@@ -1,0 +1,68 @@
+{
+  "suite_name": "Industrial Report Generation Workflow Benchmark",
+  "timestamp": "2026-08-30T06:34:05Z",
+  "environment": "Air-Gapped Sovereign Workflow",
+  "total_cases": 5,
+  "passed": 1,
+  "failed": 4,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.15218239999376237,
+  "summary_metrics": {
+    "Workflow_Stages_Completed": 1,
+    "Total_Workflow_Stages": 5,
+    "Workflow_Success_Rate": 0.0
+  },
+  "test_cases": [
+    {
+      "test_id": "RPT-01",
+      "name": "Task Planning & DAG Construction",
+      "category": "workflow_orchestration",
+      "status": "PASS",
+      "duration_ms": 25.81849999842234,
+      "metrics": {},
+      "details": "Task task_2bd512ba8ad8 generated 3-step execution plan with approval requirement on step 3",
+      "error": null
+    },
+    {
+      "test_id": "RPT-02",
+      "name": "Automated Read Step Execution",
+      "category": "workflow_orchestration",
+      "status": "FAIL",
+      "duration_ms": 33.13490000437014,
+      "metrics": {},
+      "details": null,
+      "error": "'ToolResult' object has no attribute 'data'"
+    },
+    {
+      "test_id": "RPT-03",
+      "name": "Human Approval Binding & Verification",
+      "category": "human_in_the_loop",
+      "status": "FAIL",
+      "duration_ms": 51.722099975449964,
+      "metrics": {},
+      "details": null,
+      "error": "'ApprovalManager' object has no attribute 'get_approval'"
+    },
+    {
+      "test_id": "RPT-04",
+      "name": "Sandboxed Report Output & Citation Verification",
+      "category": "data_integrity",
+      "status": "FAIL",
+      "duration_ms": 8.799800009001046,
+      "metrics": {},
+      "details": null,
+      "error": "Invalid step transition: awaiting_approval \u2192 completed. Allowed: {'failed', 'approved', 'skipped'}"
+    },
+    {
+      "test_id": "RPT-05",
+      "name": "Audit Trail Complete Attribution",
+      "category": "compliance_audit",
+      "status": "FAIL",
+      "duration_ms": 1.103100017644465,
+      "metrics": {},
+      "details": null,
+      "error": "'str' object has no attribute 'event_type'"
+    }
+  ],
+  "errors": []
+}

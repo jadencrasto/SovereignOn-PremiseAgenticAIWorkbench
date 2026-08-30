@@ -1,0 +1,194 @@
+[
+  {
+    "id": "QA-01",
+    "question": "What was the pre-overhaul horizontal vibration amplitude on the driven-end bearing of Compressor K-101?",
+    "expected_facts": [
+      "9.4 mm/s RMS",
+      "driven-end",
+      "K-101"
+    ],
+    "relevant_documents": [
+      "compressor_k101_inspection.md"
+    ],
+    "category": "vibration_diagnostics"
+  },
+  {
+    "id": "QA-02",
+    "question": "What was the primary root cause of unbalance on Compressor K-101 rotor?",
+    "expected_facts": [
+      "hydrocarbon polymer",
+      "Stage 3 impeller",
+      "42 grams unbalance"
+    ],
+    "relevant_documents": [
+      "compressor_k101_inspection.md"
+    ],
+    "category": "root_cause_analysis"
+  },
+  {
+    "id": "QA-03",
+    "question": "What peak bearing temperature was recorded on Boiler Feed Water Pump P-204 before overhaul?",
+    "expected_facts": [
+      "88.4°C",
+      "radial bearing",
+      "P-204"
+    ],
+    "relevant_documents": [
+      "pump_p204_maintenance.md"
+    ],
+    "category": "temperature_monitoring"
+  },
+  {
+    "id": "QA-04",
+    "question": "Why did Boiler Feed Water Pump P-204 suffer from cavitation and pressure drops?",
+    "expected_facts": [
+      "suction strainer",
+      "65% clogged",
+      "magnetite",
+      "NPSH"
+    ],
+    "relevant_documents": [
+      "pump_p204_maintenance.md"
+    ],
+    "category": "hydraulic_performance"
+  },
+  {
+    "id": "QA-05",
+    "question": "What replacement impeller material was installed on Pump P-204?",
+    "expected_facts": [
+      "13Cr martensitic stainless steel",
+      "P204-IMP-01-SS"
+    ],
+    "relevant_documents": [
+      "pump_p204_maintenance.md"
+    ],
+    "category": "materials_specification"
+  },
+  {
+    "id": "QA-06",
+    "question": "What was the shell-side pressure drop on Crude Pre-Heat Exchanger E-302 prior to hydro-jetting?",
+    "expected_facts": [
+      "2.45 bar",
+      "0.8 bar"
+    ],
+    "relevant_documents": [
+      "heat_exchanger_e302_report.md"
+    ],
+    "category": "static_equipment"
+  },
+  {
+    "id": "QA-07",
+    "question": "How many tubes were plugged in Crude Pre-Heat Exchanger E-302 and what was the cleaning pressure used?",
+    "expected_facts": [
+      "14 tubes",
+      "1,400 bar",
+      "hydro-milling"
+    ],
+    "relevant_documents": [
+      "heat_exchanger_e302_report.md"
+    ],
+    "category": "maintenance_procedures"
+  },
+  {
+    "id": "QA-08",
+    "question": "What metallurgical root cause and stem galling issue caused emergency depressuring valve V-401 to fail?",
+    "expected_facts": [
+      "galling",
+      "17-4 PH"
+    ],
+    "relevant_documents": [
+      "valve_v401_failure_analysis.md"
+    ],
+    "category": "safety_critical_valves"
+  },
+  {
+    "id": "QA-09",
+    "question": "What new stem material and packing type were installed to repair valve V-401?",
+    "expected_facts": [
+      "Nitronic 50",
+      "Stellite",
+      "live-loaded graphite",
+      "Belleville"
+    ],
+    "relevant_documents": [
+      "valve_v401_failure_analysis.md"
+    ],
+    "category": "materials_specification"
+  },
+  {
+    "id": "QA-10",
+    "question": "What is the measured remaining wall thickness at CML-14 on the atmospheric column overhead line PL-12?",
+    "expected_facts": [
+      "4.22 mm",
+      "3.80 mm",
+      "0.42 mm corrosion allowance"
+    ],
+    "relevant_documents": [
+      "pipeline_corrosion_survey.md"
+    ],
+    "category": "corrosion_management"
+  },
+  {
+    "id": "QA-11",
+    "question": "What root cause accelerated local thinning at CML-14 on the crude distillation overhead line?",
+    "expected_facts": [
+      "neutralizing amine injection quill",
+      "eroded",
+      "acid condensation"
+    ],
+    "relevant_documents": [
+      "pipeline_corrosion_survey.md"
+    ],
+    "category": "corrosion_management"
+  },
+  {
+    "id": "QA-12",
+    "question": "What are the three most frequent cross-unit recurring failure modes identified in the 2025-2026 reliability report?",
+    "expected_facts": [
+      "mechanical seal",
+      "bearing",
+      "fouling"
+    ],
+    "relevant_documents": [
+      "equipment_recurring_issues_summary.md"
+    ],
+    "category": "reliability_strategy"
+  },
+  {
+    "id": "QA-13",
+    "question": "How many pump mechanical seal replacements were recorded across the refinery in the 12-month period?",
+    "expected_facts": [
+      "14",
+      "pump seal replacements"
+    ],
+    "relevant_documents": [
+      "equipment_recurring_issues_summary.md"
+    ],
+    "category": "reliability_metrics"
+  },
+  {
+    "id": "QA-14",
+    "question": "What was the post-overhaul acceptance testing vibration level achieved on Wet Gas Compressor K-101?",
+    "expected_facts": [
+      "2.1 mm/s",
+      "64.2"
+    ],
+    "relevant_documents": [
+      "compressor_k101_inspection.md"
+    ],
+    "category": "vibration_diagnostics"
+  },
+  {
+    "id": "QA-15",
+    "question": "What mitigation action is planned for the CDU overhead injection quill during the May 2026 outage?",
+    "expected_facts": [
+      "Hastelloy C-276",
+      "anti-vortex quill",
+      "May 2026"
+    ],
+    "relevant_documents": [
+      "pipeline_corrosion_survey.md"
+    ],
+    "category": "maintenance_procedures"
+  }
+]

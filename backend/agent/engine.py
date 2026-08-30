@@ -218,6 +218,7 @@ class AgentEngine:
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
+        user_role: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Streaming chat with agentic tool loop.
@@ -316,10 +317,10 @@ class AgentEngine:
                     "arguments": self._sanitize_args_for_display(tool_args),
                 }
 
-                # Execute the tool
+                # Execute the tool with user_role authorization check
                 if self._tool_registry:
                     result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id
+                        tool_name, tool_args, session_id=session_id, user_role=user_role
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -384,6 +385,7 @@ class AgentEngine:
         user_message: str,
         image_b64: str,
         model_id: Optional[str] = None,
+        user_role: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Two-step multimodal streaming with agentic tool loop.
@@ -419,7 +421,7 @@ class AgentEngine:
             logger.error("Failed to resolve vision model '%s': %s", vision_model_id, exc)
             yield {"type": "agent_status", "status": "vision_unavailable"}
             # Graceful degradation: fall through to text-only path
-            async for item in self.chat_stream_with_tools(session_id, user_message, model_id):
+            async for item in self.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
                 yield item
             return
 
@@ -541,7 +543,7 @@ class AgentEngine:
 
                 if self._tool_registry:
                     result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id
+                        tool_name, tool_args, session_id=session_id, user_role=user_role
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -600,6 +602,7 @@ class AgentEngine:
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
+        user_role: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Phase 6: Execute a user request via the planning pipeline.
@@ -629,7 +632,7 @@ class AgentEngine:
         # Verify Phase 6 components are wired
         if not hasattr(self, '_task_manager') or self._task_manager is None:
             logger.warning("Phase 6 not initialised — falling back to tool loop")
-            async for item in self.chat_stream_with_tools(session_id, user_message, model_id):
+            async for item in self.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
                 yield item
             return
 
@@ -827,7 +830,7 @@ class AgentEngine:
 
             if self._tool_registry:
                 result = await self._tool_registry.execute(
-                    step.tool_name, step.arguments, session_id=session_id
+                    step.tool_name, step.arguments, session_id=session_id, user_role=user_role
                 )
             else:
                 from backend.tools.registry import ToolResult
@@ -893,6 +896,7 @@ class AgentEngine:
         task_id: str,
         approval_id: str,
         approved: bool,
+        user_role: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Phase 6: Resume a paused task after human approval/rejection.
@@ -971,6 +975,7 @@ class AgentEngine:
             step_id=awaiting_step.id,
             tool_name=awaiting_step.tool_name,
             arguments=awaiting_step.arguments,
+            tool_registry=self._tool_registry,
         )
 
         if not verified:
@@ -978,13 +983,9 @@ class AgentEngine:
                 "approval_binding_mismatch | task=%s step=%s approval=%s",
                 task_id, awaiting_step.id, approval_id,
             )
-            self._task_manager.update_step_status(
-                task_id, awaiting_step.id, StepStatus.failed.value,
-                error="Approval verification failed: arguments may have been modified"
-            )
             self._task_manager.update_status(
                 task_id, TaskStatus.FAILED,
-                error="Approval binding verification failed"
+                error="Security: approval binding verification failed",
             )
             yield {
                 "type": "task_failed",
@@ -1020,7 +1021,8 @@ class AgentEngine:
         if self._tool_registry:
             result = await self._tool_registry.execute(
                 awaiting_step.tool_name, awaiting_step.arguments,
-                session_id=session_id
+                session_id=session_id,
+                user_role=user_role,
             )
         else:
             from backend.tools.registry import ToolResult
@@ -1048,14 +1050,22 @@ class AgentEngine:
                 error=str(result.error)[:500] if result.error else "Unknown error"
             )
 
+        yield {
+            "type": "plan_step",
+            "task_id": task_id,
+            "step_id": awaiting_step.id,
+            "status": "completed" if result.success else "failed",
+        }
+
         # 5. Continue with remaining steps
-        remaining_steps = task.plan.steps[step_idx + 1:]
+        final_text_parts = []
         sources = await self._retrieve_context(task.user_request)
+        remaining_steps = task.plan.steps[step_idx + 1:]
 
         for step in remaining_steps:
             # Reload task for fresh state
             task = self._task_manager.get_task(task_id)
-            if task is None or task.status == TaskStatus.CANCELLED:
+            if self._task_manager.is_cancelled(task_id):
                 yield {"type": "task_cancelled", "task_id": task_id}
                 yield []
                 return
@@ -1124,7 +1134,7 @@ class AgentEngine:
 
             if self._tool_registry:
                 result = await self._tool_registry.execute(
-                    step.tool_name, step.arguments, session_id=session_id
+                    step.tool_name, step.arguments, session_id=session_id, user_role=user_role
                 )
             else:
                 from backend.tools.registry import ToolResult

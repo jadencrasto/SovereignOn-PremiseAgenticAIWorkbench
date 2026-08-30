@@ -1,0 +1,118 @@
+{
+  "suite_name": "Security & Enterprise Hardening Evaluation Suite",
+  "timestamp": "2026-08-30T06:34:02Z",
+  "environment": "Air-Gapped Sovereign Enforcement",
+  "total_cases": 10,
+  "passed": 6,
+  "failed": 4,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.12856230000033975,
+  "summary_metrics": {
+    "Security_Controls_Passed": 6,
+    "Total_Security_Controls": 10,
+    "Compliance_Rate_Percent": 60.0
+  },
+  "test_cases": [
+    {
+      "test_id": "SEC-01",
+      "name": "Authentication & Argon2id Sessions",
+      "category": "authentication",
+      "status": "FAIL",
+      "duration_ms": 58.51269999402575,
+      "metrics": {},
+      "details": null,
+      "error": "too many values to unpack (expected 2)"
+    },
+    {
+      "test_id": "SEC-02",
+      "name": "RBAC Dual-Boundary Authorization",
+      "category": "access_control",
+      "status": "PASS",
+      "duration_ms": 0.48550000065006316,
+      "metrics": {},
+      "details": "Viewer blocked at ToolRegistry boundary; Operator and Admin permitted with explicit privileges",
+      "error": null
+    },
+    {
+      "test_id": "SEC-03",
+      "name": "CSRF Protection on Mutating Requests",
+      "category": "network_security",
+      "status": "PASS",
+      "duration_ms": 19.599799998104572,
+      "metrics": {},
+      "details": "Mutating cookie request without custom header rejected with 403 Forbidden",
+      "error": null
+    },
+    {
+      "test_id": "SEC-04",
+      "name": "Sandbox Path Traversal Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.298700004350394,
+      "metrics": {},
+      "details": "All parent directory escape sequences rejected",
+      "error": null
+    },
+    {
+      "test_id": "SEC-05",
+      "name": "UNC Network Path Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.006799993570894003,
+      "metrics": {},
+      "details": "UNC network shares (\\\\ and //) rejected immediately",
+      "error": null
+    },
+    {
+      "test_id": "SEC-06",
+      "name": "Drive-Letter Path Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.00680002267472446,
+      "metrics": {},
+      "details": "Windows drive-letter paths rejected across forward and backward slashes",
+      "error": null
+    },
+    {
+      "test_id": "SEC-07",
+      "name": "Windows Reserved Device Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.06059999577701092,
+      "metrics": {},
+      "details": "CON, PRN, AUX, NUL, COM1-9, LPT1-9 device names rejected",
+      "error": null
+    },
+    {
+      "test_id": "SEC-08",
+      "name": "Atomic Write & Overwrite Prevention",
+      "category": "data_integrity",
+      "status": "FAIL",
+      "duration_ms": 1.4575000095646828,
+      "metrics": {},
+      "details": null,
+      "error": "File 'report.md' already exists. Set 'overwrite: true' to replace it."
+    },
+    {
+      "test_id": "SEC-09",
+      "name": "Production Insecure-Config Rejection",
+      "category": "config_governance",
+      "status": "FAIL",
+      "duration_ms": 0.8407999994233251,
+      "metrics": {},
+      "details": null,
+      "error": "1 validation error for Settings\ncors_origins\n  Input should be a valid string [type=string_type, input_value=['*'], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.12/v/string_type"
+    },
+    {
+      "test_id": "SEC-10",
+      "name": "Audit Log Secret Sanitization",
+      "category": "observability_security",
+      "status": "FAIL",
+      "duration_ms": 7.241799990879372,
+      "metrics": {},
+      "details": null,
+      "error": "0"
+    }
+  ],
+  "errors": []
+}

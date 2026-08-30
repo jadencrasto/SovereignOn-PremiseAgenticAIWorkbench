@@ -1,0 +1,170 @@
+{
+  "suite_name": "RAG Industrial Retrieval & Groundedness Benchmark",
+  "timestamp": "2026-08-30T06:42:29Z",
+  "environment": "Air-Gapped Local ChromaDB",
+  "total_cases": 15,
+  "passed": 0,
+  "failed": 15,
+  "environment_unavailable": 0,
+  "duration_seconds": 7.482185600005323,
+  "summary_metrics": {
+    "Mean_Precision_at_K": 0.0,
+    "Mean_Recall_at_K": 0.0,
+    "Mean_Retrieval_Latency_ms": 0.0,
+    "Groundedness_Fact_Overlap_Rate": 0.0,
+    "Success_Rate_Percent": 0.0
+  },
+  "test_cases": [
+    {
+      "test_id": "QA-01",
+      "name": "RAG: vibration_diagnostics",
+      "category": "vibration_diagnostics",
+      "status": "FAIL",
+      "duration_ms": 0.011900003300979733,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-02",
+      "name": "RAG: root_cause_analysis",
+      "category": "root_cause_analysis",
+      "status": "FAIL",
+      "duration_ms": 0.0051000097300857306,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-03",
+      "name": "RAG: temperature_monitoring",
+      "category": "temperature_monitoring",
+      "status": "FAIL",
+      "duration_ms": 0.0022999884095042944,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-04",
+      "name": "RAG: hydraulic_performance",
+      "category": "hydraulic_performance",
+      "status": "FAIL",
+      "duration_ms": 0.0018999853637069464,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-05",
+      "name": "RAG: materials_specification",
+      "category": "materials_specification",
+      "status": "FAIL",
+      "duration_ms": 0.0012999807950109243,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-06",
+      "name": "RAG: static_equipment",
+      "category": "static_equipment",
+      "status": "FAIL",
+      "duration_ms": 0.001100008375942707,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-07",
+      "name": "RAG: maintenance_procedures",
+      "category": "maintenance_procedures",
+      "status": "FAIL",
+      "duration_ms": 0.001400010660290718,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-08",
+      "name": "RAG: safety_critical_valves",
+      "category": "safety_critical_valves",
+      "status": "FAIL",
+      "duration_ms": 0.0013999815564602613,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-09",
+      "name": "RAG: materials_specification",
+      "category": "materials_specification",
+      "status": "FAIL",
+      "duration_ms": 0.001700012944638729,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-10",
+      "name": "RAG: corrosion_management",
+      "category": "corrosion_management",
+      "status": "FAIL",
+      "duration_ms": 0.001800013706088066,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-11",
+      "name": "RAG: corrosion_management",
+      "category": "corrosion_management",
+      "status": "FAIL",
+      "duration_ms": 0.00100000761449337,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-12",
+      "name": "RAG: reliability_strategy",
+      "category": "reliability_strategy",
+      "status": "FAIL",
+      "duration_ms": 0.0016999838408082724,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-13",
+      "name": "RAG: reliability_metrics",
+      "category": "reliability_metrics",
+      "status": "FAIL",
+      "duration_ms": 0.001500011421740055,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-14",
+      "name": "RAG: vibration_diagnostics",
+      "category": "vibration_diagnostics",
+      "status": "FAIL",
+      "duration_ms": 0.001400010660290718,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    },
+    {
+      "test_id": "QA-15",
+      "name": "RAG: maintenance_procedures",
+      "category": "maintenance_procedures",
+      "status": "FAIL",
+      "duration_ms": 0.0013999815564602613,
+      "metrics": {},
+      "details": null,
+      "error": "'DocumentService' object has no attribute 'search_context'"
+    }
+  ],
+  "errors": []
+}

@@ -38,6 +38,10 @@ data/sandbox/*
 !data/sandbox/.gitkeep
 data/logs/*
 !data/logs/.gitkeep
+data/tasks/*
+!data/tasks/.gitkeep
+data/chromadb_eval/
+data/uploads_eval/
 
 # -----------------------------------------------------------------------------
 # IDE / OS

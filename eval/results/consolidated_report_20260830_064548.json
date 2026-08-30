@@ -1,0 +1,137 @@
+{
+  "title": "Sovereign AI Workbench \u2014 Phase 8 Evaluation Scorecard",
+  "timestamp": "2026-08-30 06:45:48 UTC",
+  "overall_status": "FAIL",
+  "total_duration_seconds": 26.01,
+  "environment": {
+    "os": "nt",
+    "python_version": "3.13.7",
+    "ollama_available": true,
+    "available_models": [
+      "nomic-embed-text:latest",
+      "llava:7b",
+      "qwen2.5:7b"
+    ],
+    "air_gapped": true,
+    "timestamp_utc": "2026-08-30T06:45:25.053200+00:00"
+  },
+  "summary": {
+    "total_cases": 55,
+    "passed": 54,
+    "failed": 1,
+    "environment_unavailable": 0,
+    "pass_rate_runnable_percent": 98.2
+  },
+  "suites": [
+    {
+      "name": "Agent Reliability & Fault Injection Benchmark",
+      "total": 7,
+      "passed": 7,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 0.26,
+      "metrics": {
+        "Passed_Scenarios": 7,
+        "Total_Scenarios": 7,
+        "Reliability_Score_Percent": 100.0
+      }
+    },
+    {
+      "name": "Security & Enterprise Hardening Evaluation Suite",
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 0.25,
+      "metrics": {
+        "Security_Controls_Passed": 10,
+        "Total_Security_Controls": 10,
+        "Compliance_Rate_Percent": 100.0
+      }
+    },
+    {
+      "name": "Tool Execution, Authorization & Latency Benchmark",
+      "total": 7,
+      "passed": 7,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 0.01,
+      "metrics": {
+        "Tools_Evaluated": 5,
+        "Passed_Tool_Operations": 7,
+        "Average_Tool_Latency_ms": 0.7,
+        "Success_Rate_Percent": 100.0
+      }
+    },
+    {
+      "name": "System Latency & Performance Benchmark",
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 13.6,
+      "metrics": {
+        "Health_Live_Latency_Mean_ms": 0.001,
+        "Health_Ready_Latency_Mean_ms": 57.915,
+        "Task_Creation_Latency_Mean_ms": 5.889,
+        "Tool_Execution_Latency_Mean_ms": 0.018,
+        "Model_Inference_Latency_Mean_ms": 3543.541
+      }
+    },
+    {
+      "name": "Baseline vs System Comparative Benchmark",
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 0.0,
+      "metrics": {
+        "RAG_Fact_Coverage": 1.0,
+        "No_Retrieval_Fact_Coverage": 0.0,
+        "Agent_Workflow_Decomposition_Support": "Enabled (Multi-Step DAG + Approval Binding)",
+        "Baseline_Direct_Execution_Support": "Single-Turn Only (No Approval Binding)"
+      }
+    },
+    {
+      "name": "Multimodal Vision & Equipment Inspection Benchmark",
+      "total": 4,
+      "passed": 4,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 2.35,
+      "metrics": {
+        "Image_Processing_Verified": true,
+        "Context_Injection_Verified": true,
+        "Degradation_Tolerance_Verified": true
+      }
+    },
+    {
+      "name": "Industrial Report Generation Workflow Benchmark",
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "unavailable": 0,
+      "duration_seconds": 0.21,
+      "metrics": {
+        "Workflow_Stages_Completed": 5,
+        "Total_Workflow_Stages": 5,
+        "Workflow_Success_Rate": 1.0
+      }
+    },
+    {
+      "name": "RAG Industrial Retrieval & Groundedness Benchmark",
+      "total": 15,
+      "passed": 14,
+      "failed": 1,
+      "unavailable": 0,
+      "duration_seconds": 6.87,
+      "metrics": {
+        "Mean_Precision_at_K": 0.7333,
+        "Mean_Recall_at_K": 1.0,
+        "Mean_Retrieval_Latency_ms": 11.37,
+        "Groundedness_Fact_Overlap_Rate": 0.8333,
+        "Success_Rate_Percent": 93.3
+      }
+    }
+  ]
+}

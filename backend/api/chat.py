@@ -44,6 +44,8 @@ from backend.schemas.chat import (
     StreamChunk,
     _SourceRef,
 )
+from backend.auth.dependencies import get_current_user, require_permission
+from backend.auth.models import Permission, User
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,7 @@ async def chat(
     request: Request,
     engine=Depends(get_engine),
     model_router=Depends(get_router_obj),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Send a user message.
@@ -86,8 +89,8 @@ async def chat(
     model_used = f"{provider_name}/{model_name}"
 
     logger.info(
-        "chat_request | session=%s model=%s stream=%s tools=%s len=%d",
-        session_id, model_used, body.stream, body.tools_enabled, len(body.message),
+        "chat_request | session=%s user=%s role=%s model=%s stream=%s tools=%s len=%d",
+        session_id, current_user.username, current_user.role, model_used, body.stream, body.tools_enabled, len(body.message),
     )
 
     if body.stream:
@@ -103,7 +106,7 @@ async def chat(
             )
             if use_planning and hasattr(engine, '_task_manager') and engine._task_manager is not None:
                 return StreamingResponse(
-                    _stream_sse_with_planning(engine, session_id, body.message, body.model, model_used),
+                    _stream_sse_with_planning(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -112,7 +115,7 @@ async def chat(
                     },
                 )
             return StreamingResponse(
-                _stream_sse_with_tools(engine, session_id, body.message, body.model, model_used),
+                _stream_sse_with_tools(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -151,7 +154,7 @@ async def chat(
 # POST /api/chat/multimodal  (Phase 5 NEW)
 # ---------------------------------------------------------------------------
 
-@router.post("/multimodal", summary="Send a message with optional image attachment (Phase 5)")
+@router.post("/multimodal", summary="Send a multimodal message with image attachment")
 async def chat_multimodal(
     request: Request,
     engine=Depends(get_engine),
@@ -162,6 +165,7 @@ async def chat_multimodal(
     stream: bool = Form(default=True),
     tools_enabled: bool = Form(default=True),
     image: Optional[UploadFile] = File(default=None),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Send a multipart message with optional image attachment.
@@ -184,8 +188,8 @@ async def chat_multimodal(
     model_used = f"{provider_name}/{model_name}"
 
     logger.info(
-        "multimodal_request | session=%s model=%s stream=%s tools=%s has_image=%s",
-        resolved_session_id, model_used, stream, tools_enabled, image is not None,
+        "multimodal_request | session=%s user=%s role=%s model=%s stream=%s tools=%s has_image=%s",
+        resolved_session_id, current_user.username, current_user.role, model_used, stream, tools_enabled, image is not None,
     )
 
     # ---- Process image if provided ----
@@ -241,6 +245,7 @@ async def chat_multimodal(
             _stream_sse_multimodal(
                 engine, resolved_session_id, message, image_b64,
                 model, model_used, use_tools, attachment_meta,
+                user_role=current_user.role,
             ),
             media_type="text/event-stream",
             headers={
@@ -254,7 +259,7 @@ async def chat_multimodal(
         use_tools = tools_enabled and hasattr(engine, '_tool_registry') and engine._tool_registry is not None
         if use_tools:
             return StreamingResponse(
-                _stream_sse_with_tools(engine, resolved_session_id, message, model, model_used),
+                _stream_sse_with_tools(engine, resolved_session_id, message, model, model_used, user_role=current_user.role),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -341,6 +346,7 @@ async def _stream_sse_with_tools(
     user_message: str,
     model_id,
     model_used: str,
+    user_role: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the agent engine tool stream in SSE format.
@@ -353,7 +359,7 @@ async def _stream_sse_with_tools(
     try:
         sources = []
 
-        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id):
+        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
             if isinstance(item, str):
                 # Text delta
                 chunk = StreamChunk(type="delta", content=item)
@@ -435,6 +441,7 @@ async def _stream_sse_multimodal(
     model_used: str,
     use_tools: bool,
     attachment_meta: Optional[ImageAttachment],
+    user_role: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the multimodal engine stream in SSE format.
@@ -445,9 +452,9 @@ async def _stream_sse_multimodal(
     try:
         sources = []
         engine_stream = engine.chat_stream_with_tools_multimodal(
-            session_id, user_message, image_b64, model_id
+            session_id, user_message, image_b64, model_id, user_role=user_role,
         ) if use_tools else engine.chat_stream_with_tools_multimodal(
-            session_id, user_message, image_b64, model_id
+            session_id, user_message, image_b64, model_id, user_role=user_role,
         )
 
         async for item in engine_stream:
@@ -527,6 +534,7 @@ async def _stream_sse_with_planning(
     user_message: str,
     model_id,
     model_used: str,
+    user_role: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the agent engine planning stream in SSE format.
@@ -543,7 +551,7 @@ async def _stream_sse_with_planning(
     try:
         sources = []
 
-        async for item in engine.run_agent_task(session_id, user_message, model_id):
+        async for item in engine.run_agent_task(session_id, user_message, model_id, user_role=user_role):
             if isinstance(item, str):
                 # Text delta
                 chunk = StreamChunk(type="delta", content=item)
@@ -579,11 +587,11 @@ async def _stream_sse_with_planning(
                     )
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
-                # Phase 6 events — pass through as raw JSON
+                # Phase 6 planning & approval events — serialize dict directly
                 elif event_type in (
-                    "plan_created", "plan_step",
-                    "approval_required", "approval_granted", "approval_rejected",
-                    "task_started", "task_completed", "task_failed", "task_cancelled",
+                    "plan_created", "plan_step", "approval_required",
+                    "approval_granted", "approval_rejected", "task_started",
+                    "task_completed", "task_failed", "task_cancelled",
                 ):
                     yield f"data: {_json.dumps(item)}\n\n"
 
@@ -653,7 +661,11 @@ def _sources_to_refs(sources: List) -> List[_SourceRef]:
 # ---------------------------------------------------------------------------
 
 @router.get("/sessions", summary="List active conversation sessions")
-async def list_sessions(request: Request, engine=Depends(get_engine)):
+async def list_sessions(
+    request: Request,
+    engine=Depends(get_engine),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     memory = engine._memory
     return {
         "sessions": memory.list_sessions(),
@@ -662,7 +674,12 @@ async def list_sessions(request: Request, engine=Depends(get_engine)):
 
 
 @router.delete("/sessions/{session_id}", summary="Clear a conversation session")
-async def clear_session(session_id: str, request: Request, engine=Depends(get_engine)):
+async def clear_session(
+    session_id: str,
+    request: Request,
+    engine=Depends(get_engine),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     memory = engine._memory
     deleted = memory.delete_session(session_id)
     if not deleted:

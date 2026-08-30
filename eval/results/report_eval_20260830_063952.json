@@ -1,0 +1,68 @@
+{
+  "suite_name": "Industrial Report Generation Workflow Benchmark",
+  "timestamp": "2026-08-30T06:39:52Z",
+  "environment": "Air-Gapped Sovereign Workflow",
+  "total_cases": 5,
+  "passed": 5,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.19478459999663755,
+  "summary_metrics": {
+    "Workflow_Stages_Completed": 5,
+    "Total_Workflow_Stages": 5,
+    "Workflow_Success_Rate": 1.0
+  },
+  "test_cases": [
+    {
+      "test_id": "RPT-01",
+      "name": "Task Planning & DAG Construction",
+      "category": "workflow_orchestration",
+      "status": "PASS",
+      "duration_ms": 30.75970002100803,
+      "metrics": {},
+      "details": "Task task_ce353f31728d generated 3-step execution plan with approval requirement on step 3",
+      "error": null
+    },
+    {
+      "test_id": "RPT-02",
+      "name": "Automated Read Step Execution",
+      "category": "workflow_orchestration",
+      "status": "PASS",
+      "duration_ms": 37.84710000036284,
+      "metrics": {},
+      "details": "RAG context retrieval and arithmetic calculation steps completed cleanly",
+      "error": null
+    },
+    {
+      "test_id": "RPT-03",
+      "name": "Human Approval Binding & Verification",
+      "category": "human_in_the_loop",
+      "status": "PASS",
+      "duration_ms": 61.79190002148971,
+      "metrics": {},
+      "details": "Approval request created, approved by operator, and SHA-256 bound arguments verified",
+      "error": null
+    },
+    {
+      "test_id": "RPT-04",
+      "name": "Sandboxed Report Output & Citation Verification",
+      "category": "data_integrity",
+      "status": "PASS",
+      "duration_ms": 27.068099996540695,
+      "metrics": {},
+      "details": "Generated Markdown report contains structured sections, findings, and verified document citations",
+      "error": null
+    },
+    {
+      "test_id": "RPT-05",
+      "name": "Audit Trail Complete Attribution",
+      "category": "compliance_audit",
+      "status": "PASS",
+      "duration_ms": 1.2510999804362655,
+      "metrics": {},
+      "details": "Verified 3 tool execution events and 2 approval events in SQLite audit log",
+      "error": null
+    }
+  ],
+  "errors": []
+}

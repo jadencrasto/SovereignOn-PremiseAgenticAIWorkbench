@@ -1,0 +1,100 @@
+{
+  "suite_name": "System Latency & Performance Benchmark",
+  "timestamp": "2026-08-30T06:39:50Z",
+  "environment": "Air-Gapped Local Benchmarking",
+  "total_cases": 5,
+  "passed": 5,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 13.739083899999969,
+  "summary_metrics": {
+    "Health_Live_Latency_Mean_ms": 0.002,
+    "Health_Ready_Latency_Mean_ms": 230.578,
+    "Task_Creation_Latency_Mean_ms": 5.711,
+    "Tool_Execution_Latency_Mean_ms": 0.045,
+    "Model_Inference_Latency_Mean_ms": 3560.095
+  },
+  "test_cases": [
+    {
+      "test_id": "PERF-01",
+      "name": "Health Live Probe Latency",
+      "category": "health_probes",
+      "status": "PASS",
+      "duration_ms": 0.002,
+      "metrics": {
+        "min": 0.0,
+        "max": 0.003,
+        "mean": 0.002,
+        "median": 0.001,
+        "p95": 0.003
+      },
+      "details": "Mean=0.002ms, P95=0.003ms",
+      "error": null
+    },
+    {
+      "test_id": "PERF-02",
+      "name": "Health Ready Probe Latency",
+      "category": "health_probes",
+      "status": "PASS",
+      "duration_ms": 230.578,
+      "metrics": {
+        "min": 0.003,
+        "max": 691.72,
+        "mean": 230.578,
+        "median": 0.012,
+        "p95": 691.72
+      },
+      "details": "Mean=230.578ms, P95=691.72ms",
+      "error": null
+    },
+    {
+      "test_id": "PERF-03",
+      "name": "Task Creation SQLite WAL Latency",
+      "category": "task_persistence",
+      "status": "PASS",
+      "duration_ms": 5.711,
+      "metrics": {
+        "min": 5.554,
+        "max": 5.852,
+        "mean": 5.711,
+        "median": 5.726,
+        "p95": 5.852
+      },
+      "details": "Mean=5.711ms, P95=5.852ms",
+      "error": null
+    },
+    {
+      "test_id": "PERF-04",
+      "name": "Tool Execution Latency (Calculator)",
+      "category": "tool_dispatch",
+      "status": "PASS",
+      "duration_ms": 0.045,
+      "metrics": {
+        "min": 0.02,
+        "max": 0.087,
+        "mean": 0.045,
+        "median": 0.028,
+        "p95": 0.087
+      },
+      "details": "Mean=0.045ms, P95=0.087ms",
+      "error": null
+    },
+    {
+      "test_id": "PERF-05",
+      "name": "Local LLM Inference Latency",
+      "category": "model_inference",
+      "status": "PASS",
+      "duration_ms": 3560.095,
+      "metrics": {
+        "min": 3447.534,
+        "max": 3638.949,
+        "mean": 3560.095,
+        "median": 3593.801,
+        "p95": 3638.949
+      },
+      "details": "Mean=3560.095ms, P95=3638.949ms",
+      "error": null
+    }
+  ],
+  "errors": []
+}

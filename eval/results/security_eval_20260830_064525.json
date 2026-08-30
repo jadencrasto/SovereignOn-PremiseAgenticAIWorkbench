@@ -1,0 +1,118 @@
+{
+  "suite_name": "Security & Enterprise Hardening Evaluation Suite",
+  "timestamp": "2026-08-30T06:45:25Z",
+  "environment": "Air-Gapped Sovereign Enforcement",
+  "total_cases": 10,
+  "passed": 10,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.24751929999911226,
+  "summary_metrics": {
+    "Security_Controls_Passed": 10,
+    "Total_Security_Controls": 10,
+    "Compliance_Rate_Percent": 100.0
+  },
+  "test_cases": [
+    {
+      "test_id": "SEC-01",
+      "name": "Authentication & Argon2id Sessions",
+      "category": "authentication",
+      "status": "PASS",
+      "duration_ms": 164.40780000993982,
+      "metrics": {},
+      "details": "One-time 16-char admin credential generated, Argon2id verified, session lifecycle clean",
+      "error": null
+    },
+    {
+      "test_id": "SEC-02",
+      "name": "RBAC Dual-Boundary Authorization",
+      "category": "access_control",
+      "status": "PASS",
+      "duration_ms": 0.5388999998103827,
+      "metrics": {},
+      "details": "Viewer blocked at ToolRegistry boundary; Operator and Admin permitted with explicit privileges",
+      "error": null
+    },
+    {
+      "test_id": "SEC-03",
+      "name": "CSRF Protection on Mutating Requests",
+      "category": "network_security",
+      "status": "PASS",
+      "duration_ms": 28.01139999064617,
+      "metrics": {},
+      "details": "Mutating cookie request without custom header rejected with 403 Forbidden",
+      "error": null
+    },
+    {
+      "test_id": "SEC-04",
+      "name": "Sandbox Path Traversal Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.4115999909117818,
+      "metrics": {},
+      "details": "All parent directory escape sequences rejected",
+      "error": null
+    },
+    {
+      "test_id": "SEC-05",
+      "name": "UNC Network Path Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.009899988071992993,
+      "metrics": {},
+      "details": "UNC network shares (\\\\ and //) rejected immediately",
+      "error": null
+    },
+    {
+      "test_id": "SEC-06",
+      "name": "Drive-Letter Path Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.007199996616691351,
+      "metrics": {},
+      "details": "Windows drive-letter paths rejected across forward and backward slashes",
+      "error": null
+    },
+    {
+      "test_id": "SEC-07",
+      "name": "Windows Reserved Device Rejection",
+      "category": "sandbox_isolation",
+      "status": "PASS",
+      "duration_ms": 0.06089999806135893,
+      "metrics": {},
+      "details": "CON, PRN, AUX, NUL, COM1-9, LPT1-9 device names rejected",
+      "error": null
+    },
+    {
+      "test_id": "SEC-08",
+      "name": "Atomic Write & Overwrite Prevention",
+      "category": "data_integrity",
+      "status": "PASS",
+      "duration_ms": 1.578199997311458,
+      "metrics": {},
+      "details": "Files committed atomically; overwrite prevented when overwrite=False",
+      "error": null
+    },
+    {
+      "test_id": "SEC-09",
+      "name": "Production Insecure-Config Rejection",
+      "category": "config_governance",
+      "status": "PASS",
+      "duration_ms": 3.0682999931741506,
+      "metrics": {},
+      "details": "Server refuses startup in production when auth_enabled=False or CORS=*",
+      "error": null
+    },
+    {
+      "test_id": "SEC-10",
+      "name": "Audit Log Secret Sanitization",
+      "category": "observability_security",
+      "status": "PASS",
+      "duration_ms": 7.878699980210513,
+      "metrics": {},
+      "details": "Passwords, tokens, keys redacted and long strings truncated in SQLite audit records",
+      "error": null
+    }
+  ],
+  "errors": []
+}

@@ -27,6 +27,8 @@ from backend.schemas.document import (
     DocumentResponse,
     DocumentUploadResponse,
 )
+from backend.auth.dependencies import get_current_user, require_permission
+from backend.auth.models import Permission, User
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ def get_doc_service(request: Request):
 async def upload_document(
     file: UploadFile = File(..., description="PDF, TXT, MD, or DOCX file"),
     doc_service=Depends(get_doc_service),
+    current_user: User = Depends(require_permission(Permission.EXECUTE_WRITE_TOOLS)),
 ):
     """
     Upload a document for RAG indexing.
@@ -108,7 +111,10 @@ async def upload_document(
     response_model=DocumentListResponse,
     summary="List all indexed documents",
 )
-async def list_documents(doc_service=Depends(get_doc_service)):
+async def list_documents(
+    doc_service=Depends(get_doc_service),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """Return all documents currently indexed in the vector store."""
     docs = doc_service.list_documents()
     return DocumentListResponse(
@@ -137,6 +143,7 @@ async def list_documents(doc_service=Depends(get_doc_service)):
 async def delete_document(
     document_id: str,
     doc_service=Depends(get_doc_service),
+    current_user: User = Depends(require_permission(Permission.EXECUTE_WRITE_TOOLS)),
 ):
     """
     Remove a document from the vector store and delete the uploaded file.

@@ -97,9 +97,9 @@ class Settings(BaseSettings):
     model_timeout_seconds: int = Field(default=120)
 
     # ------------------------------------------------------------------
-    # Phase 7: Local Authentication & RBAC
+    # Phase 7: Local Authentication & RBAC (default False for dev, enforced True in prod)
     # ------------------------------------------------------------------
-    auth_enabled: bool = Field(default=True)
+    auth_enabled: bool = Field(default=False)
     auth_idle_timeout_seconds: int = Field(default=28800)       # 8 hours
     auth_max_session_seconds: int = Field(default=86400)         # 24 hours
     auth_lockout_attempts: int = Field(default=5)

@@ -1,0 +1,89 @@
+{
+  "suite_name": "Tool Execution, Authorization & Latency Benchmark",
+  "timestamp": "2026-08-30T06:34:02Z",
+  "environment": "Air-Gapped Sandbox Environment",
+  "total_cases": 7,
+  "passed": 3,
+  "failed": 4,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.007704499992541969,
+  "summary_metrics": {
+    "Tools_Evaluated": 5,
+    "Passed_Tool_Operations": 3,
+    "Average_Tool_Latency_ms": 0.68,
+    "Success_Rate_Percent": 42.9
+  },
+  "test_cases": [
+    {
+      "test_id": "TOOL-01",
+      "name": "Calculator: Complex Arithmetic",
+      "category": "execution",
+      "status": "FAIL",
+      "duration_ms": 0.22170000011101365,
+      "metrics": {},
+      "details": null,
+      "error": "'ToolResult' object has no attribute 'data'"
+    },
+    {
+      "test_id": "TOOL-02",
+      "name": "Calculator: Division by Zero Safety",
+      "category": "error_handling",
+      "status": "PASS",
+      "duration_ms": 0.13410000246949494,
+      "metrics": {},
+      "details": "Clean error returned: Division by zero.",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-03",
+      "name": "File List: Sandbox Listing",
+      "category": "execution",
+      "status": "FAIL",
+      "duration_ms": 1.121399982366711,
+      "metrics": {},
+      "details": null,
+      "error": "'ToolResult' object has no attribute 'data'"
+    },
+    {
+      "test_id": "TOOL-04",
+      "name": "File Read: Sandbox File Access",
+      "category": "execution",
+      "status": "FAIL",
+      "duration_ms": 1.1864999833051115,
+      "metrics": {},
+      "details": null,
+      "error": "'ToolResult' object has no attribute 'data'"
+    },
+    {
+      "test_id": "TOOL-05",
+      "name": "File Write: Atomic Sandbox Write",
+      "category": "execution",
+      "status": "PASS",
+      "duration_ms": 1.6605999844614416,
+      "metrics": {},
+      "details": "Atomic write committed in sandbox workspace",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-06",
+      "name": "Document Search: Semantic Search",
+      "category": "execution",
+      "status": "FAIL",
+      "duration_ms": 0.41840001358650625,
+      "metrics": {},
+      "details": null,
+      "error": "'ToolResult' object has no attribute 'data'"
+    },
+    {
+      "test_id": "TOOL-07",
+      "name": "RBAC: Viewer Write Rejection",
+      "category": "authorization",
+      "status": "PASS",
+      "duration_ms": 0.006399990525096655,
+      "metrics": {},
+      "details": "Viewer role blocked at ToolRegistry boundary",
+      "error": null
+    }
+  ],
+  "errors": []
+}

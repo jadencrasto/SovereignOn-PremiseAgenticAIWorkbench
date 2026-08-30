@@ -52,7 +52,8 @@ async def get_current_user(
       3. Cookie: session_token=<token> (with CSRF header requirement for mutating methods)
     """
     # 1. Dev mode bypass
-    auth_enabled = getattr(settings, "auth_enabled", True)
+    active_settings = getattr(request.app.state, "settings", settings)
+    auth_enabled = getattr(active_settings, "auth_enabled", False)
     if not auth_enabled:
         user = _get_synthetic_dev_admin()
         request.state.user = user

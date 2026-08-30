@@ -1,0 +1,62 @@
+{
+  "suite_name": "Multimodal Vision & Equipment Inspection Benchmark",
+  "timestamp": "2026-08-30T06:47:46Z",
+  "environment": "Air-Gapped Multimodal Pipeline",
+  "total_cases": 4,
+  "passed": 4,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 2.3747891999955755,
+  "summary_metrics": {
+    "Image_Processing_Verified": true,
+    "Context_Injection_Verified": true,
+    "Degradation_Tolerance_Verified": true
+  },
+  "test_cases": [
+    {
+      "test_id": "MM-01",
+      "name": "Equipment Image Ingestion & Processing",
+      "category": "image_pipeline",
+      "status": "PASS",
+      "duration_ms": 2.2194000193849206,
+      "metrics": {
+        "width": 400,
+        "height": 300,
+        "size_bytes": 4596
+      },
+      "details": "Processed 400x300 PNG, Base64 len=6128",
+      "error": null
+    },
+    {
+      "test_id": "MM-02",
+      "name": "Visual Context Message Construction",
+      "category": "context_injection",
+      "status": "PASS",
+      "duration_ms": 0.285100017208606,
+      "metrics": {},
+      "details": "Visual observation correctly formatted as synthetic user observation for reasoning LLM",
+      "error": null
+    },
+    {
+      "test_id": "MM-03",
+      "name": "Vision Analysis Pipeline Execution",
+      "category": "model_inference",
+      "status": "PASS",
+      "duration_ms": 2370.3916000085883,
+      "metrics": {},
+      "details": "LLaVA vision model executed visual defect extraction",
+      "error": null
+    },
+    {
+      "test_id": "MM-04",
+      "name": "Vision Fault Graceful Degradation",
+      "category": "fault_tolerance",
+      "status": "PASS",
+      "duration_ms": 0.3312000189907849,
+      "metrics": {},
+      "details": "When vision provider fails, service returns clean fallback observation without crashing",
+      "error": null
+    }
+  ],
+  "errors": []
+}

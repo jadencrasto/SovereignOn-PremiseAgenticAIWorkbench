@@ -1,0 +1,14 @@
+timestamp,equipment_tag,location,overall_rms_mms,peak_accel_g,bearing_temp_c,status
+2026-01-05T08:00:00Z,K-101,DE_Bearing_Horiz,4.8,0.62,61.2,Normal
+2026-01-12T08:00:00Z,K-101,DE_Bearing_Horiz,6.2,0.85,65.8,Normal
+2026-01-19T08:00:00Z,K-101,DE_Bearing_Horiz,7.5,1.15,72.4,Warning
+2026-01-26T08:00:00Z,K-101,DE_Bearing_Horiz,8.8,1.42,78.9,Warning
+2026-02-02T08:00:00Z,K-101,DE_Bearing_Horiz,9.4,1.68,82.1,Alarm
+2026-02-16T08:00:00Z,K-101,DE_Bearing_Horiz,2.1,0.28,64.2,Post_Overhaul_Normal
+2026-01-10T08:00:00Z,P-204,DE_Bearing_Radial,2.4,0.35,62.0,Normal
+2026-01-24T08:00:00Z,P-204,DE_Bearing_Radial,3.8,0.58,74.5,Warning
+2026-02-14T08:00:00Z,P-204,DE_Bearing_Radial,5.6,0.92,84.0,Warning
+2026-02-28T08:00:00Z,P-204,DE_Bearing_Radial,7.2,1.35,88.4,Alarm
+2026-03-05T08:00:00Z,P-204,DE_Bearing_Radial,1.65,0.22,58.5,Post_Overhaul_Normal
+2026-01-15T08:00:00Z,E-302,Shell_Inlet_Nozzle,0.8,0.12,45.0,Normal
+2026-02-15T08:00:00Z,V-401,Actuator_Bracket,1.2,0.18,48.0,Normal

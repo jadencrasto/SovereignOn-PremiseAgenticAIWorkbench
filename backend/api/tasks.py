@@ -32,6 +32,8 @@ from backend.schemas.tasks import (
     AgentPlanSchema,
     PlanStepSchema,
 )
+from backend.auth.dependencies import get_current_user, require_permission
+from backend.auth.models import Permission, User
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,7 @@ async def monitor_tasks(
     request: Request,
     stale_threshold_seconds: int = Query(default=3600, ge=60, le=86400),
     task_manager=Depends(get_task_manager),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """
     Return operational aggregation of all agent tasks:
@@ -83,6 +86,7 @@ async def list_tasks(
     limit: int = Query(default=50, ge=1, le=200),
     status: Optional[str] = Query(default=None),
     task_manager=Depends(get_task_manager),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """List recent tasks, optionally filtered by status."""
     tasks = task_manager.list_tasks(limit=limit, status=status)
@@ -119,13 +123,14 @@ async def list_tasks(
 @router.get(
     "/{task_id}",
     response_model=TaskSchema,
-    summary="Get task detail",
+    summary="Get task detail with execution plan",
 )
 async def get_task(
     task_id: str,
     task_manager=Depends(get_task_manager),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
-    """Retrieve full task details including plan and step states."""
+    """Retrieve the full task state including plan steps and current progress."""
     task = task_manager.get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
@@ -182,6 +187,7 @@ async def approve_task_step(
     task_manager=Depends(get_task_manager),
     approval_manager=Depends(get_approval_manager),
     engine=Depends(get_engine),
+    current_user: User = Depends(require_permission(Permission.APPROVE_TASKS)),
 ):
     """
     Approve or reject the pending approval for a task.
@@ -199,12 +205,13 @@ async def approve_task_step(
 
     approved = body.action == "approve"
 
-    # Use the engine to resume the task (handles hash verification)
+    # Use the engine to resume the task (handles hash verification and RBAC role passing)
     async def _resume_stream():
         async for item in engine.resume_agent_task(
             task_id=task_id,
             approval_id=pending.approval_id,
             approved=approved,
+            user_role=current_user.role,
         ):
             if isinstance(item, str):
                 yield f"data: {json.dumps({'type': 'delta', 'content': item})}\n\n"
@@ -236,6 +243,7 @@ async def approve_task_step(
 async def cancel_task(
     task_id: str,
     task_manager=Depends(get_task_manager),
+    current_user: User = Depends(require_permission(Permission.MANAGE_TASKS)),
 ):
     """Cancel a task that is in progress or awaiting approval."""
     from backend.agent.task import TaskStateError
@@ -263,6 +271,7 @@ async def cancel_task(
 async def list_task_approvals(
     task_id: str,
     approval_manager=Depends(get_approval_manager),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """List all approval requests (including resolved) for a task."""
     approvals = approval_manager.get_approvals_for_task(task_id)

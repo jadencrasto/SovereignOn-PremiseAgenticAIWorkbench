@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from backend.schemas.tools import ToolInfoResponse, ToolsListResponse
+from backend.auth.dependencies import get_current_user, require_permission
+from backend.auth.models import Permission, User
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,10 @@ router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 
 @router.get("", response_model=ToolsListResponse, summary="List registered tools")
-async def list_tools(request: Request):
+async def list_tools(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """Return metadata for all registered tools."""
     registry = request.app.state.tool_registry
 

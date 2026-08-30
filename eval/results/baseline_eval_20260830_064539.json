@@ -1,0 +1,45 @@
+{
+  "suite_name": "Baseline vs System Comparative Benchmark",
+  "timestamp": "2026-08-30T06:45:39Z",
+  "environment": "Air-Gapped Sovereign Comparison",
+  "total_cases": 2,
+  "passed": 2,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.0017643999890424311,
+  "summary_metrics": {
+    "RAG_Fact_Coverage": 1.0,
+    "No_Retrieval_Fact_Coverage": 0.0,
+    "Agent_Workflow_Decomposition_Support": "Enabled (Multi-Step DAG + Approval Binding)",
+    "Baseline_Direct_Execution_Support": "Single-Turn Only (No Approval Binding)"
+  },
+  "test_cases": [
+    {
+      "test_id": "BASE-01",
+      "name": "RAG vs No-Retrieval Grounded Fact Availability",
+      "category": "rag_comparison",
+      "status": "PASS",
+      "duration_ms": 0.801000016508624,
+      "metrics": {
+        "rag_fact_found": true,
+        "no_retrieval_fact_found": false
+      },
+      "details": "RAG retrieved exact plant technical measurement (4.22 mm); no-retrieval baseline has 0% knowledge of private asset data",
+      "error": null
+    },
+    {
+      "test_id": "BASE-02",
+      "name": "Agent Planning vs Direct Execution Routing",
+      "category": "agent_comparison",
+      "status": "PASS",
+      "duration_ms": 0.9503999899607152,
+      "metrics": {
+        "complex_triggers_planning": true,
+        "simple_uses_direct_loop": true
+      },
+      "details": "Multi-step industrial request routed to Phase 6 Planner with approval gates; simple math routed to Phase 4 direct loop",
+      "error": null
+    }
+  ],
+  "errors": []
+}

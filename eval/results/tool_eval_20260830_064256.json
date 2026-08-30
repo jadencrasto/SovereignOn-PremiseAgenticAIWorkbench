@@ -1,0 +1,89 @@
+{
+  "suite_name": "Tool Execution, Authorization & Latency Benchmark",
+  "timestamp": "2026-08-30T06:42:56Z",
+  "environment": "Air-Gapped Sandbox Environment",
+  "total_cases": 7,
+  "passed": 7,
+  "failed": 0,
+  "environment_unavailable": 0,
+  "duration_seconds": 0.00675899998168461,
+  "summary_metrics": {
+    "Tools_Evaluated": 5,
+    "Passed_Tool_Operations": 7,
+    "Average_Tool_Latency_ms": 0.58,
+    "Success_Rate_Percent": 100.0
+  },
+  "test_cases": [
+    {
+      "test_id": "TOOL-01",
+      "name": "Calculator: Complex Arithmetic",
+      "category": "execution",
+      "status": "PASS",
+      "duration_ms": 0.1466000103391707,
+      "metrics": {},
+      "details": "Result=585.0",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-02",
+      "name": "Calculator: Division by Zero Safety",
+      "category": "error_handling",
+      "status": "PASS",
+      "duration_ms": 0.07469998672604561,
+      "metrics": {},
+      "details": "Clean error returned: Division by zero.",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-03",
+      "name": "File List: Sandbox Listing",
+      "category": "execution",
+      "status": "PASS",
+      "duration_ms": 1.1346999963279814,
+      "metrics": {},
+      "details": "Listed 1 items in sandbox root",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-04",
+      "name": "File Read: Sandbox File Access",
+      "category": "execution",
+      "status": "PASS",
+      "duration_ms": 1.0337999847251922,
+      "metrics": {},
+      "details": "Read 32 bytes",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-05",
+      "name": "File Write: Atomic Sandbox Write",
+      "category": "execution",
+      "status": "PASS",
+      "duration_ms": 1.369300007354468,
+      "metrics": {},
+      "details": "Atomic write committed in sandbox workspace",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-06",
+      "name": "Document Search: Semantic Search",
+      "category": "execution",
+      "status": "PASS",
+      "duration_ms": 0.32309998641721904,
+      "metrics": {},
+      "details": "Retrieved 1 chunks",
+      "error": null
+    },
+    {
+      "test_id": "TOOL-07",
+      "name": "RBAC: Viewer Write Rejection",
+      "category": "authorization",
+      "status": "PASS",
+      "duration_ms": 0.006300018867477775,
+      "metrics": {},
+      "details": "Viewer role blocked at ToolRegistry boundary",
+      "error": null
+    }
+  ],
+  "errors": []
+}
