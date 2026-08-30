@@ -709,6 +709,7 @@ class AgentEngine:
         # ---- 4. Execute steps ----
         sources = await self._retrieve_context(user_message)
         final_text_parts = []
+        executed_step_results: List[Dict[str, Any]] = []
 
         for step_idx, step in enumerate(plan.steps):
             # Reload task from persistence to get fresh state
@@ -718,8 +719,53 @@ class AgentEngine:
                 yield []
                 return
 
+            # Dynamic resolution for file_write steps before approval/execution
+            if step.tool_name == "file_write":
+                existing_content = step.arguments.get("content", "")
+                if self._is_placeholder_content(existing_content) or executed_step_results:
+                    synthesized = await self._synthesize_file_content(
+                        user_request=task.user_request,
+                        filename=step.arguments.get("filename", "output.txt"),
+                        step_description=step.description,
+                        executed_step_results=executed_step_results,
+                        sources=sources,
+                        provider=provider,
+                        model_name=model_name,
+                    )
+                    step.arguments["content"] = synthesized
+                    self._task_manager.set_plan(task.task_id, plan)
+
+            # Dynamic resolution for calculator steps
+            elif step.tool_name == "calculator":
+                expr = step.arguments.get("expression", "")
+                if not expr or re.search(r"[a-zA-Z_]", str(expr)) or executed_step_results:
+                    resolved_expr = await self._resolve_calculator_expression(
+                        expression=str(expr),
+                        step_description=step.description,
+                        user_request=task.user_request,
+                        executed_step_results=executed_step_results,
+                        provider=provider,
+                        model_name=model_name,
+                    )
+                    if resolved_expr:
+                        step.arguments["expression"] = resolved_expr
+                        self._task_manager.set_plan(task.task_id, plan)
+                    elif re.search(r"[a-zA-Z_]", str(expr)):
+                        logger.warning("Could not resolve numeric expression for calculator: %s", expr)
+
+            # Dynamic canonical path resolution for file_read steps
+            elif step.tool_name == "file_read":
+                path_arg = step.arguments.get("relative_path") or step.arguments.get("filename")
+                from backend.config import settings
+                resolved_path = self._resolve_canonical_file_path(
+                    path_arg, executed_step_results, settings.upload_dir
+                )
+                if resolved_path:
+                    step.arguments["relative_path"] = resolved_path
+                    self._task_manager.set_plan(task.task_id, plan)
+
             if step.tool_name is None:
-                # Reasoning step — use LLM to generate response
+                # Reasoning step — use structured execution log and strict grounding
                 self._task_manager.update_step_status(
                     task.task_id, step.id, StepStatus.running.value
                 )
@@ -731,22 +777,15 @@ class AgentEngine:
                     "description": step.description,
                 }
 
-                # Use existing chat for reasoning steps
-                base_messages = self._build_messages(session_id, user_message, sources)
-                if self._tool_registry:
-                    tool_prompt = self._tool_registry.format_tools_for_prompt()
-                    if tool_prompt:
-                        tool_msg = Message(role="system", content=tool_prompt)
-                        if base_messages and base_messages[0].role == "system":
-                            base_messages = [base_messages[0], tool_msg] + base_messages[1:]
-                        else:
-                            base_messages = [tool_msg] + base_messages
+                reasoning_messages = self._build_task_reasoning_messages(
+                    session_id, user_message, executed_step_results, sources
+                )
 
                 request = ChatRequest(
-                    messages=base_messages,
+                    messages=reasoning_messages,
                     model=model_name,
-                    temperature=self._agent_config.get("temperature", 0.7),
-                    max_tokens=self._agent_config.get("max_tokens"),
+                    temperature=self._agent_config.get("temperature", 0.3),
+                    max_tokens=self._agent_config.get("max_tokens", 2048),
                     stream=True,
                 )
 
@@ -758,12 +797,41 @@ class AgentEngine:
                     if chunk.done:
                         break
 
-                full_response = "".join(accumulated)
+                full_response = "".join(accumulated).strip()
+                # Clean any accidental stray <tool_call> tags emitted in reasoning step
+                cleaned_response = re.sub(r"<tool_call>.*?</tool_call>", "", full_response, flags=re.DOTALL).strip()
+                if not cleaned_response:
+                    # Check if upstream document search found 0 results
+                    zero_results = any(
+                        item.get("tool") == "document_search" and (not item.get("result") or item.get("summary") == "0 results returned")
+                        for item in executed_step_results
+                    )
+                    if zero_results:
+                        cleaned_response = (
+                            f"No sufficiently relevant local documents were found for '{user_message}'. "
+                            "The local knowledge base contains refinery and industrial equipment documents, "
+                            "but the retrieved passages do not provide evidence about the requested subject. "
+                            "I cannot provide a grounded answer from the available local evidence."
+                        )
+                    else:
+                        cleaned_response = full_response or "Completed reasoning step."
+                full_response = cleaned_response
+
                 final_text_parts.append(full_response)
                 self._task_manager.update_step_status(
                     task.task_id, step.id, StepStatus.completed.value,
                     result=full_response[:500]
                 )
+                executed_step_results.append({
+                    "step_id": step.id,
+                    "tool": "reasoning",
+                    "description": step.description,
+                    "arguments": {},
+                    "success": True,
+                    "error": None,
+                    "result": full_response,
+                    "summary": full_response[:200],
+                })
                 yield {
                     "type": "plan_step",
                     "task_id": task.task_id,
@@ -772,9 +840,8 @@ class AgentEngine:
                 }
                 continue
 
-            # ---- Tool step ----
+            # ---- Tool step (Approval gate check) ----
             if step.requires_approval:
-                # Request approval
                 self._task_manager.update_step_status(
                     task.task_id, step.id, StepStatus.awaiting_approval.value
                 )
@@ -805,7 +872,6 @@ class AgentEngine:
                     "expires_at": approval.expires_at,
                 }
 
-                # Yield sources and stop — the task is paused until approval
                 yield sources
                 return
 
@@ -857,7 +923,17 @@ class AgentEngine:
                     task.task_id, step.id, StepStatus.failed.value,
                     error=str(result.error)[:500] if result.error else "Unknown error"
                 )
-                # Continue with remaining steps — non-fatal
+
+            executed_step_results.append({
+                "step_id": step.id,
+                "tool": step.tool_name,
+                "description": step.description,
+                "arguments": step.arguments,
+                "success": result.success,
+                "error": str(result.error) if not result.success else None,
+                "result": result.result if result.success else None,
+                "summary": result_summary,
+            })
 
             yield {
                 "type": "plan_step",
@@ -871,24 +947,37 @@ class AgentEngine:
         if full_final:
             self._memory.add_assistant_message(session_id, full_final)
 
-        self._task_manager.update_status(
-            task.task_id, TaskStatus.COMPLETED,
-            result=full_final[:1000] if full_final else "Task completed"
-        )
+        # Evaluate if any required steps failed
+        failed_steps = [s for s in plan.steps if s.status == StepStatus.failed.value]
+        completed_steps = [s for s in plan.steps if s.status == StepStatus.completed.value]
 
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "agent_task_done | task=%s steps=%d time=%.2fs",
-            task.task_id, len(plan.steps), elapsed,
-        )
-
-        yield {
-            "type": "task_completed",
-            "task_id": task.task_id,
-            "steps_completed": sum(
-                1 for s in plan.steps if s.status == StepStatus.completed.value
-            ),
-        }
+        if failed_steps:
+            self._task_manager.update_status(
+                task.task_id, TaskStatus.FAILED,
+                result=full_final[:1000] if full_final else f"{len(failed_steps)} step(s) failed during execution.",
+                error=f"Step(s) failed: {', '.join((s.tool_name or s.description) for s in failed_steps)}",
+            )
+            elapsed = time.monotonic() - t0
+            logger.info("agent_task_failed | task=%s failed_steps=%d time=%.2fs", task.task_id, len(failed_steps), elapsed)
+            yield {
+                "type": "task_failed",
+                "task_id": task.task_id,
+                "steps_completed": len(completed_steps),
+                "steps_failed": len(failed_steps),
+                "error": f"{len(failed_steps)} step(s) failed during execution",
+            }
+        else:
+            self._task_manager.update_status(
+                task.task_id, TaskStatus.COMPLETED,
+                result=full_final[:1000] if full_final else "Task completed",
+            )
+            elapsed = time.monotonic() - t0
+            logger.info("agent_task_done | task=%s steps=%d time=%.2fs", task.task_id, len(plan.steps), elapsed)
+            yield {
+                "type": "task_completed",
+                "task_id": task.task_id,
+                "steps_completed": len(completed_steps),
+            }
         yield sources
 
     async def resume_agent_task(
@@ -1060,6 +1149,23 @@ class AgentEngine:
         # 5. Continue with remaining steps
         final_text_parts = []
         sources = await self._retrieve_context(task.user_request)
+        provider, model_name = self._router.get_provider_for_model(None)
+
+        executed_step_results: List[Dict[str, Any]] = []
+        for s in task.plan.steps[:step_idx]:
+            executed_step_results.append({
+                "step_id": s.id,
+                "tool": s.tool_name or "reasoning",
+                "description": s.description,
+                "result": s.result,
+            })
+        executed_step_results.append({
+            "step_id": awaiting_step.id,
+            "tool": awaiting_step.tool_name,
+            "description": awaiting_step.description,
+            "result": result.result if hasattr(result, "result") else result_summary,
+        })
+
         remaining_steps = task.plan.steps[step_idx + 1:]
 
         for step in remaining_steps:
@@ -1070,15 +1176,117 @@ class AgentEngine:
                 yield []
                 return
 
+            # Dynamic synthesis for subsequent file_write steps
+            if step.tool_name == "file_write":
+                existing_content = step.arguments.get("content", "")
+                if self._is_placeholder_content(existing_content) or executed_step_results:
+                    synthesized = await self._synthesize_file_content(
+                        user_request=task.user_request,
+                        filename=step.arguments.get("filename", "output.txt"),
+                        step_description=step.description,
+                        executed_step_results=executed_step_results,
+                        sources=sources,
+                        provider=provider,
+                        model_name=model_name,
+                    )
+                    step.arguments["content"] = synthesized
+                    self._task_manager.set_plan(task_id, task.plan)
+
+            # Dynamic resolution for calculator steps
+            elif step.tool_name == "calculator":
+                expr = step.arguments.get("expression", "")
+                if not expr or re.search(r"[a-zA-Z_]", str(expr)) or executed_step_results:
+                    resolved_expr = await self._resolve_calculator_expression(
+                        expression=str(expr),
+                        step_description=step.description,
+                        user_request=task.user_request,
+                        executed_step_results=executed_step_results,
+                        provider=provider,
+                        model_name=model_name,
+                    )
+                    if resolved_expr:
+                        step.arguments["expression"] = resolved_expr
+                        self._task_manager.set_plan(task_id, task.plan)
+                    elif re.search(r"[a-zA-Z_]", str(expr)):
+                        logger.warning("Could not resolve numeric expression for calculator: %s", expr)
+
+            # Dynamic canonical path resolution for file_read steps
+            elif step.tool_name == "file_read":
+                path_arg = step.arguments.get("relative_path") or step.arguments.get("filename")
+                from backend.config import settings
+                resolved_path = self._resolve_canonical_file_path(
+                    path_arg, executed_step_results, settings.upload_dir
+                )
+                if resolved_path:
+                    step.arguments["relative_path"] = resolved_path
+                    self._task_manager.set_plan(task_id, task.plan)
+
             if step.tool_name is None:
-                # Reasoning step — mark completed
+                # Reasoning step — use structured execution log and strict grounding
                 self._task_manager.update_step_status(
                     task_id, step.id, StepStatus.running.value
                 )
+                yield {
+                    "type": "plan_step",
+                    "task_id": task_id,
+                    "step_id": step.id,
+                    "status": "running",
+                    "description": step.description,
+                }
+
+                reasoning_messages = self._build_task_reasoning_messages(
+                    session_id, task.user_request, executed_step_results, sources
+                )
+
+                request = ChatRequest(
+                    messages=reasoning_messages,
+                    model=model_name,
+                    temperature=self._agent_config.get("temperature", 0.3),
+                    max_tokens=self._agent_config.get("max_tokens", 2048),
+                    stream=True,
+                )
+
+                accumulated = []
+                async for chunk in provider.chat_stream(request):
+                    if chunk.delta:
+                        accumulated.append(chunk.delta)
+                        yield chunk.delta
+                    if chunk.done:
+                        break
+
+                full_response = "".join(accumulated).strip()
+                cleaned_response = re.sub(r"<tool_call>.*?</tool_call>", "", full_response, flags=re.DOTALL).strip()
+                if not cleaned_response:
+                    zero_results = any(
+                        item.get("tool") == "document_search" and (not item.get("result") or item.get("summary") == "0 results returned")
+                        for item in executed_step_results
+                    )
+                    if zero_results:
+                        cleaned_response = (
+                            f"No sufficiently relevant local documents were found for '{task.user_request}'. "
+                            "The local knowledge base contains refinery and industrial equipment documents, "
+                            "but the retrieved passages do not provide evidence about the requested subject. "
+                            "I cannot provide a grounded answer from the available local evidence."
+                        )
+                    else:
+                        cleaned_response = full_response or "Completed reasoning step."
+                full_response = cleaned_response
+
+                final_text_parts.append(full_response)
                 self._task_manager.update_step_status(
                     task_id, step.id, StepStatus.completed.value,
-                    result="Reasoning step completed"
+                    result=full_response[:500]
                 )
+                executed_step_results.append({
+                    "step_id": step.id,
+                    "tool": "reasoning",
+                    "description": step.description,
+                    "arguments": {},
+                    "success": True,
+                    "error": None,
+                    "result": full_response,
+                    "summary": full_response[:200],
+                })
                 yield {
                     "type": "plan_step",
                     "task_id": task_id,
@@ -1162,19 +1370,371 @@ class AgentEngine:
                     error=str(result.error)[:500] if result.error else "Unknown error"
                 )
 
+            executed_step_results.append({
+                "step_id": step.id,
+                "tool": step.tool_name,
+                "description": step.description,
+                "arguments": step.arguments,
+                "success": result.success,
+                "error": str(result.error) if not result.success else None,
+                "result": result.result if result.success else None,
+                "summary": result_summary,
+            })
+
+            yield {
+                "type": "plan_step",
+                "task_id": task_id,
+                "step_id": step.id,
+                "status": "completed" if result.success else "failed",
+            }
+
         # ---- All remaining steps complete ----
-        self._task_manager.update_status(
-            task_id, TaskStatus.COMPLETED, result="Task completed"
-        )
+        full_final = "\n".join(final_text_parts) if final_text_parts else ""
+        if full_final:
+            self._memory.add_assistant_message(session_id, full_final)
 
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "agent_task_resumed_done | task=%s approval=%s time=%.2fs",
-            task_id, approval_id, elapsed,
-        )
+        # Check if any step in the whole plan failed
+        fresh_task = self._task_manager.get_task(task_id)
+        all_steps = fresh_task.plan.steps if fresh_task and fresh_task.plan else []
+        failed_steps = [s for s in all_steps if s.status == StepStatus.failed.value]
+        completed_steps = [s for s in all_steps if s.status == StepStatus.completed.value]
 
-        yield {"type": "task_completed", "task_id": task_id}
+        if failed_steps:
+            self._task_manager.update_status(
+                task_id, TaskStatus.FAILED,
+                result=full_final[:1000] if full_final else f"{len(failed_steps)} step(s) failed during execution.",
+                error=f"Step(s) failed: {', '.join((s.tool_name or s.description) for s in failed_steps)}",
+            )
+            elapsed = time.monotonic() - t0
+            logger.info(
+                "agent_task_resumed_failed | task=%s approval=%s failed_steps=%d time=%.2fs",
+                task_id, approval_id, len(failed_steps), elapsed,
+            )
+            yield {
+                "type": "task_failed",
+                "task_id": task_id,
+                "steps_completed": len(completed_steps),
+                "steps_failed": len(failed_steps),
+                "error": f"{len(failed_steps)} step(s) failed during execution",
+            }
+        else:
+            self._task_manager.update_status(
+                task_id, TaskStatus.COMPLETED,
+                result=full_final[:1000] if full_final else "Task completed",
+            )
+            elapsed = time.monotonic() - t0
+            logger.info(
+                "agent_task_resumed_done | task=%s approval=%s time=%.2fs",
+                task_id, approval_id, elapsed,
+            )
+            yield {
+                "type": "task_completed",
+                "task_id": task_id,
+                "steps_completed": len(completed_steps),
+            }
         yield sources
+
+    # ------------------------------------------------------------------
+    # Dynamic Argument Resolution & Reasoning Context (Phase 6 correctness fix)
+    # ------------------------------------------------------------------
+
+    def _resolve_canonical_file_path(
+        self,
+        path_arg: Optional[str],
+        executed_step_results: List[Dict[str, Any]],
+        upload_dir: Path,
+    ) -> str:
+        """
+        Resolve a file path argument. Validates that the file exists directly
+        in upload_dir or matches an existing file in upload_dir.
+        Does NOT infer or fabricate filesystem paths from RAG result ordering/indexes.
+        """
+        if not path_arg:
+            return ""
+
+        # If the file exists directly on disk in upload_dir, return it as is
+        candidate = upload_dir / path_arg
+        if candidate.exists() and candidate.is_file():
+            return path_arg
+
+        # If path_arg matches a file in upload_dir case-insensitively
+        try:
+            for f in upload_dir.glob("*"):
+                if f.is_file() and f.name.lower() == path_arg.strip().lower():
+                    return f.name
+        except Exception:
+            pass
+
+        return path_arg
+
+    async def _resolve_calculator_expression(
+        self,
+        expression: str,
+        step_description: str,
+        user_request: str,
+        executed_step_results: List[Dict[str, Any]],
+        provider,
+        model_name: str,
+    ) -> Optional[str]:
+        """
+        Dynamically resolve a calculator expression into a valid arithmetic expression
+        (containing only numbers and operators, e.g. '1 + 3') using facts from
+        successful upstream step observations.
+        """
+        clean_expr = expression.strip()
+        if clean_expr and re.match(r"^[\d\.\s\+\-\*\/\(\)\^%]+$", clean_expr):
+            return clean_expr
+
+        # Gather successful observations and facts
+        obs_blocks = []
+        for item in executed_step_results:
+            if not item.get("success", True) and item.get("error"):
+                continue  # Skip failed steps
+            tool = item.get("tool", "step")
+            desc = item.get("description", "")
+            raw_res = item.get("result") or item.get("summary")
+            if isinstance(raw_res, (dict, list)):
+                res_str = json.dumps(raw_res, indent=2, default=str)
+            else:
+                res_str = str(raw_res)
+            if len(res_str) > 3000:
+                res_str = res_str[:3000] + "\n... (truncated)"
+            obs_blocks.append(f"[{tool} - {desc}]\n{res_str}")
+
+        if not obs_blocks:
+            logger.warning("No successful observations available to resolve calculator expression")
+            return None
+
+        context = "\n\n".join(obs_blocks)
+
+        system_prompt = (
+            "You are a precise arithmetic expression generator for an AI workbench.\n"
+            "Given the user request, step description, and observations from previous successful steps, "
+            "identify the exact numbers to calculate.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Output ONLY the arithmetic expression (e.g. '1 + 3' or '4 + 2 * 3').\n"
+            "2. Do NOT use variable names, words, letters, code fences, or explanations.\n"
+            "3. Use only numeric digits and arithmetic operators (+, -, *, /, //, %, **).\n"
+            "4. If the observations do NOT contain the required numbers or if the upstream data is missing, output EXACTLY 'NONE'."
+        )
+
+        user_prompt = (
+            f"User Request: {user_request}\n"
+            f"Calculation Objective: {step_description}\n"
+            f"Original Proposed Expression: {expression}\n\n"
+            f"Factual Observations:\n{context}\n\n"
+            f"Output the numeric arithmetic expression or NONE:"
+        )
+
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
+
+        request = ChatRequest(
+            messages=messages,
+            model=model_name,
+            temperature=0.0,
+            max_tokens=100,
+            stream=False,
+        )
+
+        try:
+            resp = await provider.chat(request)
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = content.strip().replace("`", "").strip()
+            if not content or content.upper() == "NONE":
+                return None
+            if re.match(r"^[\d\.\s\+\-\*\/\(\)\^%]+$", content):
+                return content
+            logger.warning("Model returned non-arithmetic expression for calculator: %s", content)
+            return None
+        except Exception as exc:
+            logger.error("Failed to resolve calculator expression: %s", exc)
+            return None
+
+    def _build_task_reasoning_messages(
+        self,
+        session_id: str,
+        user_message: str,
+        executed_step_results: List[Dict[str, Any]],
+        sources: List[Any],
+    ) -> List[Message]:
+        """
+        Build messages for a reasoning step in a multi-step task, embedding the structured
+        execution log and grounding instructions so the LLM is strictly grounded in what
+        succeeded and what failed.
+        """
+        history = self._memory.get_history(session_id)
+
+        # Build execution log
+        log_lines = ["STRUCTURED EXECUTION LOG (Steps executed so far in this task):"]
+        for idx, item in enumerate(executed_step_results, start=1):
+            tool = item.get("tool", "step")
+            desc = item.get("description", "")
+            success = item.get("success", True)
+            args = item.get("arguments")
+            args_str = f" args={json.dumps(args, default=str)}" if args else ""
+
+            if success:
+                res = item.get("result") if item.get("result") is not None else (item.get("summary") or "Completed")
+                if isinstance(res, (dict, list)):
+                    res_str = json.dumps(res, indent=2, default=str)
+                else:
+                    res_str = str(res)
+                if len(res_str) > 2000:
+                    res_str = res_str[:2000] + "\n... (truncated)"
+                log_lines.append(f"- Step {idx} ({tool}{args_str}): SUCCESS\n  Result:\n{res_str}")
+            else:
+                err = item.get("error", "Unknown error")
+                log_lines.append(f"- Step {idx} ({tool}{args_str}): FAILED\n  Error: {err}")
+
+        execution_log = "\n\n".join(log_lines)
+
+        # Build document context
+        doc_parts = []
+        if sources:
+            doc_parts.append("RETRIEVED DOCUMENT EVIDENCE:")
+            for i, chunk in enumerate(sources, start=1):
+                doc_parts.append(
+                    f"[Document {i}: {getattr(chunk, 'filename', 'unknown')}]\n"
+                    f"{getattr(chunk, 'text', '')}"
+                )
+        doc_context = "\n\n".join(doc_parts) if doc_parts else ""
+
+        grounding_instructions = (
+            "CRITICAL FACTUAL GROUNDING RULES (Reasoning & Synthesis Step):\n"
+            "1. You are providing the direct final response to the user. Do NOT emit <tool_call> tags or attempt to invoke tools.\n"
+            "2. Base your response strictly on the factual evidence and successful tool outputs in the execution log above.\n"
+            "3. If document search or retrieval returned 0 results, or if no sufficiently relevant local evidence was found for the requested topic, you MUST explicitly state that no sufficiently relevant local documents were found in the knowledge base. State clearly that the available local knowledge base contains refinery and industrial equipment documents, but no evidence was found for the requested topic, and that you cannot provide a grounded answer from the available local evidence.\n"
+            "4. If any step FAILED (e.g. file_read failed or calculator failed), explicitly mention that the operation could not be performed and state the reason. NEVER claim or imply that a failed step was successful.\n"
+            "5. If a calculation succeeded, cite the calculated total. If a calculation failed or was not performed, state that the calculation could not be completed.\n"
+            "6. NEVER fabricate information, invent facts, or reinterpret/transfer facts from unrelated equipment into the requested topic.\n"
+            "7. Do NOT claim that documents support a topic when they do not.\n"
+            "8. Provide a clear, honest, and well-structured response summarizing the actual findings."
+        )
+
+        task_context_msg = Message(
+            role="system",
+            content=f"{execution_log}\n\n{doc_context}\n\n{grounding_instructions}".strip()
+        )
+
+        if history and history[-1].role == "user":
+            return list(history[:-1]) + [task_context_msg, history[-1]]
+        return list(history) + [task_context_msg]
+
+    @staticmethod
+    def _is_placeholder_content(content: Optional[str]) -> bool:
+        """Check if a string looks like an unfilled template or generic placeholder."""
+        if not content:
+            return True
+        stripped = content.strip()
+        if len(stripped) < 40:
+            return True
+        lower = stripped.lower()
+        if lower in {"text", "summary", "placeholder", "content", "todo", "test", "none", "null", "undefined"}:
+            return True
+        import re
+        if re.match(r"^(text\s*\n*)?summary of [a-z0-9_\-\s]+ found in documents\.?$", stripped, re.IGNORECASE):
+            return True
+        if re.match(r"^\[(?:insert|placeholder|enter|todo)\b.*\]$", stripped, re.IGNORECASE):
+            return True
+        return False
+
+    async def _synthesize_file_content(
+        self,
+        user_request: str,
+        filename: str,
+        step_description: str,
+        executed_step_results: List[Dict[str, Any]],
+        sources: List[Any],
+        provider,
+        model_name: str,
+    ) -> str:
+        """
+        Synthesizes complete, meaningful, factual file content using the user request,
+        prior step execution observations (e.g. document_search, file_read, calculator),
+        and retrieved document context.
+        """
+        context_blocks = []
+
+        # 1. Add tool results from prior steps
+        for item in executed_step_results:
+            tool = item.get("tool", "step")
+            desc = item.get("description", "")
+            raw_res = item.get("result")
+            if isinstance(raw_res, (dict, list)):
+                res_str = json.dumps(raw_res, indent=2, default=str)
+            else:
+                res_str = str(raw_res)
+            if len(res_str) > 4000:
+                res_str = res_str[:4000] + "\n... (truncated)"
+            context_blocks.append(f"[Step: {tool} - {desc}]\n{res_str}")
+
+        # 2. Add RAG retrieved document sources
+        if sources:
+            for s in sources:
+                fname = getattr(s, "filename", "unknown")
+                text = getattr(s, "text", "")
+                if text:
+                    context_blocks.append(f"[Retrieved Document: {fname}]\n{text}")
+
+        accumulated_context = "\n\n".join(context_blocks) if context_blocks else "(No previous step observations or retrieved documents)"
+
+        system_prompt = (
+            "You are an expert technical assistant in a sovereign on-premise industrial AI workbench.\n"
+            "Your task is to generate the exact, complete, high-quality text content to be saved into an output file.\n\n"
+            "CRITICAL RULES:\n"
+            "1. Output ONLY the raw content to be saved to the file — do NOT wrap the entire output in markdown code fences (do NOT start with ```text or ```markdown around the response).\n"
+            "2. Do NOT include conversational filler, preamble, greeting, or sign-offs (e.g., 'Here is the summary:', 'Hope this helps').\n"
+            "3. Base all facts, measurements, equipment IDs, root causes, and findings strictly on the provided context.\n"
+            "4. Be concise, factual, structured, and thorough. Never output generic placeholders (e.g., 'Summary of ...', 'text', 'TODO', '[insert]')."
+        )
+
+        user_prompt = (
+            f"User Request: {user_request}\n\n"
+            f"Target Filename: {filename}\n"
+            f"Step Objective: {step_description}\n\n"
+            f"Available Context & Retrieved Findings:\n"
+            f"{accumulated_context}\n\n"
+            f"Generate the complete, factual text content for '{filename}':"
+        )
+
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
+
+        request = ChatRequest(
+            messages=messages,
+            model=model_name,
+            temperature=0.3,
+            max_tokens=2048,
+            stream=False,
+        )
+
+        try:
+            resp = await provider.chat(request)
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = content.strip()
+
+            # Strip accidental surrounding markdown code fence
+            if content.startswith("```"):
+                first_nl = content.find("\n")
+                if first_nl != -1:
+                    content = content[first_nl + 1:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+
+            if content and len(content) >= 20 and not self._is_placeholder_content(content):
+                return content
+            logger.warning("Synthesized content too short or placeholder-like (%d chars), building fallback summary", len(content))
+        except Exception as exc:
+            logger.error("Failed to synthesize file content via LLM: %s", exc)
+
+        # Fallback to structured document summary if LLM call fails
+        return f"# Summary Report\n\nGenerated for: {user_request}\n\n{accumulated_context[:1500]}"
 
     # ------------------------------------------------------------------
     # Phase 6: Setters for new components
@@ -1316,11 +1876,13 @@ class AgentEngine:
     async def _retrieve_context(self, query: str) -> List:
         """
         Retrieve relevant document chunks for the user query.
+        Applies deterministic relevance gating so weak or unrelated retrieval
+        is not injected as false evidence.
 
         Returns [] if:
           - No DocumentService is wired
           - No documents are indexed
-          - Retrieval fails
+          - Retrieval fails or no chunks pass the relevance gate
 
         The agent continues normally in all cases.
         """
@@ -1331,7 +1893,13 @@ class AgentEngine:
         try:
             top_k = self._agent_config.get("rag", {}).get("top_k", 5)
             chunks = await self._doc_service.retrieve(query, top_k=top_k)
-            return chunks
+            # Apply deterministic relevance gate
+            is_rel_fn = getattr(self._doc_service._retriever, "is_chunk_relevant", None) if hasattr(self._doc_service, "_retriever") else None
+            relevant_chunks = [
+                c for c in chunks
+                if (is_rel_fn(c.score) if is_rel_fn else getattr(c, "is_relevant", True))
+            ]
+            return relevant_chunks
         except Exception as exc:
             logger.warning("RAG retrieval failed (continuing without context): %s", exc)
             return []
@@ -1382,6 +1950,7 @@ class AgentEngine:
             "- If the context does not contain enough information, say so clearly.\n"
             "- Cite which document(s) support your answer.\n"
             "- Do not invent facts not supported by the context.\n"
+            "- Do not adapt unrelated equipment documents to answer questions about a different topic.\n"
         )
 
         rag_message = Message(

@@ -3,10 +3,15 @@ import type {
   DocumentListResponse,
   DocumentUploadResponse,
   DocumentDeleteResponse,
+  DocumentDetailResponse,
 } from '../types';
 
 export async function fetchDocuments(): Promise<DocumentListResponse> {
   return apiRequest<DocumentListResponse>('/api/documents');
+}
+
+export async function fetchDocumentDetails(documentId: string): Promise<DocumentDetailResponse> {
+  return apiRequest<DocumentDetailResponse>(`/api/documents/${encodeURIComponent(documentId)}`);
 }
 
 export async function uploadDocument(file: File): Promise<DocumentUploadResponse> {
@@ -24,3 +29,4 @@ export async function deleteDocument(documentId: string): Promise<DocumentDelete
     method: 'DELETE',
   });
 }
+

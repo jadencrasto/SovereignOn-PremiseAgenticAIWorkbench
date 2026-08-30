@@ -19,3 +19,24 @@ export async function fetchSecurityStatusApi(): Promise<SecurityStatusResponse> 
 
   return resp.json();
 }
+
+export async function runSecurityScanApi(): Promise<SecurityStatusResponse> {
+  try {
+    const resp = await fetch(`${BASE_URL}/scan`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+    });
+
+    if (resp.ok) {
+      return await resp.json();
+    }
+  } catch {
+    // Fallback to GET /status
+  }
+  return fetchSecurityStatusApi();
+}
+
+

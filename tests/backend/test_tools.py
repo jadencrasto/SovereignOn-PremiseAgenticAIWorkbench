@@ -458,6 +458,27 @@ class TestFileWrite:
         with pytest.raises(ValueError, match="too large"):
             await fn(FileWriteInput(filename="big.txt", content="x" * (2 * 1024 * 1024)))
 
+    @pytest.mark.asyncio
+    async def test_reject_placeholder_tokens(self, tmp_path):
+        fn = create_file_write(tmp_path)
+        for bad in ["text", "summary", "placeholder", "TODO", "   test   "]:
+            with pytest.raises(ValueError, match="placeholder"):
+                await fn(FileWriteInput(filename="out.txt", content=bad))
+
+    @pytest.mark.asyncio
+    async def test_reject_template_placeholders(self, tmp_path):
+        fn = create_file_write(tmp_path)
+        with pytest.raises(ValueError, match="placeholder template"):
+            await fn(FileWriteInput(
+                filename="out.txt",
+                content="Summary of compressor issues found in documents."
+            ))
+        with pytest.raises(ValueError, match="unfilled template marker"):
+            await fn(FileWriteInput(
+                filename="out.txt",
+                content="[insert findings here]"
+            ))
+
 
 # ===================================================================
 # DOCUMENT SEARCH TOOL TESTS

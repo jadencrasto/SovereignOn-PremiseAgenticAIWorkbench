@@ -1,8 +1,8 @@
 {
   "title": "Sovereign AI Workbench \u2014 Phase 8 Evaluation Scorecard",
-  "timestamp": "2026-08-30 06:58:31 UTC",
+  "timestamp": "2026-08-30 17:20:42 UTC",
   "overall_status": "PASS",
-  "total_duration_seconds": 26.17,
+  "total_duration_seconds": 28.27,
   "environment": {
     "os": "nt",
     "python_version": "3.13.7",
@@ -13,7 +13,7 @@
       "qwen2.5:7b"
     ],
     "air_gapped": true,
-    "timestamp_utc": "2026-08-30T06:58:07.497116+00:00"
+    "timestamp_utc": "2026-08-30T17:20:16.496327+00:00"
   },
   "summary": {
     "total_cases": 55,
@@ -29,7 +29,7 @@
       "passed": 7,
       "failed": 0,
       "unavailable": 0,
-      "duration_seconds": 0.24,
+      "duration_seconds": 0.53,
       "metrics": {
         "Passed_Scenarios": 7,
         "Total_Scenarios": 7,
@@ -42,7 +42,7 @@
       "passed": 10,
       "failed": 0,
       "unavailable": 0,
-      "duration_seconds": 0.22,
+      "duration_seconds": 0.52,
       "metrics": {
         "Security_Controls_Passed": 10,
         "Total_Security_Controls": 10,
@@ -59,7 +59,7 @@
       "metrics": {
         "Tools_Evaluated": 5,
         "Passed_Tool_Operations": 7,
-        "Average_Tool_Latency_ms": 0.58,
+        "Average_Tool_Latency_ms": 0.59,
         "Success_Rate_Percent": 100.0
       }
     },
@@ -69,13 +69,13 @@
       "passed": 5,
       "failed": 0,
       "unavailable": 0,
-      "duration_seconds": 13.42,
+      "duration_seconds": 15.2,
       "metrics": {
         "Health_Live_Latency_Mean_ms": 0.001,
-        "Health_Ready_Latency_Mean_ms": 60.159,
-        "Task_Creation_Latency_Mean_ms": 5.667,
-        "Tool_Execution_Latency_Mean_ms": 0.025,
-        "Model_Inference_Latency_Mean_ms": 3477.226
+        "Health_Ready_Latency_Mean_ms": 83.171,
+        "Task_Creation_Latency_Mean_ms": 126.61,
+        "Tool_Execution_Latency_Mean_ms": 0.017,
+        "Model_Inference_Latency_Mean_ms": 3440.038
       }
     },
     {
@@ -98,7 +98,7 @@
       "passed": 4,
       "failed": 0,
       "unavailable": 0,
-      "duration_seconds": 2.37,
+      "duration_seconds": 2.39,
       "metrics": {
         "Image_Processing_Verified": true,
         "Context_Injection_Verified": true,
@@ -111,7 +111,7 @@
       "passed": 5,
       "failed": 0,
       "unavailable": 0,
-      "duration_seconds": 0.19,
+      "duration_seconds": 0.2,
       "metrics": {
         "Workflow_Stages_Completed": 5,
         "Total_Workflow_Stages": 5,
@@ -124,11 +124,11 @@
       "passed": 15,
       "failed": 0,
       "unavailable": 0,
-      "duration_seconds": 7.23,
+      "duration_seconds": 7.0,
       "metrics": {
         "Mean_Precision_at_K": 0.75,
         "Mean_Recall_at_K": 1.0,
-        "Mean_Retrieval_Latency_ms": 13.55,
+        "Mean_Retrieval_Latency_ms": 12.07,
         "Groundedness_Fact_Overlap_Rate": 0.9,
         "Success_Rate_Percent": 100.0
       }

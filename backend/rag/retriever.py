@@ -24,6 +24,12 @@ from backend.rag.store import VectorStore
 logger = logging.getLogger(__name__)
 
 
+# Default deterministic relevance distance threshold in ChromaDB cosine space
+# In ChromaDB (hnsw:space: cosine), distance = 1 - cosine_similarity.
+# Distance <= 0.385 (cosine similarity >= 0.615) indicates strong/grounded evidence.
+DEFAULT_MAX_RELEVANCE_DISTANCE = 0.385
+
+
 # ---------------------------------------------------------------------------
 # Result structure
 # ---------------------------------------------------------------------------
@@ -39,6 +45,7 @@ class RetrievedChunk:
     page: Optional[int]
     score: float            # cosine distance (lower = more similar)
     file_type: str = ""
+    is_relevant: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -59,10 +66,24 @@ class Retriever:
         embedding_service: EmbeddingService,
         vector_store: VectorStore,
         top_k: int = 5,
+        max_distance: float = DEFAULT_MAX_RELEVANCE_DISTANCE,
     ) -> None:
         self._embedder = embedding_service
         self._store = vector_store
         self._top_k = top_k
+        self._max_distance = max_distance
+
+    def is_chunk_relevant(self, score: float) -> bool:
+        """
+        Deterministic relevance check:
+        - In cosine distance space (0.0 to 2.0): score <= self._max_distance is relevant.
+        - For mock/similarity scores: score >= (1.0 - self._max_distance) is relevant.
+        """
+        if score <= self._max_distance:
+            return True
+        if score >= (1.0 - self._max_distance):
+            return True
+        return False
 
     async def retrieve(
         self,
@@ -111,6 +132,7 @@ class Retriever:
         for chunk_id, text, meta, dist in zip(ids, documents, metadatas, distances):
             if not text or not meta:
                 continue
+            dist_val = float(dist)
             results.append(RetrievedChunk(
                 text=text,
                 document_id=meta.get("document_id", ""),
@@ -118,8 +140,9 @@ class Retriever:
                 chunk_id=chunk_id,
                 chunk_index=int(meta.get("chunk_index", 0)),
                 page=int(meta["page"]) if "page" in meta else None,
-                score=float(dist),
+                score=dist_val,
                 file_type=meta.get("file_type", ""),
+                is_relevant=self.is_chunk_relevant(dist_val),
             ))
 
         logger.info(

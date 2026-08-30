@@ -152,6 +152,24 @@ def should_use_planning(
 
 
 # ---------------------------------------------------------------------------
+# Placeholder file path detection
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_PATH_PATTERN = re.compile(
+    r"^(?:document(?:_search)?(?:_result)?|doc|chunk|result|file)[_\-\s]*\d*(?:\.[a-zA-Z0-9]+)?$",
+    re.IGNORECASE,
+)
+
+
+def is_placeholder_path(path: str) -> bool:
+    """Return True if path is an invented/placeholder name (e.g. 'document_0.txt')."""
+    if not path:
+        return True
+    cleaned = path.strip()
+    return bool(_PLACEHOLDER_PATH_PATTERN.match(cleaned))
+
+
+# ---------------------------------------------------------------------------
 # Plan generation prompt
 # ---------------------------------------------------------------------------
 
@@ -162,10 +180,14 @@ Given the user's request, create a structured execution plan using ONLY the avai
 RULES:
 1. Output ONLY valid JSON — no markdown, no explanation, no preamble.
 2. Each step must use a tool from the available list or be a "reasoning" step (tool_name = null).
-3. Keep plans concise — use the minimum steps needed.
-4. Never invent tools that are not listed.
-5. For file_write operations, set requires_approval to true.
-6. Maximum {max_steps} steps.
+3. Keep plans concise — use the minimum steps needed to complete the user's request.
+4. Tool guidelines:
+   - document_search: Searches and retrieves text passages directly from the local knowledge base. Use this whenever the user asks to search, find, or summarize information from documents. document_search directly retrieves the full grounded text content. Do NOT follow document_search with file_read.
+   - file_read: Reads an existing text file from the workspace. ONLY use file_read when the user explicitly provides a specific known filename in their prompt (e.g. 'read config.json'). NEVER call file_read on indexed documents or RAG results. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
+   - calculator: Performs arithmetic on numbers (e.g. "4 + 3 * 2").
+   - file_write: Creates an output file in the sandbox. Always set requires_approval to true.
+   - Reasoning step (tool_name = null): Synthesizes observations, calculates or summarizes findings, and provides the final grounded response to the user.
+5. Maximum {max_steps} steps.
 
 OUTPUT FORMAT (JSON array of steps):
 [
@@ -263,19 +285,52 @@ class AgentPlanner:
             if not isinstance(steps_data, list):
                 raise ValueError("Plan must be a JSON array of steps")
 
-            # Convert to PlanStep objects
+            # Convert to PlanStep objects, filtering out fabricated/placeholder file_read calls
+            has_doc_search = any(
+                isinstance(s, dict) and s.get("tool_name") == "document_search"
+                for s in steps_data if isinstance(s, dict)
+            )
+
             steps = []
             for i, step_data in enumerate(steps_data[:self._max_plan_steps]):
                 if not isinstance(step_data, dict):
                     continue
+                tool_name = step_data.get("tool_name")
+                if isinstance(tool_name, str) and tool_name.strip().lower() in {"null", "none", ""}:
+                    tool_name = None
+                args = step_data.get("arguments", {})
+                if not isinstance(args, dict):
+                    args = {}
+
+                # Prevent planner from calling file_read with fabricated/placeholder document paths
+                if tool_name == "file_read":
+                    path_val = args.get("relative_path") or args.get("filename") or ""
+                    path_str = str(path_val).strip()
+                    if is_placeholder_path(path_str):
+                        logger.info("Pruned fabricated file_read step with placeholder path '%s'", path_val)
+                        continue
+                    if has_doc_search and path_str.lower() not in objective.lower():
+                        logger.info("Pruned ungrounded file_read step '%s' following document_search", path_val)
+                        continue
+
                 steps.append(PlanStep(
-                    id=f"step_{i + 1}",
-                    description=step_data.get("description", f"Step {i + 1}"),
-                    tool_name=step_data.get("tool_name"),
-                    arguments=step_data.get("arguments", {}),
+                    id=f"step_{len(steps) + 1}",
+                    description=step_data.get("description", f"Step {len(steps) + 1}"),
+                    tool_name=tool_name,
+                    arguments=args,
                     requires_approval=step_data.get("requires_approval", False),
                     status=StepStatus.pending.value,
                 ))
+
+            if not steps:
+                steps = [PlanStep(
+                    id="step_1",
+                    description=f"Answer the user's request: {objective[:200]}",
+                    tool_name=None,
+                    arguments={},
+                    requires_approval=False,
+                    status=StepStatus.pending.value,
+                )]
 
             plan = AgentPlan(
                 task_id=task_id,

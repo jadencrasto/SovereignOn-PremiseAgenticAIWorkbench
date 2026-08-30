@@ -1,7 +1,7 @@
 # Evaluation Report: Industrial Report Generation Workflow Benchmark
-**Timestamp:** 2026-08-30T06:58:23Z UTC  
+**Timestamp:** 2026-08-30T17:20:35Z UTC  
 **Environment:** Air-Gapped Sovereign Workflow  
-**Total Duration:** 0.19s  
+**Total Duration:** 0.20s  
 
 ## Summary Scorecard
 
@@ -19,8 +19,8 @@
 
 | ID | Test Name | Category | Status | Latency (ms) | Details |
 |---|---|---|---|---|---|
-| `RPT-01` | Task Planning & DAG Construction | workflow_orchestration | **PASS** | 27.1 | Task task_031d881146f9 generated 3-step execution plan with approval requirement on step 3 |
-| `RPT-02` | Automated Read Step Execution | workflow_orchestration | **PASS** | 40.0 | RAG context retrieval and arithmetic calculation steps completed cleanly |
-| `RPT-03` | Human Approval Binding & Verification | human_in_the_loop | **PASS** | 66.4 | Approval request created, approved by operator, and SHA-256 bound arguments verified |
-| `RPT-04` | Sandboxed Report Output & Citation Verification | data_integrity | **PASS** | 28.4 | Generated Markdown report contains structured sections, findings, and verified document citations |
+| `RPT-01` | Task Planning & DAG Construction | workflow_orchestration | **PASS** | 26.4 | Task task_88623a72d2e0 generated 3-step execution plan with approval requirement on step 3 |
+| `RPT-02` | Automated Read Step Execution | workflow_orchestration | **PASS** | 46.8 | RAG context retrieval and arithmetic calculation steps completed cleanly |
+| `RPT-03` | Human Approval Binding & Verification | human_in_the_loop | **PASS** | 64.1 | Approval request created, approved by operator, and SHA-256 bound arguments verified |
+| `RPT-04` | Sandboxed Report Output & Citation Verification | data_integrity | **PASS** | 32.5 | Generated Markdown report contains structured sections, findings, and verified document citations |
 | `RPT-05` | Audit Trail Complete Attribution | compliance_audit | **PASS** | 1.3 | Verified 3 tool execution events and 2 approval events in SQLite audit log |

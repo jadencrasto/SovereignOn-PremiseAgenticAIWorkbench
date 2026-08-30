@@ -159,6 +159,23 @@ export interface DocumentDeleteResponse {
   status: string;
 }
 
+export interface DocumentChunkItem {
+  chunk_id: string;
+  chunk_index: number;
+  page?: number | null;
+  text: string;
+  metadata?: Record<string, any>;
+}
+
+export interface DocumentDetailResponse {
+  document_id: string;
+  filename: string;
+  file_type: string;
+  chunk_count: number;
+  relative_path?: string | null;
+  chunks: DocumentChunkItem[];
+}
+
 // Phase 5: Extended models response with capability metadata
 export interface ModelInfo {
   id: string;

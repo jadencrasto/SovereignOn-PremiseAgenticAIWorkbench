@@ -69,3 +69,21 @@ async def get_security_status(
         overall_status=overall,
         diagnostics=[DiagnosticItem(**d) for d in diagnostics],
     )
+
+
+@router.post(
+    "/scan",
+    response_model=SecurityStatusResponse,
+    summary="Execute on-demand security scan and return posture status",
+)
+async def run_security_scan(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_SECURITY)),
+):
+    """
+    Execute on-demand security scan across authentication, air-gap egress,
+    sandbox isolation, and database hardening.
+    Requires VIEW_SECURITY permission (Admin).
+    """
+    return await get_security_status(request=request, current_user=current_user)
+

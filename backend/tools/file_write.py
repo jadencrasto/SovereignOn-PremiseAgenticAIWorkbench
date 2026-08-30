@@ -55,6 +55,26 @@ class FileWriteInput(BaseModel):
 # Factory
 # ---------------------------------------------------------------------------
 
+def _validate_content_quality(content: str) -> None:
+    """Validate that written content is non-empty and not a generic placeholder."""
+    import re
+    stripped = content.strip()
+    if not stripped:
+        raise ValueError("File content cannot be empty or whitespace-only.")
+
+    lower = stripped.lower()
+    # Reject standalone placeholder tokens
+    if lower in {"text", "summary", "placeholder", "content", "todo", "test", "none", "null", "undefined"}:
+        raise ValueError(f"File content '{stripped}' is a placeholder token, not valid content.")
+
+    # Reject common placeholder template patterns
+    if re.match(r"^(text\s*\n*)?summary of [a-z0-9_\-\s]+ found in documents\.?$", stripped, re.IGNORECASE):
+        raise ValueError(f"File content is an unfilled placeholder template: '{stripped}'")
+
+    if re.match(r"^\[(?:insert|placeholder|enter|todo)\b.*\]$", stripped, re.IGNORECASE):
+        raise ValueError(f"File content contains an unfilled template marker: '{stripped}'")
+
+
 def create_file_write(sandbox_dir: Path) -> callable:
     """
     Create the file_write execute function.
@@ -65,6 +85,9 @@ def create_file_write(sandbox_dir: Path) -> callable:
 
     async def execute_file_write(args: FileWriteInput) -> dict:
         """Create an output file atomically in the sandbox directory."""
+        # Validate content quality
+        _validate_content_quality(args.content)
+
         # Validate content size
         content_bytes = args.content.encode("utf-8")
         if len(content_bytes) > _MAX_WRITE_BYTES:
@@ -91,6 +114,13 @@ def create_file_write(sandbox_dir: Path) -> callable:
         atomic_write_file(target, args.content, encoding="utf-8", overwrite=True)
 
         rel_path = f"data/sandbox/{safe_name}"
+
+        # Post-write validation
+        if not target.exists():
+            raise RuntimeError(f"Target file {rel_path} was not created on filesystem.")
+        if target.stat().st_size == 0:
+            raise RuntimeError(f"Target file {rel_path} is empty on filesystem.")
+
         logger.info(
             "file_write | path=%s size=%d", rel_path, len(content_bytes)
         )

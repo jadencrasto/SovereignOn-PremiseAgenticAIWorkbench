@@ -59,3 +59,23 @@ class DocumentDeleteResponse(BaseModel):
     document_id: str
     chunks_deleted: int
     status: str = "deleted"
+
+
+class DocumentChunkItem(BaseModel):
+    """Details of a single vector chunk stored in ChromaDB."""
+    chunk_id: str
+    chunk_index: int
+    page: Optional[int] = None
+    text: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class DocumentDetailResponse(BaseModel):
+    """Detailed response for GET /api/documents/{document_id}."""
+    document_id: str
+    filename: str
+    file_type: str
+    chunk_count: int
+    relative_path: Optional[str] = None
+    chunks: List[DocumentChunkItem] = Field(default_factory=list)
+

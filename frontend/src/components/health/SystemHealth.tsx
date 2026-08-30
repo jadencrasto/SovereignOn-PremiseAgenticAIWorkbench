@@ -13,6 +13,7 @@
 import React, { useState, useEffect } from 'react';
 import type { ReadinessResponse } from '../../types';
 import { fetchSystemReadinessApi } from '../../api/health';
+import { Activity, RefreshCw } from 'lucide-react';
 
 export const SystemHealth: React.FC = () => {
   const [data, setData] = useState<ReadinessResponse | null>(null);
@@ -52,51 +53,55 @@ export const SystemHealth: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-auto bg-zinc-950 text-zinc-100 p-6 space-y-6">
+    <div className="flex-1 flex flex-col h-full overflow-auto bg-[#090d16] text-slate-100 p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-zinc-100 flex items-center gap-2">
-            <span>🩺</span> System Health & Observability
+          <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+            <Activity className="w-5 h-5 text-emerald-400" />
+            System Health &amp; Observability
           </h1>
-          <p className="text-xs text-zinc-400 mt-1">
+          <p className="text-xs text-slate-400 mt-1">
             Real-time dependency readiness checks (polled safely without model inference overhead).
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           {lastChecked && (
-            <span className="text-[11px] text-zinc-500">Updated: {lastChecked}</span>
+            <span className="text-[11px] text-slate-500 font-mono">Updated: {lastChecked}</span>
           )}
           <button
             onClick={loadHealth}
-            className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 rounded-lg border border-zinc-700 transition"
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-xs font-mono text-slate-300 transition-colors disabled:opacity-50"
           >
-            Check Now
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-400' : ''}`} />
+            <span>Check Now</span>
           </button>
         </div>
       </div>
 
       {loading && !data ? (
-        <div className="flex-1 flex items-center justify-center text-zinc-500 text-sm">
-          Checking dependencies...
+        <div className="flex-1 flex items-center justify-center text-slate-400 text-xs font-mono gap-2 py-16">
+          <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+          <span>Evaluating local dependency readiness...</span>
         </div>
       ) : error ? (
-        <div className="p-4 bg-red-950/40 border border-red-800/60 rounded-xl text-red-300 text-sm">
+        <div className="p-4 bg-rose-950/40 border border-rose-800/60 rounded-xl text-rose-300 text-xs font-mono">
           {error}
         </div>
       ) : data ? (
         <div className="space-y-4 max-w-4xl">
           {/* Status summary card */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex items-center justify-between">
+          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-4 flex items-center justify-between shadow-md">
             <div className="flex items-center gap-3">
               {getStatusDot(data.status)}
-              <span className="text-sm font-semibold uppercase tracking-wider text-zinc-200">
+              <span className="text-sm font-semibold uppercase tracking-wider text-slate-200 font-mono">
                 System Status: {data.status}
               </span>
             </div>
             {data.cached && (
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">
                 Cached (5s TTL)
               </span>
             )}
@@ -107,20 +112,20 @@ export const SystemHealth: React.FC = () => {
             {data.components.map((comp) => (
               <div
                 key={comp.name}
-                className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-2"
+                className="bg-[#0d1424]/60 border border-slate-800 rounded-xl p-4 space-y-2 hover:border-slate-700 transition"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     {getStatusDot(comp.status)}
-                    <h3 className="font-semibold text-sm font-mono text-zinc-200">{comp.name}</h3>
+                    <h3 className="font-semibold text-sm font-mono text-slate-200">{comp.name}</h3>
                   </div>
                   {comp.latency_ms !== null && comp.latency_ms !== undefined && (
-                    <span className="text-[11px] font-mono text-zinc-400">
+                    <span className="text-[11px] font-mono text-slate-400">
                       {comp.latency_ms.toFixed(1)} ms
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-zinc-400 leading-relaxed">{comp.details}</p>
+                <p className="text-xs text-slate-400 leading-relaxed font-sans">{comp.details}</p>
               </div>
             ))}
           </div>

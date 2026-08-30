@@ -1,18 +1,18 @@
 {
   "suite_name": "System Latency & Performance Benchmark",
-  "timestamp": "2026-08-30T06:58:21Z",
+  "timestamp": "2026-08-30T17:20:32Z",
   "environment": "Air-Gapped Local Benchmarking",
   "total_cases": 5,
   "passed": 5,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 13.424789000011515,
+  "duration_seconds": 15.201535000000149,
   "summary_metrics": {
     "Health_Live_Latency_Mean_ms": 0.001,
-    "Health_Ready_Latency_Mean_ms": 60.159,
-    "Task_Creation_Latency_Mean_ms": 5.667,
-    "Tool_Execution_Latency_Mean_ms": 0.025,
-    "Model_Inference_Latency_Mean_ms": 3477.226
+    "Health_Ready_Latency_Mean_ms": 83.171,
+    "Task_Creation_Latency_Mean_ms": 126.61,
+    "Tool_Execution_Latency_Mean_ms": 0.017,
+    "Model_Inference_Latency_Mean_ms": 3440.038
   },
   "test_cases": [
     {
@@ -23,12 +23,12 @@
       "duration_ms": 0.001,
       "metrics": {
         "min": 0.0,
-        "max": 0.003,
+        "max": 0.004,
         "mean": 0.001,
         "median": 0.0,
-        "p95": 0.003
+        "p95": 0.004
       },
-      "details": "Mean=0.001ms, P95=0.003ms",
+      "details": "Mean=0.001ms, P95=0.004ms",
       "error": null
     },
     {
@@ -36,15 +36,15 @@
       "name": "Health Ready Probe Latency",
       "category": "health_probes",
       "status": "PASS",
-      "duration_ms": 60.159,
+      "duration_ms": 83.171,
       "metrics": {
         "min": 0.001,
-        "max": 601.56,
-        "mean": 60.159,
-        "median": 0.002,
-        "p95": 601.56
+        "max": 831.687,
+        "mean": 83.171,
+        "median": 0.001,
+        "p95": 831.687
       },
-      "details": "Mean=60.159ms, P95=601.56ms",
+      "details": "Mean=83.171ms, P95=831.687ms",
       "error": null
     },
     {
@@ -52,15 +52,15 @@
       "name": "Task Creation SQLite WAL Latency",
       "category": "task_persistence",
       "status": "PASS",
-      "duration_ms": 5.667,
+      "duration_ms": 126.61,
       "metrics": {
-        "min": 5.333,
-        "max": 7.406,
-        "mean": 5.667,
-        "median": 5.483,
-        "p95": 7.406
+        "min": 5.66,
+        "max": 210.919,
+        "mean": 126.61,
+        "median": 155.355,
+        "p95": 210.919
       },
-      "details": "Mean=5.667ms, P95=7.406ms",
+      "details": "Mean=126.61ms, P95=210.919ms",
       "error": null
     },
     {
@@ -68,15 +68,15 @@
       "name": "Tool Execution Latency (Calculator)",
       "category": "tool_dispatch",
       "status": "PASS",
-      "duration_ms": 0.025,
+      "duration_ms": 0.017,
       "metrics": {
-        "min": 0.015,
-        "max": 0.092,
-        "mean": 0.025,
-        "median": 0.016,
-        "p95": 0.092
+        "min": 0.01,
+        "max": 0.066,
+        "mean": 0.017,
+        "median": 0.011,
+        "p95": 0.066
       },
-      "details": "Mean=0.025ms, P95=0.092ms",
+      "details": "Mean=0.017ms, P95=0.066ms",
       "error": null
     },
     {
@@ -84,15 +84,15 @@
       "name": "Local LLM Inference Latency",
       "category": "model_inference",
       "status": "PASS",
-      "duration_ms": 3477.226,
+      "duration_ms": 3440.038,
       "metrics": {
-        "min": 3400.619,
-        "max": 3521.288,
-        "mean": 3477.226,
-        "median": 3509.77,
-        "p95": 3521.288
+        "min": 3346.117,
+        "max": 3496.388,
+        "mean": 3440.038,
+        "median": 3477.609,
+        "p95": 3496.388
       },
-      "details": "Mean=3477.226ms, P95=3521.288ms",
+      "details": "Mean=3440.038ms, P95=3496.388ms",
       "error": null
     }
   ],

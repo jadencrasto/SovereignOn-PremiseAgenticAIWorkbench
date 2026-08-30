@@ -22,7 +22,9 @@ import logging
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
 from backend.schemas.document import (
+    DocumentChunkItem,
     DocumentDeleteResponse,
+    DocumentDetailResponse,
     DocumentListResponse,
     DocumentResponse,
     DocumentUploadResponse,
@@ -129,6 +131,34 @@ async def list_documents(
         ],
         total=len(docs),
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/documents/{document_id} — get document details and chunks
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{document_id}",
+    response_model=DocumentDetailResponse,
+    summary="Get details and vector chunks for an indexed document",
+)
+async def get_document(
+    document_id: str,
+    doc_service=Depends(get_doc_service),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
+    """
+    Retrieve metadata and all stored vector chunks for an indexed document.
+    Read-only inspection endpoint.
+    """
+    if not document_id or len(document_id) > 100:
+        raise HTTPException(status_code=400, detail="Invalid document_id.")
+
+    details = doc_service.get_document_details(document_id)
+    if details is None:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    return DocumentDetailResponse(**details)
 
 
 # ---------------------------------------------------------------------------

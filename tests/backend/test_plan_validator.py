@@ -124,3 +124,24 @@ class TestPlanValidator:
         assert len(errors) == 0
         # Validator must force requires_approval = True
         assert step.requires_approval is True
+
+    def test_file_read_placeholder_path_fails(self, registry):
+        from backend.tools.file_read import FileReadInput
+        registry.register(ToolDefinition(
+            name="file_read",
+            description="Read file",
+            input_schema=FileReadInput,
+            execute_fn=lambda **kw: "content",
+            risk_level="medium",
+            requires_approval=False,
+            enabled=True,
+        ))
+        validator = PlanValidator(tool_registry=registry, max_plan_steps=5)
+
+        for placeholder in ["document_0.txt", "document_1.txt", "doc_0.txt", "chunk_1"]:
+            plan = AgentPlan(task_id="t1", objective="Read placeholder", steps=[
+                PlanStep(id="step_1", description="s1", tool_name="file_read", arguments={"relative_path": placeholder})
+            ])
+            errors = validator.validate(plan)
+            assert any("fabricated or placeholder document paths are not permitted" in e.message for e in errors)
+

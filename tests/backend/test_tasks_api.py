@@ -7,12 +7,20 @@ Phase 6 integration tests for the /api/tasks REST endpoints.
 import pytest
 from fastapi.testclient import TestClient
 
+from pathlib import Path
+
+from backend.config import Settings
 from backend.main import create_app
 
 
 @pytest.fixture
-def client():
-    app = create_app()
+def client(tmp_path: Path):
+    test_settings = Settings(
+        tasks_dir=tmp_path / "tasks",
+        tasks_db_path=tmp_path / "tasks" / "tasks.db",
+        auth_enabled=False,
+    )
+    app = create_app(custom_settings=test_settings)
     with TestClient(app) as test_client:
         yield test_client
 

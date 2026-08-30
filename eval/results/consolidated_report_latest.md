@@ -1,8 +1,8 @@
 # Sovereign AI Workbench — Phase 8 Evaluation Scorecard
-**Generated:** 2026-08-30 06:58:31 UTC  
+**Generated:** 2026-08-30 17:20:42 UTC  
 **Overall Status:** `PASS`  
 **Air-Gapped Local Environment:** Verified (100% on-premise execution)  
-**Total Execution Time:** 26.17s  
+**Total Execution Time:** 28.27s  
 
 ---
 
@@ -21,14 +21,14 @@
 
 | Suite Name | Total | Passed | Failed | Unavail | Duration (s) | Key Benchmark Metrics |
 |---|---|---|---|---|---|---|
-| **Agent Reliability & Fault Injection Benchmark** | 7 | 7 | 0 | 0 | 0.24 | Passed_Scenarios: `7`<br>Total_Scenarios: `7`<br>Reliability_Score_Percent: `100.0` |
-| **Security & Enterprise Hardening Evaluation Suite** | 10 | 10 | 0 | 0 | 0.22 | Security_Controls_Passed: `10`<br>Total_Security_Controls: `10`<br>Compliance_Rate_Percent: `100.0` |
-| **Tool Execution, Authorization & Latency Benchmark** | 7 | 7 | 0 | 0 | 0.01 | Tools_Evaluated: `5`<br>Passed_Tool_Operations: `7`<br>Average_Tool_Latency_ms: `0.58`<br>Success_Rate_Percent: `100.0` |
-| **System Latency & Performance Benchmark** | 5 | 5 | 0 | 0 | 13.42 | Health_Live_Latency_Mean_ms: `0.001`<br>Health_Ready_Latency_Mean_ms: `60.159`<br>Task_Creation_Latency_Mean_ms: `5.667`<br>Tool_Execution_Latency_Mean_ms: `0.025`<br>Model_Inference_Latency_Mean_ms: `3477.226` |
+| **Agent Reliability & Fault Injection Benchmark** | 7 | 7 | 0 | 0 | 0.53 | Passed_Scenarios: `7`<br>Total_Scenarios: `7`<br>Reliability_Score_Percent: `100.0` |
+| **Security & Enterprise Hardening Evaluation Suite** | 10 | 10 | 0 | 0 | 0.52 | Security_Controls_Passed: `10`<br>Total_Security_Controls: `10`<br>Compliance_Rate_Percent: `100.0` |
+| **Tool Execution, Authorization & Latency Benchmark** | 7 | 7 | 0 | 0 | 0.01 | Tools_Evaluated: `5`<br>Passed_Tool_Operations: `7`<br>Average_Tool_Latency_ms: `0.59`<br>Success_Rate_Percent: `100.0` |
+| **System Latency & Performance Benchmark** | 5 | 5 | 0 | 0 | 15.20 | Health_Live_Latency_Mean_ms: `0.001`<br>Health_Ready_Latency_Mean_ms: `83.171`<br>Task_Creation_Latency_Mean_ms: `126.61`<br>Tool_Execution_Latency_Mean_ms: `0.017`<br>Model_Inference_Latency_Mean_ms: `3440.038` |
 | **Baseline vs System Comparative Benchmark** | 2 | 2 | 0 | 0 | 0.00 | RAG_Fact_Coverage: `1.0`<br>No_Retrieval_Fact_Coverage: `0.0`<br>Agent_Workflow_Decomposition_Support: `Enabled (Multi-Step DAG + Approval Binding)`<br>Baseline_Direct_Execution_Support: `Single-Turn Only (No Approval Binding)` |
-| **Multimodal Vision & Equipment Inspection Benchmark** | 4 | 4 | 0 | 0 | 2.37 | Image_Processing_Verified: `True`<br>Context_Injection_Verified: `True`<br>Degradation_Tolerance_Verified: `True` |
-| **Industrial Report Generation Workflow Benchmark** | 5 | 5 | 0 | 0 | 0.19 | Workflow_Stages_Completed: `5`<br>Total_Workflow_Stages: `5`<br>Workflow_Success_Rate: `1.0` |
-| **RAG Industrial Retrieval & Groundedness Benchmark** | 15 | 15 | 0 | 0 | 7.23 | Mean_Precision_at_K: `0.75`<br>Mean_Recall_at_K: `1.0`<br>Mean_Retrieval_Latency_ms: `13.55`<br>Groundedness_Fact_Overlap_Rate: `0.9`<br>Success_Rate_Percent: `100.0` |
+| **Multimodal Vision & Equipment Inspection Benchmark** | 4 | 4 | 0 | 0 | 2.39 | Image_Processing_Verified: `True`<br>Context_Injection_Verified: `True`<br>Degradation_Tolerance_Verified: `True` |
+| **Industrial Report Generation Workflow Benchmark** | 5 | 5 | 0 | 0 | 0.20 | Workflow_Stages_Completed: `5`<br>Total_Workflow_Stages: `5`<br>Workflow_Success_Rate: `1.0` |
+| **RAG Industrial Retrieval & Groundedness Benchmark** | 15 | 15 | 0 | 0 | 7.00 | Mean_Precision_at_K: `0.75`<br>Mean_Recall_at_K: `1.0`<br>Mean_Retrieval_Latency_ms: `12.07`<br>Groundedness_Fact_Overlap_Rate: `0.9`<br>Success_Rate_Percent: `100.0` |
 
 ---
 

@@ -239,3 +239,49 @@ class TestDocuments:
         mock_doc_service.delete_document.side_effect = ValueError("not found")
         resp = client.delete("/api/documents/nonexistent")
         assert resp.status_code == 404
+
+    def test_get_document_details(self, client, mock_doc_service):
+        mock_doc_service.get_document_details.return_value = {
+            "document_id": "doc_abc123",
+            "filename": "test.txt",
+            "file_type": "txt",
+            "chunk_count": 1,
+            "relative_path": "test.txt",
+            "chunks": [
+                {
+                    "chunk_id": "chunk_1",
+                    "chunk_index": 0,
+                    "page": 1,
+                    "text": "Sample chunk content.",
+                    "metadata": {"filename": "test.txt"},
+                }
+            ],
+        }
+        resp = client.get("/api/documents/doc_abc123")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["document_id"] == "doc_abc123"
+        assert len(data["chunks"]) == 1
+        assert data["chunks"][0]["text"] == "Sample chunk content."
+
+    def test_get_nonexistent_document(self, client, mock_doc_service):
+        mock_doc_service.get_document_details.return_value = None
+        resp = client.get("/api/documents/nonexistent")
+        assert resp.status_code == 404
+
+
+class TestSecurityScanEndpoint:
+    def test_security_status_and_scan(self, client):
+        resp_get = client.get("/api/security/status")
+        assert resp_get.status_code == 200
+        data_get = resp_get.json()
+        assert "overall_status" in data_get
+        assert "diagnostics" in data_get
+        assert len(data_get["diagnostics"]) >= 6
+
+        resp_post = client.post("/api/security/scan")
+        assert resp_post.status_code == 200
+        data_post = resp_post.json()
+        assert data_post["overall_status"] == data_get["overall_status"]
+        assert len(data_post["diagnostics"]) == len(data_get["diagnostics"])
+

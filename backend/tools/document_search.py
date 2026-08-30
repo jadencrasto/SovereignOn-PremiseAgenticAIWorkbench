@@ -56,10 +56,26 @@ def create_document_search(retriever) -> callable:
         """Search the local vector store for relevant document chunks."""
         chunks = await retriever.retrieve(args.query, top_k=args.top_k)
 
+        # Apply deterministic relevance gate: only keep chunks passing relevance threshold
+        is_relevant_fn = getattr(retriever, "is_chunk_relevant", None)
+        relevant_chunks = [
+            c for c in chunks
+            if (is_relevant_fn(c.score) if is_relevant_fn else getattr(c, "is_relevant", True))
+        ]
+
+        if not relevant_chunks:
+            logger.info(
+                "document_search | query='%s' — 0/%d chunks met relevance threshold",
+                args.query[:60], len(chunks),
+            )
+            return []
+
         results = []
-        for chunk in chunks:
+        for chunk in relevant_chunks:
             results.append({
                 "filename": chunk.filename,
+                "relative_path": chunk.filename,
+                "document_id": getattr(chunk, "document_id", chunk.filename),
                 "chunk_id": chunk.chunk_id,
                 "chunk_index": chunk.chunk_index,
                 "page": chunk.page,
@@ -68,8 +84,8 @@ def create_document_search(retriever) -> callable:
             })
 
         logger.info(
-            "document_search | query_len=%d top_k=%d results=%d",
-            len(args.query), args.top_k, len(results),
+            "document_search | query_len=%d top_k=%d results=%d/%d",
+            len(args.query), args.top_k, len(results), len(chunks),
         )
         return results
 

@@ -1,5 +1,5 @@
 # Evaluation Report: Tool Execution, Authorization & Latency Benchmark
-**Timestamp:** 2026-08-30T06:58:07Z UTC  
+**Timestamp:** 2026-08-30T17:20:17Z UTC  
 **Environment:** Air-Gapped Sandbox Environment  
 **Total Duration:** 0.01s  
 
@@ -13,7 +13,7 @@
 | **Environment Unavailable** | `0` |
 | **Tools_Evaluated** | `5` |
 | **Passed_Tool_Operations** | `7` |
-| **Average_Tool_Latency_ms** | `0.5800` |
+| **Average_Tool_Latency_ms** | `0.5900` |
 | **Success_Rate_Percent** | `100.0000` |
 
 ## Detailed Test Cases
@@ -22,8 +22,8 @@
 |---|---|---|---|---|---|
 | `TOOL-01` | Calculator: Complex Arithmetic | execution | **PASS** | 0.1 | Result=585.0 |
 | `TOOL-02` | Calculator: Division by Zero Safety | error_handling | **PASS** | 0.1 | Clean error returned: Division by zero. |
-| `TOOL-03` | File List: Sandbox Listing | execution | **PASS** | 1.1 | Listed 1 items in sandbox root |
-| `TOOL-04` | File Read: Sandbox File Access | execution | **PASS** | 1.0 | Read 32 bytes |
-| `TOOL-05` | File Write: Atomic Sandbox Write | execution | **PASS** | 1.4 | Atomic write committed in sandbox workspace |
-| `TOOL-06` | Document Search: Semantic Search | execution | **PASS** | 0.3 | Retrieved 1 chunks |
+| `TOOL-03` | File List: Sandbox Listing | execution | **PASS** | 0.8 | Listed 1 items in sandbox root |
+| `TOOL-04` | File Read: Sandbox File Access | execution | **PASS** | 0.9 | Read 32 bytes |
+| `TOOL-05` | File Write: Atomic Sandbox Write | execution | **PASS** | 1.6 | Atomic write committed in sandbox workspace |
+| `TOOL-06` | Document Search: Semantic Search | execution | **PASS** | 0.6 | Retrieved 1 chunks |
 | `TOOL-07` | RBAC: Viewer Write Rejection | authorization | **PASS** | 0.0 | Viewer role blocked at ToolRegistry boundary |

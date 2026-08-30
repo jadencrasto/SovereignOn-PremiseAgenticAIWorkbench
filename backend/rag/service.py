@@ -217,6 +217,55 @@ class DocumentService:
             ))
         return infos
 
+    def get_document_details(self, document_id: str) -> Optional[Dict]:
+        """
+        Retrieve full details and vector chunks for a specific indexed document.
+
+        Returns None if the document does not exist.
+        """
+        if not self._store.document_exists(document_id):
+            # Check if document_id was passed as a filename
+            all_docs = self._store.list_documents()
+            matching = [d for d in all_docs if d.get("document_id") == document_id or d.get("filename") == document_id]
+            if matching:
+                document_id = matching[0]["document_id"]
+            else:
+                return None
+
+        chunks_data = self._store.get_document_chunks(document_id)
+        ids = chunks_data.get("ids", [])
+        docs = chunks_data.get("documents", [])
+        metas = chunks_data.get("metadatas", [])
+
+        if not ids:
+            return None
+
+        filename = metas[0].get("filename", "unknown") if metas else "unknown"
+        file_type = metas[0].get("file_type", "") if metas else ""
+
+        # Construct chunk items and sort by chunk_index
+        chunk_items = []
+        for i, (cid, text, meta) in enumerate(zip(ids, docs, metas)):
+            meta_dict = meta if isinstance(meta, dict) else {}
+            chunk_items.append({
+                "chunk_id": cid,
+                "chunk_index": meta_dict.get("chunk_index", i),
+                "page": meta_dict.get("page"),
+                "text": text,
+                "metadata": meta_dict,
+            })
+
+        chunk_items.sort(key=lambda c: c["chunk_index"])
+
+        return {
+            "document_id": document_id,
+            "filename": filename,
+            "file_type": file_type,
+            "chunk_count": len(chunk_items),
+            "relative_path": filename,
+            "chunks": chunk_items,
+        }
+
     def delete_document(self, document_id: str) -> int:
         """
         Delete document from the vector store and remove the uploaded file.

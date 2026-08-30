@@ -1,16 +1,16 @@
 {
   "suite_name": "RAG Industrial Retrieval & Groundedness Benchmark",
-  "timestamp": "2026-08-30T06:58:31Z",
+  "timestamp": "2026-08-30T17:20:42Z",
   "environment": "Air-Gapped Local ChromaDB",
   "total_cases": 15,
   "passed": 15,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 7.228683799999999,
+  "duration_seconds": 6.999422199995024,
   "summary_metrics": {
     "Mean_Precision_at_K": 0.75,
     "Mean_Recall_at_K": 1.0,
-    "Mean_Retrieval_Latency_ms": 13.55,
+    "Mean_Retrieval_Latency_ms": 12.07,
     "Groundedness_Fact_Overlap_Rate": 0.9,
     "Success_Rate_Percent": 100.0
   },
@@ -20,7 +20,7 @@
       "name": "RAG: vibration_diagnostics",
       "category": "vibration_diagnostics",
       "status": "PASS",
-      "duration_ms": 23.88329998939298,
+      "duration_ms": 11.687699996400625,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -34,7 +34,7 @@
       "name": "RAG: root_cause_analysis",
       "category": "root_cause_analysis",
       "status": "PASS",
-      "duration_ms": 11.616999981924891,
+      "duration_ms": 10.92229998903349,
       "metrics": {
         "precision_at_k": 0.5,
         "recall_at_k": 1.0,
@@ -48,7 +48,7 @@
       "name": "RAG: temperature_monitoring",
       "category": "temperature_monitoring",
       "status": "PASS",
-      "duration_ms": 11.601699981838465,
+      "duration_ms": 11.995400011073798,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -62,7 +62,7 @@
       "name": "RAG: hydraulic_performance",
       "category": "hydraulic_performance",
       "status": "PASS",
-      "duration_ms": 13.082899997243658,
+      "duration_ms": 11.963199998717755,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -76,7 +76,7 @@
       "name": "RAG: materials_specification",
       "category": "materials_specification",
       "status": "PASS",
-      "duration_ms": 22.895999980391935,
+      "duration_ms": 12.968199996976182,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -90,7 +90,7 @@
       "name": "RAG: static_equipment",
       "category": "static_equipment",
       "status": "PASS",
-      "duration_ms": 11.109199986094609,
+      "duration_ms": 12.416699988534674,
       "metrics": {
         "precision_at_k": 1.0,
         "recall_at_k": 1.0,
@@ -104,7 +104,7 @@
       "name": "RAG: maintenance_procedures",
       "category": "maintenance_procedures",
       "status": "PASS",
-      "duration_ms": 11.562600004253909,
+      "duration_ms": 11.486400006106123,
       "metrics": {
         "precision_at_k": 1.0,
         "recall_at_k": 1.0,
@@ -118,7 +118,7 @@
       "name": "RAG: safety_critical_valves",
       "category": "safety_critical_valves",
       "status": "PASS",
-      "duration_ms": 12.730899994494393,
+      "duration_ms": 12.415100005455315,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -132,7 +132,7 @@
       "name": "RAG: materials_specification",
       "category": "materials_specification",
       "status": "PASS",
-      "duration_ms": 13.558399979956448,
+      "duration_ms": 11.539300001459196,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -146,7 +146,7 @@
       "name": "RAG: corrosion_management",
       "category": "corrosion_management",
       "status": "PASS",
-      "duration_ms": 12.390100018819794,
+      "duration_ms": 11.376599984942004,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -160,7 +160,7 @@
       "name": "RAG: corrosion_management",
       "category": "corrosion_management",
       "status": "PASS",
-      "duration_ms": 11.63360002101399,
+      "duration_ms": 11.022100021364167,
       "metrics": {
         "precision_at_k": 0.75,
         "recall_at_k": 1.0,
@@ -174,7 +174,7 @@
       "name": "RAG: reliability_strategy",
       "category": "reliability_strategy",
       "status": "PASS",
-      "duration_ms": 12.47499999590218,
+      "duration_ms": 11.702999996487051,
       "metrics": {
         "precision_at_k": 1.0,
         "recall_at_k": 1.0,
@@ -188,7 +188,7 @@
       "name": "RAG: reliability_metrics",
       "category": "reliability_metrics",
       "status": "PASS",
-      "duration_ms": 11.217399995075539,
+      "duration_ms": 11.455500003648922,
       "metrics": {
         "precision_at_k": 0.25,
         "recall_at_k": 1.0,
@@ -202,7 +202,7 @@
       "name": "RAG: vibration_diagnostics",
       "category": "vibration_diagnostics",
       "status": "PASS",
-      "duration_ms": 11.861300008604303,
+      "duration_ms": 15.915600000880659,
       "metrics": {
         "precision_at_k": 1.0,
         "recall_at_k": 1.0,
@@ -216,7 +216,7 @@
       "name": "RAG: maintenance_procedures",
       "category": "maintenance_procedures",
       "status": "PASS",
-      "duration_ms": 11.578500008909032,
+      "duration_ms": 12.140900013037026,
       "metrics": {
         "precision_at_k": 0.5,
         "recall_at_k": 1.0,

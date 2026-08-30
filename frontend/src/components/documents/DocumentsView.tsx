@@ -2,12 +2,14 @@ import React, { useState } from 'react';
 import { useWorkbench } from '../../context/WorkbenchContext';
 import { DropZone } from './DropZone';
 import { DocumentList } from './DocumentList';
+import { DocumentDetailModal } from './DocumentDetailModal';
 import { uploadDocument, deleteDocument } from '../../api/documents';
 import { FileText, RefreshCw, Database, Shield, Layers } from 'lucide-react';
 
 export const DocumentsView: React.FC = () => {
   const { documents, isDocsLoading, refreshDocuments, addToast } = useWorkbench();
   const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
 
   const handleUpload = async (file: File) => {
     setIsUploading(true);
@@ -26,6 +28,9 @@ export const DocumentsView: React.FC = () => {
     try {
       const res = await deleteDocument(documentId);
       addToast('success', `Deleted document (${res.chunks_deleted} chunks purged).`);
+      if (selectedDocId === documentId) {
+        setSelectedDocId(null);
+      }
       await refreshDocuments();
     } catch (err: any) {
       addToast('error', err.message || 'Failed to delete document.');
@@ -45,7 +50,7 @@ export const DocumentsView: React.FC = () => {
               Document Knowledge & Local RAG
             </h1>
             <p className="text-xs text-slate-400 mt-1 max-w-xl">
-              Ingest enterprise documents into the local ChromaDB vector store. Text is chunked with metadata preservation and embedded using Ollama's <code className="text-emerald-400">nomic-embed-text</code>.
+              Ingest enterprise documents into the local ChromaDB vector store. Text is chunked with metadata preservation and embedded using Ollama's <code className="text-emerald-400">nomic-embed-text</code>. Click any document to inspect stored chunks.
             </p>
           </div>
 
@@ -67,7 +72,7 @@ export const DocumentsView: React.FC = () => {
               <Database className="w-4 h-4 text-emerald-400" />
             </div>
             <div className="text-2xl font-bold text-white font-mono">{documents.length}</div>
-            <div className="text-[11px] text-slate-500 font-sans">Persistent in data/chromadb</div>
+            <div className="text-[11px] text-slate-400 font-mono">Storage: data/chromadb</div>
           </div>
 
           <div className="p-4 rounded-xl border border-slate-800 bg-[#0d1424]/60 space-y-1">
@@ -76,16 +81,16 @@ export const DocumentsView: React.FC = () => {
               <Layers className="w-4 h-4 text-purple-400" />
             </div>
             <div className="text-2xl font-bold text-white font-mono">{totalChunks}</div>
-            <div className="text-[11px] text-slate-500 font-sans">Cosine distance similarity search</div>
+            <div className="text-[11px] text-slate-400 font-mono">Model: nomic-embed-text</div>
           </div>
 
           <div className="p-4 rounded-xl border border-slate-800 bg-[#0d1424]/60 space-y-1">
             <div className="flex items-center justify-between text-xs text-slate-400 font-mono">
-              <span>Data Protection</span>
+              <span>Supported Ingestion</span>
               <Shield className="w-4 h-4 text-blue-400" />
             </div>
-            <div className="text-sm font-semibold text-emerald-400 font-mono mt-1">100% Host-Isolated</div>
-            <div className="text-[11px] text-slate-500 font-sans">Zero cloud uploads or processing</div>
+            <div className="text-sm font-semibold text-emerald-400 font-mono mt-1">PDF, DOCX, TXT, MD</div>
+            <div className="text-[11px] text-slate-400 font-mono">100% On-Premise Air-Gapped</div>
           </div>
         </div>
 
@@ -99,15 +104,23 @@ export const DocumentsView: React.FC = () => {
         <div>
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-semibold text-slate-200">Indexed Knowledge Base</h2>
-            <span className="text-xs font-mono text-slate-500">{documents.length} files</span>
+            <span className="text-xs font-mono text-slate-500">{documents.length} files (click row to inspect)</span>
           </div>
           <DocumentList
             documents={documents}
             onDelete={handleDelete}
+            onSelectDocument={setSelectedDocId}
             isLoading={isDocsLoading}
           />
         </div>
       </div>
+
+      {/* Document Detail / Chunk Inspector Modal */}
+      <DocumentDetailModal
+        documentId={selectedDocId}
+        onClose={() => setSelectedDocId(null)}
+      />
     </div>
   );
 };
+

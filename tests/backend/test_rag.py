@@ -136,14 +136,14 @@ class TestTextChunker:
 
 
 class TestDocumentServiceSecurity:
-    def _make_service(self):
+    def _make_service(self, store=None):
         from backend.config import Settings
         from backend.rag.service import DocumentService
         settings = Settings()
         embedder = AsyncMock()
-        store = MagicMock()
+        st = store or MagicMock()
         retriever = MagicMock()
-        return DocumentService(settings, embedder, store, retriever)
+        return DocumentService(settings, embedder, st, retriever)
 
     def test_path_traversal_rejected(self):
         svc = self._make_service()
@@ -184,6 +184,33 @@ class TestDocumentServiceSecurity:
         svc = self._make_service()
         with pytest.raises(ValueError):
             await svc.ingest_document("empty.txt", b"")
+
+    def test_get_document_details(self, tmp_path):
+        from backend.rag.store import VectorStore
+        store = VectorStore(persist_dir=tmp_path / "chroma_details")
+        store.add_chunks(
+            chunk_ids=["c1", "c2"],
+            embeddings=[[0.1, 0.2], [0.3, 0.4]],
+            texts=["Section 1 text", "Section 2 text"],
+            metadatas=[
+                {"document_id": "doc_101", "filename": "spec.md", "file_type": "md", "chunk_index": 0},
+                {"document_id": "doc_101", "filename": "spec.md", "file_type": "md", "chunk_index": 1, "page": 2},
+            ],
+        )
+        svc = self._make_service(store=store)
+        details = svc.get_document_details("doc_101")
+        assert details is not None
+        assert details["document_id"] == "doc_101"
+        assert details["filename"] == "spec.md"
+        assert details["file_type"] == "md"
+        assert details["chunk_count"] == 2
+        assert len(details["chunks"]) == 2
+        assert details["chunks"][0]["text"] == "Section 1 text"
+        assert details["chunks"][1]["page"] == 2
+
+        # Nonexistent doc
+        assert svc.get_document_details("doc_unknown") is None
+
 
 
 class TestVectorStore:
@@ -387,3 +414,122 @@ class TestEngineWithRAG:
         assert roles.count("system") <= 1
         assert "user" in roles
         assert "assistant" in roles
+
+
+# ===================================================================
+# RAG RELEVANCE GATE TESTS
+# ===================================================================
+
+class TestRelevanceGate:
+    """Regression tests for deterministic RAG relevance & grounding gate."""
+
+    def test_retriever_is_chunk_relevant_logic(self):
+        from backend.rag.retriever import Retriever
+        mock_embed = MagicMock()
+        mock_store = MagicMock()
+        retriever = Retriever(mock_embed, mock_store, max_distance=0.385)
+
+        # Relevant distances (cosine distance <= 0.385)
+        assert retriever.is_chunk_relevant(0.15) is True
+        assert retriever.is_chunk_relevant(0.24) is True
+        assert retriever.is_chunk_relevant(0.35) is True
+        assert retriever.is_chunk_relevant(0.385) is True
+
+        # Unrelated / weak distances (> 0.385 and < 0.615)
+        assert retriever.is_chunk_relevant(0.392) is False
+        assert retriever.is_chunk_relevant(0.403) is False
+        assert retriever.is_chunk_relevant(0.500) is False
+        assert retriever.is_chunk_relevant(0.580) is False
+
+        # High similarity scores in mock setups (>= 0.615)
+        assert retriever.is_chunk_relevant(0.85) is True
+        assert retriever.is_chunk_relevant(0.95) is True
+
+    @pytest.mark.asyncio
+    async def test_document_search_filters_unrelated_results(self):
+        from backend.tools.document_search import DocumentSearchInput, create_document_search
+        from backend.rag.retriever import RetrievedChunk
+
+        mock_retriever = MagicMock()
+        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385 or s >= 0.615
+
+        # Unrelated chunks (e.g. distance 0.403 for aircraft query on refinery docs)
+        weak_chunk = RetrievedChunk(
+            text="Valve V-401 failure analysis",
+            document_id="doc_v401",
+            filename="valve_v401_failure_analysis.md",
+            chunk_id="c_weak",
+            chunk_index=0,
+            page=1,
+            score=0.4032,
+            file_type="md",
+            is_relevant=False,
+        )
+        mock_retriever.retrieve = AsyncMock(return_value=[weak_chunk])
+
+        search_fn = create_document_search(mock_retriever)
+        result = await search_fn(DocumentSearchInput(query="aircraft engine failures", top_k=5))
+        # Deterministic gate must reject weak matches
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_document_search_retains_relevant_results(self):
+        from backend.tools.document_search import DocumentSearchInput, create_document_search
+        from backend.rag.retriever import RetrievedChunk
+
+        mock_retriever = MagicMock()
+        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385 or s >= 0.615
+
+        strong_chunk = RetrievedChunk(
+            text="Compressor K-101 vibration overhaul report",
+            document_id="doc_k101",
+            filename="compressor_k101_inspection.md",
+            chunk_id="c_strong",
+            chunk_index=0,
+            page=1,
+            score=0.3287,
+            file_type="md",
+            is_relevant=True,
+        )
+        mock_retriever.retrieve = AsyncMock(return_value=[strong_chunk])
+
+        search_fn = create_document_search(mock_retriever)
+        result = await search_fn(DocumentSearchInput(query="recurring compressor issues", top_k=5))
+        assert len(result) == 1
+        assert result[0]["filename"] == "compressor_k101_inspection.md"
+        assert result[0]["score"] == 0.3287
+
+    @pytest.mark.asyncio
+    async def test_engine_retrieve_context_filters_unrelated(self):
+        from backend.config import Settings
+        from backend.agent.memory import ConversationMemory
+        from backend.agent.engine import AgentEngine
+        from backend.rag.retriever import RetrievedChunk
+
+        mock_doc_service = MagicMock()
+        mock_doc_service.has_documents.return_value = True
+        mock_retriever = MagicMock()
+        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385 or s >= 0.615
+        mock_doc_service._retriever = mock_retriever
+
+        unrelated_chunk = RetrievedChunk(
+            text="Refinery crude pre-heat exchanger E-302",
+            document_id="doc_e302",
+            filename="heat_exchanger_e302_report.md",
+            chunk_id="c_e302",
+            chunk_index=0,
+            page=1,
+            score=0.4500,
+            is_relevant=False,
+        )
+        mock_doc_service.retrieve = AsyncMock(return_value=[unrelated_chunk])
+
+        settings = Settings()
+        router = MagicMock()
+        router.default_model_id = "ollama/qwen2.5:7b"
+        memory = ConversationMemory()
+
+        engine = AgentEngine(settings=settings, router=router, memory=memory, doc_service=mock_doc_service)
+        filtered_sources = await engine._retrieve_context("aircraft engine failures")
+        assert filtered_sources == []
+

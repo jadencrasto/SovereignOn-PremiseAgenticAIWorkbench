@@ -126,6 +126,10 @@ class PlanValidator:
         """Validate a single plan step."""
         errors: List[PlanValidationError] = []
 
+        # Normalize string 'null'/'none' to None
+        if isinstance(step.tool_name, str) and step.tool_name.strip().lower() in {"null", "none", ""}:
+            step.tool_name = None
+
         # Reasoning-only steps (no tool) — always valid
         if step.tool_name is None:
             return errors
@@ -165,6 +169,16 @@ class PlanValidator:
                 errors.append(PlanValidationError(
                     step.id,
                     f"Argument validation error for '{step.tool_name}': {exc}"
+                ))
+
+        # --- Reject placeholder/fabricated paths for file_read ---
+        if step.tool_name == "file_read" and step.arguments:
+            from backend.agent.planner import is_placeholder_path
+            path_val = step.arguments.get("relative_path") or step.arguments.get("filename") or ""
+            if is_placeholder_path(str(path_val)):
+                errors.append(PlanValidationError(
+                    step.id,
+                    f"Invalid file_read path '{path_val}': fabricated or placeholder document paths are not permitted. Use document_search for document retrieval."
                 ))
 
         # --- Enforce approval requirements based on tool risk ---

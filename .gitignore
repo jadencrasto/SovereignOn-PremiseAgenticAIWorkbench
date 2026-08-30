@@ -63,3 +63,6 @@ desktop.ini
 htmlcov/
 .pytest_cache/
 .mypy_cache/
+
+eval/results/*_20*.json
+eval/results/*_20*.md
