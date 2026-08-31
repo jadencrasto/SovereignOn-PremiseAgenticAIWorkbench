@@ -30,8 +30,10 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+
 from backend.config import Settings
 from backend.models.base import BaseModelProvider
+from backend.models.hardware import HardwareManager, ModelAllocationDecision, SystemTelemetry
 from backend.models.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
@@ -39,15 +41,18 @@ logger = logging.getLogger(__name__)
 
 class ModelRouter:
     """
-    Resolves 'provider/model' identifiers to provider adapters.
-
-    Provider adapters are created lazily and cached for reuse.
+    Resolves 'provider/model' identifiers to provider adapters with
+    resource-aware adaptive placement & proactive VRAM eviction.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, hardware_mgr: Optional[HardwareManager] = None) -> None:
         self._settings = settings
         self._config = self._load_models_yaml(settings.config_dir / "models.yaml")
         self._provider_cache: Dict[str, BaseModelProvider] = {}
+        self._hardware_mgr = hardware_mgr or HardwareManager()
+        self._active_loaded_models: List[str] = []
+        self._last_decision: Optional[ModelAllocationDecision] = None
+
 
     # ------------------------------------------------------------------
     # Public API — existing (Phase 1–4, unchanged)
@@ -223,7 +228,64 @@ class ModelRouter:
                 "installed": is_installed,
             })
 
+
         return result
+
+
+    # ------------------------------------------------------------------
+    # Resource-aware Hardware & Eviction Management
+    # ------------------------------------------------------------------
+
+    def get_hardware_telemetry(self) -> SystemTelemetry:
+        """Return live CPU, RAM, and GPU telemetry snapshot."""
+        return self._hardware_mgr.get_system_telemetry()
+
+    def get_last_allocation_decision(self) -> Optional[ModelAllocationDecision]:
+        """Return the most recent model allocation decision."""
+        return self._last_decision
+
+    async def prepare_model_for_task(self, target_model_id: Optional[str] = None) -> ModelAllocationDecision:
+        """
+        Evaluate hardware requirements, evict incompatible resident models from VRAM
+        (especially LLM vs VLM on 4 GB RTX 3050), and set active model.
+        """
+        provider_name, model_name = self.resolve_model(target_model_id)
+        decision = self._hardware_mgr.evaluate_model_allocation(
+            target_model=model_name,
+            active_loaded_models=self._active_loaded_models,
+        )
+        self._last_decision = decision
+
+        # Execute required evictions proactively
+        if decision.evictions_required and provider_name == "ollama":
+            try:
+                provider = self.get_provider("ollama")
+                for evict_target in decision.evictions_required:
+                    if hasattr(provider, "unload_model"):
+                        logger.info("Evicting resident model '%s' from VRAM", evict_target)
+                        await provider.unload_model(evict_target)
+                        if evict_target in self._active_loaded_models:
+                            self._active_loaded_models.remove(evict_target)
+            except Exception as exc:
+                logger.warning("Model eviction error: %s", exc)
+
+        if model_name not in self._active_loaded_models:
+            self._active_loaded_models = [model_name]
+
+        return decision
+
+    async def evict_model(self, model_id: str) -> bool:
+        """Explicitly unload a model from VRAM."""
+        provider_name, model_name = self.resolve_model(model_id)
+        if provider_name == "ollama":
+            provider = self.get_provider("ollama")
+            if hasattr(provider, "unload_model"):
+                success = await provider.unload_model(model_name)
+                if model_name in self._active_loaded_models:
+                    self._active_loaded_models.remove(model_name)
+                return success
+        return False
+
 
     # ------------------------------------------------------------------
     # Internal helpers

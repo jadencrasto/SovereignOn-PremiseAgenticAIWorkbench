@@ -225,7 +225,19 @@ export interface ToolsListResponse {
   total: number;
 }
 
-export type ActiveTab = 'chat' | 'documents' | 'models' | 'tools' | 'settings' | 'tasks' | 'audit' | 'health' | 'security';
+export type ActiveTab =
+  | 'chat'
+  | 'demo'
+  | 'tasks'
+  | 'artifacts'
+  | 'documents'
+  | 'models'
+  | 'tools'
+  | 'audit'
+  | 'health'
+  | 'security'
+  | 'settings';
+
 
 // Phase 5: Allowed image MIME types for client-side validation
 export const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;

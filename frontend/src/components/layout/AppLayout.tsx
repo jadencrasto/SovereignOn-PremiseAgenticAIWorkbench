@@ -12,6 +12,8 @@ import { TaskHistoryView } from '../tasks/TaskHistoryView';
 import { AuditDashboard } from '../audit/AuditDashboard';
 import { SystemHealth } from '../health/SystemHealth';
 import { SecurityDiagnostics } from '../security/SecurityDiagnostics';
+import { DemoScenarioLauncher } from '../demo/DemoScenarioLauncher';
+import { ArtifactViewer } from '../artifacts/ArtifactViewer';
 
 export const AppLayout: React.FC = () => {
   const { activeTab } = useWorkbench();
@@ -26,8 +28,10 @@ export const AppLayout: React.FC = () => {
 
         {/* Main Content View */}
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#090d16]">
+          {activeTab === 'demo' && <DemoScenarioLauncher />}
           {activeTab === 'chat' && <ChatView />}
           {activeTab === 'tasks' && <TaskHistoryView />}
+          {activeTab === 'artifacts' && <ArtifactViewer />}
           {activeTab === 'documents' && <DocumentsView />}
           {activeTab === 'models' && <ModelsView />}
           {activeTab === 'tools' && <ToolsView />}
@@ -37,6 +41,7 @@ export const AppLayout: React.FC = () => {
           {activeTab === 'settings' && <SettingsView />}
         </main>
       </div>
+
 
       {/* Bottom Status Bar */}
       <StatusBar />

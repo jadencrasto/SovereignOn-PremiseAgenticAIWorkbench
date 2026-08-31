@@ -424,6 +424,40 @@ export const ChatView: React.FC = () => {
     }
   };
 
+  // Listen to Demo Scenario triggers
+  React.useEffect(() => {
+    const handlePreloadDemo = async (e: Event) => {
+      const customEvent = e as CustomEvent<{
+        prompt: string;
+        imageFile?: string;
+        isMultimodal: boolean;
+      }>;
+      const { prompt, imageFile, isMultimodal } = customEvent.detail;
+      if (!prompt) return;
+
+      if (isMultimodal && imageFile) {
+        try {
+          // Attempt to load the preloaded image blob from server
+          const imgRes = await fetch(`/api/documents/view/images/${imageFile}`);
+          if (imgRes.ok) {
+            const blob = await imgRes.blob();
+            const file = new File([blob], imageFile, { type: blob.type || 'image/png' });
+            handleSendMessage(prompt, file);
+            return;
+          }
+        } catch (err) {
+          console.warn('Could not auto-fetch demo image blob:', err);
+        }
+      }
+
+      handleSendMessage(prompt);
+    };
+
+    window.addEventListener('workbench:preload-demo', handlePreloadDemo);
+    return () => window.removeEventListener('workbench:preload-demo', handlePreloadDemo);
+  }, [handleSendMessage]);
+
+
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#090d16]">
       {/* Workspace Header */}

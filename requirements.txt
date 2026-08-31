@@ -22,6 +22,12 @@ python-docx>=1.1.0
 # Auth & Security
 argon2-cffi>=23.1.0
 
+# Hardware Monitoring & Telemetry
+psutil>=5.9.0
+
+# Artifacts & Excel Reports
+openpyxl>=3.1.0
+
 # Image & Multimodal
 pillow>=10.0.0
 
@@ -32,3 +38,4 @@ structlog>=24.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 httpx  # also used for testing FastAPI
+

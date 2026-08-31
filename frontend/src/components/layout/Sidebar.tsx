@@ -12,9 +12,8 @@ import {
   HardDrive,
   ListTodo,
   ShieldAlert,
-  Activity,
-  Lock,
-  User as UserIcon,
+  Zap,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { LoginModal } from '../auth/LoginModal';
 
@@ -24,8 +23,10 @@ export const Sidebar: React.FC = () => {
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
   const navItems: { id: ActiveTab; label: string; icon: React.FC<{ className?: string }>; count?: number; adminOnly?: boolean }[] = [
+    { id: 'demo', label: 'Demo Scenarios', icon: Zap },
     { id: 'chat', label: 'Agent Chat', icon: MessageSquare },
     { id: 'tasks', label: 'Agent Tasks', icon: ListTodo },
+    { id: 'artifacts', label: 'Artifacts & Reports', icon: FileSpreadsheet },
     { id: 'documents', label: 'Documents & RAG', icon: FileText, count: documents.length },
     { id: 'models', label: 'Local Models', icon: Cpu },
     { id: 'tools', label: 'Tool Registry', icon: Wrench },
@@ -34,6 +35,7 @@ export const Sidebar: React.FC = () => {
     { id: 'security', label: 'Security Posture', icon: Lock, adminOnly: true },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
+
 
   return (
     <>

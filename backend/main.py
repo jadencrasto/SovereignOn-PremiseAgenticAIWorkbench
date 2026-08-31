@@ -47,6 +47,9 @@ from backend.api.models import router as models_router
 from backend.api.documents import router as documents_router
 from backend.api.tools import router as tools_router
 from backend.api.tasks import router as tasks_router
+from backend.api.hardware import router as hardware_router
+from backend.api.artifacts import router as artifacts_router
+from backend.api.demo import router as demo_router
 from backend.auth.routes import router as auth_router
 from backend.audit.routes import router as audit_router
 from backend.health.routes import router as health_router
@@ -59,6 +62,9 @@ from backend.tools.document_search import DocumentSearchInput, create_document_s
 from backend.tools.file_list import FileListInput, create_file_list
 from backend.tools.file_read import FileReadInput, create_file_read
 from backend.tools.file_write import FileWriteInput, create_file_write
+from backend.tools.xlsx_report import XlsxReportInput, create_xlsx_report
+from backend.tools.artifact_verifier import ArtifactVerifierInput, create_artifact_verifier
+
 
 # Phase 6 & 7 imports
 from backend.agent.task_store import TaskStore
@@ -200,8 +206,44 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         enabled=_is_enabled("file_write"),
     ))
 
+    # 6. xlsx_report
+    registry.register(ToolDefinition(
+        name="xlsx_report",
+        description=(
+            "Generate a formatted, styled Excel compliance or diligence report (.xlsx) in data/sandbox/. "
+            "Use this when generating industrial diligence, compliance tables, or multi-column data reports. "
+            "Includes title block, styled headers, and automated compliance status highlighting."
+        ),
+        input_schema=XlsxReportInput,
+        execute_fn=create_xlsx_report(settings.sandbox_dir),
+        category="File Operations",
+        read_only=False,
+        requires_confirmation=True,
+        risk_level="high",
+        requires_approval=True,
+        enabled=_is_enabled("xlsx_report"),
+    ))
+
+    # 7. artifact_verifier
+    registry.register(ToolDefinition(
+        name="artifact_verifier",
+        description=(
+            "Inspect and verify a generated artifact (.xlsx, .csv, .md) on disk. "
+            "Re-reads row counts, verifies column presence, and computes cryptographic SHA-256 hash. "
+            "Use this as a mandatory verification step after generating reports or files."
+        ),
+        input_schema=ArtifactVerifierInput,
+        execute_fn=create_artifact_verifier(settings.sandbox_dir),
+        category="Verification",
+        read_only=True,
+        risk_level="low",
+        requires_approval=False,
+        enabled=_is_enabled("artifact_verifier"),
+    ))
+
     logger.info("Registered %d tools (%d enabled)",
                 len(registry.list_tools()), len(registry.list_enabled_tools()))
+
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +482,14 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(documents_router)
     app.include_router(tools_router)
     app.include_router(tasks_router)
+    app.include_router(hardware_router)
+    app.include_router(artifacts_router)
+    app.include_router(demo_router)
     app.include_router(auth_router)
     app.include_router(audit_router)
     app.include_router(health_router)
     app.include_router(security_router)
+
 
     return app
 

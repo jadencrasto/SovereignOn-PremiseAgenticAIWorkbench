@@ -159,6 +159,24 @@ class OllamaProvider(BaseModelProvider):
         except Exception:
             return False
 
+    async def unload_model(self, model_name: str) -> bool:
+        """
+        Actively evict/unload a model from VRAM by calling Ollama /api/generate with keep_alive: 0.
+        Essential for 4 GB VRAM GPUs so LLM and VLM are never co-resident.
+        """
+        clean_model = model_name.split("/")[-1]
+        try:
+            resp = await self._client.post(
+                "/api/generate",
+                json={"model": clean_model, "keep_alive": 0},
+                timeout=10.0,
+            )
+            logger.info("Ollama unload_model | model=%s status=%d", clean_model, resp.status_code)
+            return resp.status_code == 200
+        except Exception as exc:
+            logger.warning("Ollama unload_model failed for %s: %s", clean_model, exc)
+            return False
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -171,20 +189,17 @@ class OllamaProvider(BaseModelProvider):
         Phase 5 vision support:
           - If a Message has non-empty .images, include 'images' key in
             that message dict (Ollama's multimodal format).
-          - If ChatRequest.images is non-empty, attach them to the LAST
+          - If ChatRequest.images is set, attach to the LAST
             user message in the list (the current user turn).
-          - Text-only messages produce identical output to Phase 4 (no
-            'images' key present).
+          - Enforces bounded context (num_ctx: 4096) to save ~800 MB VRAM on 4 GB GPUs.
         """
         messages = []
         for m in request.messages:
             msg_dict: dict = {"role": m.role, "content": m.content}
             if m.images:
-                # Images already attached directly to this Message object
                 msg_dict["images"] = list(m.images)
             messages.append(msg_dict)
 
-        # If ChatRequest.images is set, attach to the last user message
         if request.images:
             for msg_dict in reversed(messages):
                 if msg_dict["role"] == "user":
@@ -198,6 +213,7 @@ class OllamaProvider(BaseModelProvider):
             "stream": stream,
             "options": {
                 "temperature": request.temperature,
+                "num_ctx": 4096,  # Cap KV cache footprint for 4 GB VRAM constraint
             },
         }
         if request.max_tokens is not None:
@@ -207,3 +223,4 @@ class OllamaProvider(BaseModelProvider):
     async def aclose(self) -> None:
         """Clean up the underlying HTTP client."""
         await self._client.aclose()
+

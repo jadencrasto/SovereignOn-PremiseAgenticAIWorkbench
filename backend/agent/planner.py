@@ -108,6 +108,8 @@ _WRITE_KEYWORDS = [
     "create a file", "write a file", "save a file", "export",
     "create a report", "write a report", "generate a report",
     "save the result", "write to file", "save to file",
+    "compliance", "runbook", "benchmark", "incident", "anomaly",
+    "xlsx", "excel", "diligence", "diagnostics", "cross-check",
 ]
 
 
@@ -133,8 +135,8 @@ def should_use_planning(
         if re.search(pattern, msg_lower):
             return False
 
-    # Short messages (< 30 chars) are almost never multi-step
-    if len(msg_lower) < 30:
+    # Short messages (< 30 chars) are almost never multi-step unless they contain industrial keywords
+    if len(msg_lower) < 30 and not any(kw in msg_lower for kw in ("runbook", "xlsx", "excel", "incident")):
         return False
 
     # Explicit multi-step indicators
@@ -142,7 +144,7 @@ def should_use_planning(
         if re.search(pattern, msg_lower, re.IGNORECASE):
             return True
 
-    # Write operations always warrant planning (approval gate)
+    # Write & industrial operations always warrant planning (approval gate)
     for kw in _WRITE_KEYWORDS:
         if kw in msg_lower:
             return True
@@ -173,7 +175,7 @@ def is_placeholder_path(path: str) -> bool:
 # Plan generation prompt
 # ---------------------------------------------------------------------------
 
-_PLAN_SYSTEM_PROMPT = """You are a task planner for a sovereign on-premise AI workbench.
+_PLAN_SYSTEM_PROMPT = """You are an industrial task planner for a sovereign on-premise AI workbench.
 
 Given the user's request, create a structured execution plan using ONLY the available tools listed below.
 
@@ -182,11 +184,13 @@ RULES:
 2. Each step must use a tool from the available list or be a "reasoning" step (tool_name = null).
 3. Keep plans concise — use the minimum steps needed to complete the user's request.
 4. Tool guidelines:
-   - document_search: Searches and retrieves text passages directly from the local knowledge base. Use this whenever the user asks to search, find, or summarize information from documents. document_search directly retrieves the full grounded text content. Do NOT follow document_search with file_read.
-   - file_read: Reads an existing text file from the workspace. ONLY use file_read when the user explicitly provides a specific known filename in their prompt (e.g. 'read config.json'). NEVER call file_read on indexed documents or RAG results. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
-   - calculator: Performs arithmetic on numbers (e.g. "4 + 3 * 2").
-   - file_write: Creates an output file in the sandbox. Always set requires_approval to true.
-   - Reasoning step (tool_name = null): Synthesizes observations, calculates or summarizes findings, and provides the final grounded response to the user.
+   - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this whenever searching or checking standards.
+   - file_read: Reads an existing data file from the workspace (e.g. 'mrpl_lab_composition_test.csv'). ONLY use file_read when the user explicitly names a known file in their prompt.
+   - calculator: Performs arithmetic or tolerance calculations on numbers.
+   - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Always set requires_approval to true.
+   - file_write: Creates a text/markdown file or incident log in the sandbox. Always set requires_approval to true.
+   - artifact_verifier: Verifies a generated report or artifact on disk (checks rows, columns, and SHA-256 hash). Follow xlsx_report or file_write with artifact_verifier whenever creating reports.
+   - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the final grounded decision-support response.
 5. Maximum {max_steps} steps.
 
 OUTPUT FORMAT (JSON array of steps):
@@ -198,6 +202,7 @@ OUTPUT FORMAT (JSON array of steps):
 AVAILABLE TOOLS:
 {tool_descriptions}
 """
+
 
 
 class AgentPlanner:

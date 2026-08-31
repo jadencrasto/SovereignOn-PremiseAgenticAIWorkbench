@@ -1,0 +1,9 @@
+Sample_ID,Batch_Stream,Parameter,Measured_Value,Unit,Test_Method,Timestamp
+SMP-MS-8401,Motor Spirit (BS-VI MS),Sulfur Content,8.2,ppm,ASTM D2622,2026-08-30T08:30:00Z
+SMP-MS-8402,Motor Spirit (BS-VI MS),Research Octane Number,91.4,RON,ASTM D2699,2026-08-30T08:45:00Z
+SMP-MS-8403,Motor Spirit (BS-VI MS),Benzene Content,1.24,% vol,ASTM D3606,2026-08-30T09:10:00Z
+SMP-MS-8404,Motor Spirit (BS-VI MS),Reid Vapor Pressure,64.2,kPa,ASTM D323,2026-08-30T09:30:00Z
+SMP-HSD-9201,High Speed Diesel (HSD),Cetane Number,52.1,CN,ASTM D613,2026-08-30T10:00:00Z
+SMP-HSD-9202,High Speed Diesel (HSD),Flash Point,32.4,°C,ASTM D93,2026-08-30T10:20:00Z
+SMP-ATF-3101,Aviation Turbine Fuel (ATF),Freezing Point,-51.2,°C,ASTM D2386,2026-08-30T11:00:00Z
+SMP-ATF-3102,Aviation Turbine Fuel (ATF),Total Acidity,0.012,mg KOH/g,ASTM D3242,2026-08-30T11:15:00Z
