@@ -1,12 +1,12 @@
 {
   "suite_name": "Industrial Report Generation Workflow Benchmark",
-  "timestamp": "2026-08-30T17:20:35Z",
+  "timestamp": "2026-08-31T14:53:31Z",
   "environment": "Air-Gapped Sovereign Workflow",
   "total_cases": 5,
   "passed": 5,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 0.20153220000793226,
+  "duration_seconds": 1.125,
   "summary_metrics": {
     "Workflow_Stages_Completed": 5,
     "Total_Workflow_Stages": 5,
@@ -18,9 +18,9 @@
       "name": "Task Planning & DAG Construction",
       "category": "workflow_orchestration",
       "status": "PASS",
-      "duration_ms": 26.40790000441484,
+      "duration_ms": 156.00000000085856,
       "metrics": {},
-      "details": "Task task_88623a72d2e0 generated 3-step execution plan with approval requirement on step 3",
+      "details": "Task task_586875ddf502 generated 3-step execution plan with approval requirement on step 3",
       "error": null
     },
     {
@@ -28,7 +28,7 @@
       "name": "Automated Read Step Execution",
       "category": "workflow_orchestration",
       "status": "PASS",
-      "duration_ms": 46.828600025037304,
+      "duration_ms": 218.99999999914144,
       "metrics": {},
       "details": "RAG context retrieval and arithmetic calculation steps completed cleanly",
       "error": null
@@ -38,7 +38,7 @@
       "name": "Human Approval Binding & Verification",
       "category": "human_in_the_loop",
       "status": "PASS",
-      "duration_ms": 64.0883999876678,
+      "duration_ms": 375.0,
       "metrics": {},
       "details": "Approval request created, approved by operator, and SHA-256 bound arguments verified",
       "error": null
@@ -48,7 +48,7 @@
       "name": "Sandboxed Report Output & Citation Verification",
       "category": "data_integrity",
       "status": "PASS",
-      "duration_ms": 32.48429999803193,
+      "duration_ms": 188.00000000010186,
       "metrics": {},
       "details": "Generated Markdown report contains structured sections, findings, and verified document citations",
       "error": null
@@ -58,7 +58,7 @@
       "name": "Audit Trail Complete Attribution",
       "category": "compliance_audit",
       "status": "PASS",
-      "duration_ms": 1.2863000156357884,
+      "duration_ms": 14.999999999417923,
       "metrics": {},
       "details": "Verified 3 tool execution events and 2 approval events in SQLite audit log",
       "error": null

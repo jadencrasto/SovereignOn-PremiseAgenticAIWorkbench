@@ -1,12 +1,12 @@
 {
   "suite_name": "Multimodal Vision & Equipment Inspection Benchmark",
-  "timestamp": "2026-08-30T17:20:35Z",
+  "timestamp": "2026-08-31T14:53:30Z",
   "environment": "Air-Gapped Multimodal Pipeline",
   "total_cases": 4,
-  "passed": 4,
+  "passed": 3,
   "failed": 0,
-  "environment_unavailable": 0,
-  "duration_seconds": 2.394632500014268,
+  "environment_unavailable": 1,
+  "duration_seconds": 2.1090000000003783,
   "summary_metrics": {
     "Image_Processing_Verified": true,
     "Context_Injection_Verified": true,
@@ -18,7 +18,7 @@
       "name": "Equipment Image Ingestion & Processing",
       "category": "image_pipeline",
       "status": "PASS",
-      "duration_ms": 1.6020000039134175,
+      "duration_ms": 30.999999999039574,
       "metrics": {
         "width": 400,
         "height": 300,
@@ -32,7 +32,7 @@
       "name": "Visual Context Message Construction",
       "category": "context_injection",
       "status": "PASS",
-      "duration_ms": 0.010399991879239678,
+      "duration_ms": 0.0,
       "metrics": {},
       "details": "Visual observation correctly formatted as synthetic user observation for reasoning LLM",
       "error": null
@@ -41,10 +41,10 @@
       "test_id": "MM-03",
       "name": "Vision Analysis Pipeline Execution",
       "category": "model_inference",
-      "status": "PASS",
-      "duration_ms": 2391.247600025963,
+      "status": "ENVIRONMENT_UNAVAILABLE",
+      "duration_ms": 0.0,
       "metrics": {},
-      "details": "LLaVA vision model executed visual defect extraction",
+      "details": "Local LLaVA model not loaded in Ollama; vision execution marked unavailable",
       "error": null
     },
     {
@@ -52,7 +52,7 @@
       "name": "Vision Fault Graceful Degradation",
       "category": "fault_tolerance",
       "status": "PASS",
-      "duration_ms": 0.3826000029221177,
+      "duration_ms": 0.0,
       "metrics": {},
       "details": "When vision provider fails, service returns clean fallback observation without crashing",
       "error": null

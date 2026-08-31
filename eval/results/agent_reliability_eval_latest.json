@@ -1,12 +1,12 @@
 {
   "suite_name": "Agent Reliability & Fault Injection Benchmark",
-  "timestamp": "2026-08-30T17:20:17Z",
+  "timestamp": "2026-08-31T14:53:18Z",
   "environment": "Air-Gapped In-Memory & SQLite WAL",
   "total_cases": 7,
   "passed": 7,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 0.5342194999975618,
+  "duration_seconds": 1.3590000000003783,
   "summary_metrics": {
     "Passed_Scenarios": 7,
     "Total_Scenarios": 7,
@@ -18,7 +18,7 @@
       "name": "Model Unavailable Resilience",
       "category": "fault_injection",
       "status": "PASS",
-      "duration_ms": 21.104800020111725,
+      "duration_ms": 140.99999999962165,
       "metrics": {},
       "details": "Task transitioned safely to FAILED with descriptive connection error",
       "error": null
@@ -28,7 +28,7 @@
       "name": "Tool Exception Safety",
       "category": "error_handling",
       "status": "PASS",
-      "duration_ms": 0.3020000003743917,
+      "duration_ms": 14.999999999417923,
       "metrics": {},
       "details": "Tool exception caught cleanly and converted to structured ToolResult failure",
       "error": null
@@ -38,7 +38,7 @@
       "name": "Malformed Argument Rejection",
       "category": "input_validation",
       "status": "PASS",
-      "duration_ms": 0.08650001836940646,
+      "duration_ms": 0.0,
       "metrics": {},
       "details": "Pydantic validation rejected malformed tool input without crashing",
       "error": null
@@ -48,7 +48,7 @@
       "name": "Approval Rejection Handling",
       "category": "human_in_the_loop",
       "status": "PASS",
-      "duration_ms": 78.17640001303516,
+      "duration_ms": 578.0000000013388,
       "metrics": {},
       "details": "Approval rejection safely transitions step to skipped and task to cancelled",
       "error": null
@@ -58,7 +58,7 @@
       "name": "Task Cancellation Verification",
       "category": "lifecycle_control",
       "status": "PASS",
-      "duration_ms": 121.9287000130862,
+      "duration_ms": 140.99999999962165,
       "metrics": {},
       "details": "Running task cancelled immediately and flagged as cancelled",
       "error": null
@@ -68,7 +68,7 @@
       "name": "Server Restart Crash Recovery",
       "category": "fault_recovery",
       "status": "PASS",
-      "duration_ms": 29.692000010982156,
+      "duration_ms": 155.99999999903957,
       "metrics": {},
       "details": "In-flight executing task recovered to FAILED_INTERRUPTED on restart",
       "error": null
@@ -78,7 +78,7 @@
       "name": "Approval Drift Rejection",
       "category": "security_binding",
       "status": "PASS",
-      "duration_ms": 139.1345000010915,
+      "duration_ms": 203.00000000133878,
       "metrics": {},
       "details": "Approved step rejected when underlying tool was disabled post-approval",
       "error": null

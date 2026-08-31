@@ -184,13 +184,14 @@ RULES:
 2. Each step must use a tool from the available list or be a "reasoning" step (tool_name = null).
 3. Keep plans concise — use the minimum steps needed to complete the user's request.
 4. Tool guidelines:
-   - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this whenever searching or checking standards.
-   - file_read: Reads an existing data file from the workspace (e.g. 'mrpl_lab_composition_test.csv'). ONLY use file_read when the user explicitly names a known file in their prompt.
-   - calculator: Performs arithmetic or tolerance calculations on numbers.
+   - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this whenever the user asks to search, find, or summarize information from documents. document_search directly retrieves the full grounded text content. Do NOT follow document_search with file_read.
+   - file_read: Reads an existing text file from the workspace (e.g. 'mrpl_lab_composition_test.csv'). ONLY use file_read when the user explicitly provides a specific known filename in their prompt. NEVER call file_read on indexed documents or RAG results. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
+   - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2").
    - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Always set requires_approval to true.
-   - file_write: Creates a text/markdown file or incident log in the sandbox. Always set requires_approval to true.
+   - file_write: Creates an output file or incident log in the sandbox. Always set requires_approval to true.
    - artifact_verifier: Verifies a generated report or artifact on disk (checks rows, columns, and SHA-256 hash). Follow xlsx_report or file_write with artifact_verifier whenever creating reports.
    - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the final grounded decision-support response.
+
 5. Maximum {max_steps} steps.
 
 OUTPUT FORMAT (JSON array of steps):

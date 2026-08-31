@@ -1,12 +1,12 @@
 {
   "suite_name": "Baseline vs System Comparative Benchmark",
-  "timestamp": "2026-08-30T17:20:32Z",
+  "timestamp": "2026-08-31T14:53:28Z",
   "environment": "Air-Gapped Sovereign Comparison",
   "total_cases": 2,
   "passed": 2,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 0.0017094000068027526,
+  "duration_seconds": 0.01599999999962165,
   "summary_metrics": {
     "RAG_Fact_Coverage": 1.0,
     "No_Retrieval_Fact_Coverage": 0.0,
@@ -19,7 +19,7 @@
       "name": "RAG vs No-Retrieval Grounded Fact Availability",
       "category": "rag_comparison",
       "status": "PASS",
-      "duration_ms": 0.7949999999254942,
+      "duration_ms": 0.0,
       "metrics": {
         "rag_fact_found": true,
         "no_retrieval_fact_found": false
@@ -32,7 +32,7 @@
       "name": "Agent Planning vs Direct Execution Routing",
       "category": "agent_comparison",
       "status": "PASS",
-      "duration_ms": 0.9064000041689724,
+      "duration_ms": 15.99999999962165,
       "metrics": {
         "complex_triggers_planning": true,
         "simple_uses_direct_loop": true

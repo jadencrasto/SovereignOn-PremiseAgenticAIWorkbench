@@ -14,8 +14,12 @@ import {
   ShieldAlert,
   Zap,
   FileSpreadsheet,
+  Activity,
+  Lock,
+  User as UserIcon,
 } from 'lucide-react';
 import { LoginModal } from '../auth/LoginModal';
+
 
 export const Sidebar: React.FC = () => {
   const { activeTab, setActiveTab, documents, isBackendConnected } = useWorkbench();
