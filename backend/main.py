@@ -54,6 +54,8 @@ from backend.auth.routes import router as auth_router
 from backend.audit.routes import router as audit_router
 from backend.health.routes import router as health_router
 from backend.security.routes import router as security_router
+from backend.api.knowledge_graph import router as knowledge_graph_router
+
 
 # Tool imports
 from backend.tools.registry import ToolRegistry, ToolDefinition
@@ -489,6 +491,8 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(audit_router)
     app.include_router(health_router)
     app.include_router(security_router)
+    app.include_router(knowledge_graph_router)
+
 
 
     return app

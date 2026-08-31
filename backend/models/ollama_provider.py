@@ -48,11 +48,13 @@ class OllamaProvider(BaseModelProvider):
         """
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        # Separate client for streaming (no response timeout limit)
+        # High-performance client with persistent connection pooling & keep-alive
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            timeout=httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=10.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=120.0),
+            timeout=httpx.Timeout(connect=5.0, read=timeout, write=15.0, pool=5.0),
         )
+
 
     @property
     def provider_name(self) -> str:
@@ -211,14 +213,17 @@ class OllamaProvider(BaseModelProvider):
             "model": request.model,
             "messages": messages,
             "stream": stream,
+            "keep_alive": "30m",  # Keep model resident in VRAM to eliminate cold-start lag
             "options": {
                 "temperature": request.temperature,
-                "num_ctx": 4096,  # Cap KV cache footprint for 4 GB VRAM constraint
+                "num_ctx": 4096,   # Bounded KV cache footprint for 4 GB VRAM
+                "num_thread": 8,   # Maximize multi-core execution on AMD Ryzen 7 6800HS
             },
         }
         if request.max_tokens is not None:
             payload["options"]["num_predict"] = request.max_tokens
         return payload
+
 
     async def aclose(self) -> None:
         """Clean up the underlying HTTP client."""

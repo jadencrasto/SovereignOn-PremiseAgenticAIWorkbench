@@ -1,12 +1,7 @@
 /**
  * frontend/src/components/demo/DemoScenarioLauncher.tsx
  * ------------------------------------------------------
- * Live One-Click Industrial Demo Scenarios for SIH Internal Round.
- *
- * Prominently showcases the 3 sovereign industrial workflows:
- * 1. Automated Industrial Diligence & Reporting (MRPL Hydrocarbon Stream XLSX)
- * 2. Multimodal Equipment Diagnostics (MOV-4102-B Valve Pitting Corrosion & SOP)
- * 3. Autonomous Incident Runbook (Flare Knock-Out Drum Pressure Anomaly & Dispatch)
+ * Precision Industrial Procedures (White & Light Blue Style)
  */
 
 import React, { useState, useEffect } from 'react';
@@ -17,10 +12,12 @@ import {
   AlertTriangle,
   Play,
   CheckCircle2,
-  Cpu,
-  Layers,
   ArrowRight,
   ShieldCheck,
+  Cpu,
+  Layers,
+  FileCheck,
+  Activity,
   Zap,
 } from 'lucide-react';
 
@@ -62,10 +59,8 @@ export const DemoScenarioLauncher: React.FC = () => {
   }, []);
 
   const handleLaunchScenario = (sc: DemoScenario) => {
-    addToast('info', `Preloading Scenario: ${sc.title}`);
-    // Switch to Chat tab
+    addToast('info', `Initializing workflow: ${sc.title}`);
     setActiveTab('chat');
-    // Dispatch custom event to auto-fill prompt in ChatView
     window.dispatchEvent(
       new CustomEvent('workbench:preload-demo', {
         detail: {
@@ -77,99 +72,119 @@ export const DemoScenarioLauncher: React.FC = () => {
     );
   };
 
-  const getScenarioIcon = (id: string) => {
+  const getScenarioTheme = (id: string) => {
     switch (id) {
       case 'industrial_diligence':
-        return <FileSpreadsheet className="w-5 h-5 text-emerald-400" />;
+        return {
+          code: 'PROC-01',
+          tag: 'HYDROCARBON QA',
+          badgeBg: 'bg-[#e0f2fe] text-[#0369a1] border-[#bae6fd]',
+          btnBg: 'bg-[#0284c7] hover:bg-[#0369a1] text-white',
+          borderHover: 'hover:border-[#0284c7]',
+          shadow: 'brutal-shadow-blue',
+        };
       case 'equipment_diagnostics':
-        return <Eye className="w-5 h-5 text-blue-400" />;
+        return {
+          code: 'PROC-02',
+          tag: 'MECHANICAL NDT',
+          badgeBg: 'bg-[#dbeafe] text-[#1d4ed8] border-[#bfdbfe]',
+          btnBg: 'bg-[#2563eb] hover:bg-[#1d4ed8] text-white',
+          borderHover: 'hover:border-[#2563eb]',
+          shadow: 'brutal-shadow-sky',
+        };
       case 'incident_runbook':
-        return <AlertTriangle className="w-5 h-5 text-amber-400" />;
+        return {
+          code: 'PROC-03',
+          tag: 'PROCESS INTERLOCK',
+          badgeBg: 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]',
+          btnBg: 'bg-[#d97706] hover:bg-[#b45309] text-white',
+          borderHover: 'hover:border-[#d97706]',
+          shadow: 'brutal-shadow-yellow',
+        };
       default:
-        return <Layers className="w-5 h-5 text-purple-400" />;
+        return {
+          code: 'PROC-00',
+          tag: 'STANDARD',
+          badgeBg: 'bg-[#f1f5f9] text-[#334155] border-[#cbd5e1]',
+          btnBg: 'bg-[#334155] hover:bg-[#1e293b] text-white',
+          borderHover: 'hover:border-[#334155]',
+          shadow: 'brutal-shadow-dark',
+        };
     }
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-[#090d16] text-slate-100 p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-[#f0f7ff] text-[#0f172a] p-8 space-y-6 font-mono">
+      {/* Station Header Bar */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 bg-white border-2 border-[#cbd5e1] brutal-shadow-blue">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-              <Zap className="w-5 h-5 text-amber-400" />
-              Live Industrial Demo Scenarios
+          <div className="flex items-center gap-3">
+            <span className="w-3 h-3 bg-[#0284c7] inline-block" />
+            <h1 className="text-xl font-black font-display tracking-tight text-[#0f172a] uppercase">
+              Industrial Verification Procedures
             </h1>
-            <span className="text-[10px] uppercase font-mono px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded font-semibold">
+            <span className="text-[10px] font-bold px-2 py-0.5 bg-[#e0f2fe] text-[#0369a1] border border-[#bae6fd] uppercase">
               SIH26117 Internal Round
             </span>
           </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Pre-packaged, deterministic industrial decision-support workflows with preloaded synthetic refinery benchmarks.
+          <p className="text-xs text-slate-600 mt-1 font-sans">
+            Standard operating procedures with pre-indexed engineering specifications and host VRAM safety management.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs font-mono text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg">
-          <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          <span>100% Local · Zero Cloud Dependencies</span>
+        <div className="flex items-center gap-2 text-xs text-[#0369a1] bg-[#f0f9ff] border border-[#bae6fd] px-3.5 py-1.5 font-bold self-start md:self-auto">
+          <ShieldCheck className="w-4 h-4 text-[#0284c7]" />
+          <span>Local Engine &bull; Deterministic SOP Benchmark</span>
         </div>
       </div>
 
-      {/* Simulated Decision Support Disclaimer */}
-      <div className="p-3 bg-amber-950/30 border border-amber-800/40 rounded-xl text-amber-300 text-xs flex items-center gap-2.5">
-        <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-        <span>
-          <strong>Simulated Decision-Support Notice:</strong> All models, benchmarks, and runbooks operate as assistive advisory tools. This workbench does not claim autonomous physical control or engineering-grade diagnosis.
-        </span>
-      </div>
-
-      {/* Scenarios Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+      {/* 3 Physical Instrument-Style Workflow Cards */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {scenarios.map((sc) => {
+          const theme = getScenarioTheme(sc.id);
           const isSelected = selectedScenario?.id === sc.id;
+
           return (
             <div
               key={sc.id}
               onClick={() => setSelectedScenario(sc)}
-              className={`p-5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-4 ${
-                isSelected
-                  ? 'bg-[#0f172a]/90 border-emerald-500/50 shadow-lg shadow-emerald-950/30'
-                  : 'bg-[#0d1424]/60 border-slate-800 hover:border-slate-700'
+              className={`p-6 bg-white border-2 transition-all duration-150 cursor-pointer flex flex-col justify-between space-y-5 ${
+                isSelected ? 'border-[#0284c7] brutal-shadow-blue ring-2 ring-[#0284c7]/20' : `border-[#cbd5e1] ${theme.borderHover}`
               }`}
             >
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <div className="w-9 h-9 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center">
-                    {getScenarioIcon(sc.id)}
-                  </div>
-                  <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">
-                    {sc.badge}
+                  <span className="text-xs font-black font-display text-[#0284c7]">
+                    {theme.code}
+                  </span>
+                  <span className={`text-[9px] font-bold px-2 py-0.5 uppercase border ${theme.badgeBg}`}>
+                    {theme.tag}
                   </span>
                 </div>
 
                 <div>
-                  <h3 className="font-semibold text-sm text-slate-100">{sc.title}</h3>
-                  <div className="text-[11px] font-mono text-emerald-400 mt-0.5">{sc.unit}</div>
+                  <h3 className="font-black font-display text-base text-[#0f172a] uppercase">{sc.title}</h3>
+                  <div className="text-[11px] font-bold text-slate-500 mt-0.5">{sc.unit}</div>
                 </div>
 
-                <p className="text-xs text-slate-400 line-clamp-3 leading-relaxed">
+                <p className="text-xs text-slate-600 leading-relaxed font-sans">
                   {sc.description}
                 </p>
               </div>
 
-              <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
-                <span className="text-[11px] font-mono text-slate-500">
-                  {sc.is_multimodal ? '📷 Vision + RAG' : '📄 Data + RAG'}
+              <div className="pt-4 border-t-2 border-[#f1f5f9] flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-500">
+                  {sc.is_multimodal ? 'IMAGE + SOP' : 'DATASET + SOP'}
                 </span>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleLaunchScenario(sc);
                   }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition-colors"
+                  className={`flex items-center gap-1.5 px-4 py-2 font-bold text-xs uppercase border-2 border-black brutal-shadow-dark brutal-btn ${theme.btnBg}`}
                 >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Launch Live</span>
+                  <Play className="w-3 h-3 fill-current" />
+                  <span>Execute</span>
                 </button>
               </div>
             </div>
@@ -177,63 +192,79 @@ export const DemoScenarioLauncher: React.FC = () => {
         })}
       </div>
 
-      {/* Detailed Inspection Box for Selected Scenario */}
+      {/* Selected Procedure Specification Details */}
       {selectedScenario && (
-        <div className="bg-[#0d1424]/80 border border-slate-800 rounded-xl p-5 space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-            <div className="flex items-center gap-2">
-              <h2 className="font-bold text-sm text-white">Scenario Workflow Specification</h2>
-              <span className="text-xs font-mono text-slate-400">({selectedScenario.title})</span>
+        <div className="bg-white border-2 border-[#cbd5e1] p-6 space-y-4 brutal-shadow-blue">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b-2 border-[#f1f5f9] pb-4">
+            <div>
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                Procedure Specification
+              </div>
+              <h2 className="text-base font-black font-display text-[#0f172a] uppercase mt-0.5">
+                {selectedScenario.title}
+              </h2>
             </div>
             <button
               onClick={() => handleLaunchScenario(selectedScenario)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-colors"
+              className="flex items-center gap-2 px-5 py-2.5 bg-[#0284c7] hover:bg-[#0369a1] text-white font-bold text-xs uppercase border-2 border-black brutal-shadow-dark brutal-btn self-start sm:self-auto"
             >
-              <span>Execute This Scenario</span>
+              <span>Load Into Console</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-            <div className="space-y-2 bg-slate-900/60 p-3.5 rounded-lg border border-slate-800">
-              <div className="font-mono uppercase text-[10px] text-slate-400 font-semibold">
-                Autonomous Pipeline Execution Plan
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Step-by-step sequence */}
+            <div className="space-y-3 bg-[#f8fafc] p-4 border border-[#e2e8f0]">
+              <div className="text-xs font-bold text-[#0f172a] uppercase tracking-wider">
+                Automated Procedure Steps
               </div>
-              <ul className="space-y-1.5 text-slate-300 font-mono text-[11px]">
-                <li className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>1. Parse user query &amp; assess task complexity heuristic</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>2. Retrieve local grounding standard: {selectedScenario.benchmark_doc}</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>3. Adaptive model allocation &amp; VRAM safety check</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>4. Execute tool operations with cryptographic human approval gate</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>5. Produce &amp; verify artifact: {selectedScenario.expected_artifact}</span>
-                </li>
-              </ul>
+              <div className="space-y-2 text-xs text-slate-700 font-sans">
+                <div className="flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#059669] shrink-0 mt-0.5" />
+                  <span><strong>1. Input Ingestion:</strong> Evaluates dataset or inspection photograph</span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#059669] shrink-0 mt-0.5" />
+                  <span><strong>2. Standard Retrieval:</strong> Cross-checks <em>{selectedScenario.benchmark_doc}</em></span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#059669] shrink-0 mt-0.5" />
+                  <span><strong>3. Memory Safe Execution:</strong> Evicts inactive model to avoid VRAM bottleneck</span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#059669] shrink-0 mt-0.5" />
+                  <span><strong>4. Verified Artifact:</strong> Generates <em>{selectedScenario.expected_artifact}</em></span>
+                </div>
+              </div>
             </div>
 
-            <div className="space-y-2 bg-slate-900/60 p-3.5 rounded-lg border border-slate-800">
-              <div className="font-mono uppercase text-[10px] text-slate-400 font-semibold">
-                Pre-Configured Prompt
+            {/* Instruction Command */}
+            <div className="space-y-3 bg-[#f8fafc] p-4 border border-[#e2e8f0] flex flex-col justify-between">
+              <div>
+                <div className="text-xs font-bold text-[#0f172a] uppercase tracking-wider">
+                  Instruction Command
+                </div>
+                <p className="text-xs text-slate-700 mt-2 p-3 bg-white border border-[#cbd5e1] leading-relaxed font-sans">
+                  "{selectedScenario.prompt}"
+                </p>
               </div>
-              <p className="text-slate-300 text-xs italic leading-relaxed bg-slate-950/80 p-2.5 rounded border border-slate-800">
-                "{selectedScenario.prompt}"
-              </p>
+              <div className="text-[10px] text-slate-500 font-bold flex items-center gap-1.5">
+                <FileCheck className="w-3.5 h-3.5 text-[#0284c7]" />
+                <span>SHA-256 integrity check logged to immutable SQLite WAL table.</span>
+              </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* Advisory Footer */}
+      <div className="p-3.5 bg-[#e0f2fe] border border-[#bae6fd] text-[#0369a1] text-xs flex items-center gap-3 font-sans font-medium">
+        <AlertTriangle className="w-4 h-4 text-[#0284c7] shrink-0" />
+        <span>
+          <strong>Engineering Advisory:</strong> Workflows operate in an assistive capacity to support plant operator decision-making.
+        </span>
+      </div>
     </div>
   );
 };

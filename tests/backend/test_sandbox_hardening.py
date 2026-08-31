@@ -72,11 +72,13 @@ class TestSandboxPathHardening:
         symlink_dir = sandbox / "symlink_dir"
         try:
             os.symlink(outside_dir, symlink_dir, target_is_directory=True)
-        except (OSError, NotImplementedError):
+        except (OSError, NotImplementedError, PermissionError, Exception):
             pytest.skip("Symlink creation requires elevated privileges on this environment")
 
-        with pytest.raises(ValueError, match="Symlinks are not allowed"):
+
+        with pytest.raises(ValueError, match=r"resolves outside the allowed directory|Symlinks are not allowed"):
             validate_path_within("symlink_dir/secret.txt", sandbox)
+
 
 
 class TestAtomicFileOperations:

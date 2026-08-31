@@ -1,6 +1,12 @@
+/**
+ * frontend/src/components/layout/StatusBar.tsx
+ * --------------------------------------------
+ * Industrial Hardware Readout Strip (White & Light Blue Style)
+ */
+
 import React, { useState, useEffect } from 'react';
 import { useWorkbench } from '../../context/WorkbenchContext';
-import { Database, Cpu, Shield, RefreshCw, Activity, Layers, HardDrive } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
 interface HardwareTelemetry {
   status: string;
@@ -52,95 +58,70 @@ export const StatusBar: React.FC = () => {
   }, []);
 
   return (
-    <footer className="h-8 bg-[#090e17] border-t border-slate-800/80 px-4 flex items-center justify-between text-[11px] font-mono text-slate-400 select-none shrink-0 overflow-x-auto">
-      {/* Left Indicators */}
-      <div className="flex items-center gap-4 shrink-0">
-        {/* Backend Connectivity */}
-        <div className="flex items-center gap-1.5">
-          <span
-            className={`w-2 h-2 rounded-full ${
-              isBackendConnected ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50 animate-pulse' : 'bg-rose-500'
-            }`}
-          />
-          <span className={isBackendConnected ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium'}>
-            {isBackendConnected ? 'SOVEREIGN LOCAL' : 'BACKEND OFFLINE'}
+    <footer className="h-10 bg-white border-t-2 border-[#cbd5e1] px-5 flex items-center justify-between text-[11px] font-mono select-none shrink-0 overflow-x-auto text-[#0f172a]">
+      {/* Left Block */}
+      <div className="flex items-center gap-2.5 shrink-0 font-bold">
+        {/* Core Sovereignty Tag */}
+        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f0f9ff] border border-[#bae6fd]">
+          <span className={`w-2 h-2 ${isBackendConnected ? 'bg-[#059669]' : 'bg-[#e11d48]'}`} />
+          <span className={isBackendConnected ? 'text-[#0369a1]' : 'text-[#be123c]'}>
+            {isBackendConnected ? 'SOVEREIGN_AIRGAP' : 'DISCONNECTED'}
           </span>
           <button
             onClick={() => {
               refreshHealth();
               fetchHardware();
             }}
-            title="Refresh status"
-            className="hover:text-slate-200 transition-colors ml-0.5"
+            title="Refresh hardware readout"
+            className="ml-1 text-slate-400 hover:text-[#0284c7]"
             disabled={isCheckingHealth}
           >
-            <RefreshCw className={`w-3 h-3 ${isCheckingHealth ? 'animate-spin text-emerald-400' : ''}`} />
+            <RefreshCw className={`w-3 h-3 ${isCheckingHealth ? 'animate-spin text-[#0284c7]' : ''}`} />
           </button>
         </div>
 
-        <span className="text-slate-700">|</span>
-
-        {/* Live GPU VRAM Telemetry */}
+        {/* Hardware VRAM readout */}
         {hw && hw.gpu_available ? (
-          <div className="flex items-center gap-1.5" title={`${hw.gpu_name} (${hw.telemetry_source})`}>
-            <Activity className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-slate-400">VRAM:</span>
-            <span className="text-emerald-400 font-semibold">
-              {(hw.gpu_vram_used_mb / 1024).toFixed(1)} / {(hw.gpu_vram_total_mb / 1024).toFixed(1)} GB
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+            <span className="text-slate-500">VRAM:</span>
+            <span className="text-[#0284c7]">
+              {(hw.gpu_vram_used_mb / 1024).toFixed(1)}/{(hw.gpu_vram_total_mb / 1024).toFixed(1)}GB
             </span>
             <span className="text-slate-500">({hw.gpu_utilization_pct.toFixed(0)}% GPU)</span>
           </div>
         ) : hw ? (
-          <div className="flex items-center gap-1.5" title="Running in CPU Host mode">
-            <Activity className="w-3.5 h-3.5 text-blue-400" />
-            <span className="text-slate-400">RAM:</span>
-            <span className="text-slate-200">
-              {(hw.ram_used_mb / 1024).toFixed(1)} / {(hw.ram_total_mb / 1024).toFixed(1)} GB ({hw.ram_percent}%)
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+            <span className="text-slate-500">RAM:</span>
+            <span className="text-[#0f172a] font-bold">
+              {(hw.ram_used_mb / 1024).toFixed(1)}/{(hw.ram_total_mb / 1024).toFixed(1)}GB
             </span>
           </div>
         ) : null}
 
-        <span className="text-slate-700">|</span>
-
-        {/* Model & Eviction State */}
-        <div className="flex items-center gap-1.5">
-          <Cpu className="w-3.5 h-3.5 text-blue-400" />
-          <span className="text-slate-400">Active Model:</span>
-          <span className="text-slate-200 font-medium">
+        {/* Active Model */}
+        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+          <span className="text-slate-500">ACTIVE_MODEL:</span>
+          <span className="text-[#2563eb] uppercase">
             {hw?.active_loaded_models && hw.active_loaded_models.length > 0
               ? hw.active_loaded_models[0]
-              : selectedModel || health?.default_model || 'qwen2.5:7b'}
+              : selectedModel || health?.default_model || 'QWEN2.5:7B'}
           </span>
-          {hw?.last_allocation_decision && (
-            <span
-              className="text-[10px] text-slate-500 truncate max-w-[180px]"
-              title={hw.last_allocation_decision.reason}
-            >
-              ({hw.last_allocation_decision.reason})
-            </span>
-          )}
         </div>
 
-        <span className="text-slate-700">|</span>
-
-        {/* RAG Status */}
-        <div className="flex items-center gap-1.5">
-          <Database className="w-3.5 h-3.5 text-purple-400" />
-          <span className="text-slate-400">RAG Knowledge:</span>
-          <span className="text-emerald-400 font-medium">
-            {documents.length > 0 ? `${documents.length} Docs Indexed` : 'Standby'}
+        {/* Local Vector Chunks */}
+        <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+          <span className="text-slate-500">KB_INDEX:</span>
+          <span className="text-[#059669]">
+            {documents.length > 0 ? `${documents.length} REPO_DOCS` : 'EMPTY'}
           </span>
         </div>
       </div>
 
-      {/* Right Indicators */}
-      <div className="flex items-center gap-3 shrink-0 ml-4">
-        <div className="flex items-center gap-1 text-slate-400">
-          <Shield className="w-3 h-3 text-emerald-400" />
-          <span>Zero Cloud Egress</span>
+      {/* Right Block */}
+      <div className="flex items-center gap-2 shrink-0 font-bold text-[10px]">
+        <div className="px-2 py-0.5 bg-[#0284c7] text-white border border-black uppercase">
+          NO_CLOUD_LEAK &bull; SHA256_VERIFIED
         </div>
-        <span className="text-slate-700">|</span>
-        <span className="text-slate-400">v{health?.version || '0.1.0'}</span>
       </div>
     </footer>
   );

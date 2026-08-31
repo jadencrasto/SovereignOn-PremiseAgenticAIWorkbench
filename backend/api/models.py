@@ -81,3 +81,109 @@ async def list_models_with_capabilities(request: Request):
         "models": models,
         "capability_routing": model_router._config.get("capability_routing", {}),
     }
+
+
+@router.get("/scan", summary="Scan and discover installed local models on host")
+async def scan_local_models(request: Request):
+    """
+    Actively scan local Ollama service and host disk for installed models,
+    capabilities, quantization formats, and readiness status.
+    """
+    import httpx
+    from backend.config import settings
+
+    model_router = request.app.state.model_router
+    ollama_url = settings.ollama_base_url.rstrip("/")
+    
+    discovered_models = []
+    service_online = False
+    error_msg = None
+
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(f"{ollama_url}/api/tags")
+            if resp.status_code == 200:
+                service_online = True
+                data = resp.json()
+                raw_models = data.get("models", [])
+                for m in raw_models:
+                    name = m.get("name", "")
+                    details = m.get("details", {})
+                    size_bytes = m.get("size", 0)
+                    size_gb = round(size_bytes / (1024 ** 3), 2)
+                    
+                    caps = []
+                    name_lower = name.lower()
+                    if "embed" in name_lower or "nomic" in name_lower:
+                        caps.append("embedding")
+                    elif "llava" in name_lower or "vision" in name_lower or "vl" in name_lower:
+                        caps.append("vision")
+                        caps.append("chat")
+                    else:
+                        caps.append("chat")
+                        caps.append("reasoning")
+                    
+                    discovered_models.append({
+                        "name": name,
+                        "id": f"ollama/{name}",
+                        "size_gb": size_gb,
+                        "parameter_size": details.get("parameter_size", "unknown"),
+                        "quantization_level": details.get("quantization_level", "unknown"),
+                        "format": details.get("format", "gguf"),
+                        "family": details.get("family", "unknown"),
+                        "modified_at": m.get("modified_at", ""),
+                        "capabilities": caps,
+                    })
+    except Exception as exc:
+        error_msg = str(exc)
+
+    # Check benchmark prerequisites
+    has_reasoning = any("qwen2.5" in m["name"].lower() for m in discovered_models)
+    has_vision = any("llava" in m["name"].lower() for m in discovered_models)
+    has_embedding = any("embed" in m["name"].lower() or "nomic" in m["name"].lower() for m in discovered_models)
+
+    return {
+        "status": "online" if service_online else "offline",
+        "service_url": ollama_url,
+        "models_count": len(discovered_models),
+        "models": discovered_models,
+        "error": error_msg,
+        "readiness": {
+            "reasoning_model_ready": has_reasoning,
+            "vision_model_ready": has_vision,
+            "embedding_model_ready": has_embedding,
+            "all_ready": (has_reasoning and has_vision and has_embedding),
+        },
+        "default_model": model_router.default_model_id,
+    }
+
+
+@router.post("/preload", summary="Pre-warm a model in VRAM to eliminate cold-start lag")
+async def preload_model(request: Request):
+    """
+    Preload model weights into VRAM so subsequent chat interactions respond instantly.
+    """
+    import httpx
+    from backend.config import settings
+
+    try:
+        body = await request.json()
+        model_name = body.get("model", "")
+        if not model_name:
+            return {"status": "error", "message": "No model specified"}
+        
+        clean_model = model_name.split("/")[-1]
+        ollama_url = settings.ollama_base_url.rstrip("/")
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Trigger generate with empty prompt and 30m keep_alive to load weights
+            await client.post(
+                f"{ollama_url}/api/generate",
+                json={"model": clean_model, "prompt": "", "keep_alive": "30m"},
+            )
+        return {"status": "ok", "model": clean_model, "warmed": True}
+    except Exception as exc:
+        logger.warning("Failed to preload model: %s", exc)
+        return {"status": "warning", "error": str(exc)}
+
+

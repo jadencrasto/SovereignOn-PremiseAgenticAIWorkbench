@@ -1,7 +1,7 @@
 # Evaluation Report: Baseline vs System Comparative Benchmark
-**Timestamp:** 2026-08-31T14:53:28Z UTC  
+**Timestamp:** 2026-08-31T15:55:40Z UTC  
 **Environment:** Air-Gapped Sovereign Comparison  
-**Total Duration:** 0.02s  
+**Total Duration:** 0.00s  
 
 ## Summary Scorecard
 
@@ -21,4 +21,4 @@
 | ID | Test Name | Category | Status | Latency (ms) | Details |
 |---|---|---|---|---|---|
 | `BASE-01` | RAG vs No-Retrieval Grounded Fact Availability | rag_comparison | **PASS** | 0.0 | RAG retrieved exact plant technical measurement (4.22 mm); no-retrieval baseline has 0% knowledge of private asset data |
-| `BASE-02` | Agent Planning vs Direct Execution Routing | agent_comparison | **PASS** | 16.0 | Multi-step industrial request routed to Phase 6 Planner with approval gates; simple math routed to Phase 4 direct loop |
+| `BASE-02` | Agent Planning vs Direct Execution Routing | agent_comparison | **PASS** | 0.0 | Multi-step industrial request routed to Phase 6 Planner with approval gates; simple math routed to Phase 4 direct loop |

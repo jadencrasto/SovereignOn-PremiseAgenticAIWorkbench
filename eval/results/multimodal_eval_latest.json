@@ -1,12 +1,12 @@
 {
   "suite_name": "Multimodal Vision & Equipment Inspection Benchmark",
-  "timestamp": "2026-08-31T14:53:30Z",
+  "timestamp": "2026-08-31T15:55:42Z",
   "environment": "Air-Gapped Multimodal Pipeline",
   "total_cases": 4,
   "passed": 3,
   "failed": 0,
   "environment_unavailable": 1,
-  "duration_seconds": 2.1090000000003783,
+  "duration_seconds": 2.17200000000048,
   "summary_metrics": {
     "Image_Processing_Verified": true,
     "Context_Injection_Verified": true,
@@ -18,7 +18,7 @@
       "name": "Equipment Image Ingestion & Processing",
       "category": "image_pipeline",
       "status": "PASS",
-      "duration_ms": 30.999999999039574,
+      "duration_ms": 31.000000000858563,
       "metrics": {
         "width": 400,
         "height": 300,
@@ -52,7 +52,7 @@
       "name": "Vision Fault Graceful Degradation",
       "category": "fault_tolerance",
       "status": "PASS",
-      "duration_ms": 0.0,
+      "duration_ms": 14.999999999417923,
       "metrics": {},
       "details": "When vision provider fails, service returns clean fallback observation without crashing",
       "error": null

@@ -52,9 +52,11 @@ class TestDocumentParser:
         assert id1 != id2
 
     def test_parse_docx(self, tmp_path):
+        pytest.importorskip("docx")
         from docx import Document as DocxDoc
         docx_path = tmp_path / "test.docx"
         doc = DocxDoc()
+
         doc.add_paragraph("First paragraph about AI.")
         doc.add_paragraph("Second paragraph about data sovereignty.")
         doc.save(str(docx_path))

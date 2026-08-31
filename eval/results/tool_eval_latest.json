@@ -1,16 +1,16 @@
 {
   "suite_name": "Tool Execution, Authorization & Latency Benchmark",
-  "timestamp": "2026-08-31T14:53:19Z",
+  "timestamp": "2026-08-31T15:55:31Z",
   "environment": "Air-Gapped Sandbox Environment",
   "total_cases": 7,
   "passed": 7,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 0.125,
+  "duration_seconds": 0.0930000000007567,
   "summary_metrics": {
     "Tools_Evaluated": 5,
     "Passed_Tool_Operations": 7,
-    "Average_Tool_Latency_ms": 11.29,
+    "Average_Tool_Latency_ms": 8.86,
     "Success_Rate_Percent": 100.0
   },
   "test_cases": [
@@ -39,7 +39,7 @@
       "name": "File List: Sandbox Listing",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 15.99999999962165,
+      "duration_ms": 14.999999999417923,
       "metrics": {},
       "details": "Listed 1 items in sandbox root",
       "error": null
@@ -49,7 +49,7 @@
       "name": "File Read: Sandbox File Access",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 31.000000000858563,
+      "duration_ms": 15.99999999962165,
       "metrics": {},
       "details": "Read 32 bytes",
       "error": null
@@ -69,7 +69,7 @@
       "name": "Document Search: Semantic Search",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 15.99999999962165,
+      "duration_ms": 15.000000001236913,
       "metrics": {},
       "details": "Retrieved 1 chunks",
       "error": null

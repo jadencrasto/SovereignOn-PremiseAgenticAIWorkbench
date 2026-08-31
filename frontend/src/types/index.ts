@@ -228,6 +228,7 @@ export interface ToolsListResponse {
 export type ActiveTab =
   | 'chat'
   | 'demo'
+  | 'graph'
   | 'tasks'
   | 'artifacts'
   | 'documents'
@@ -237,6 +238,7 @@ export type ActiveTab =
   | 'health'
   | 'security'
   | 'settings';
+
 
 
 // Phase 5: Allowed image MIME types for client-side validation

@@ -1,7 +1,7 @@
 # Evaluation Report: Multimodal Vision & Equipment Inspection Benchmark
-**Timestamp:** 2026-08-31T14:53:30Z UTC  
+**Timestamp:** 2026-08-31T15:55:42Z UTC  
 **Environment:** Air-Gapped Multimodal Pipeline  
-**Total Duration:** 2.11s  
+**Total Duration:** 2.17s  
 
 ## Summary Scorecard
 
@@ -22,4 +22,4 @@
 | `MM-01` | Equipment Image Ingestion & Processing | image_pipeline | **PASS** | 31.0 | Processed 400x300 PNG, Base64 len=6128 |
 | `MM-02` | Visual Context Message Construction | context_injection | **PASS** | 0.0 | Visual observation correctly formatted as synthetic user observation for reasoning LLM |
 | `MM-03` | Vision Analysis Pipeline Execution | model_inference | **ENVIRONMENT_UNAVAILABLE** | 0.0 | Local LLaVA model not loaded in Ollama; vision execution marked unavailable |
-| `MM-04` | Vision Fault Graceful Degradation | fault_tolerance | **PASS** | 0.0 | When vision provider fails, service returns clean fallback observation without crashing |
+| `MM-04` | Vision Fault Graceful Degradation | fault_tolerance | **PASS** | 15.0 | When vision provider fails, service returns clean fallback observation without crashing |

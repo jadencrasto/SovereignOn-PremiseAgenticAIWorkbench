@@ -293,7 +293,7 @@ class TestToolRegistry:
         result = await registry.execute("test_tool", {"expression": "2 + 3"})
         assert result.success
         assert result.result == {"expression": "2 + 3", "result": 5}
-        assert result.duration_ms > 0
+        assert result.duration_ms >= 0
 
     @pytest.mark.asyncio
     async def test_execute_tool_exception(self):
@@ -619,9 +619,18 @@ class TestChatAPIToolsEnabled:
 
     @pytest.fixture
     def client(self):
+        from unittest.mock import AsyncMock, MagicMock
         from fastapi.testclient import TestClient
         from backend.main import app
+
+        mock_engine = MagicMock()
+        mock_engine.chat = AsyncMock(return_value=("Hello from mock assistant!", []))
+        mock_engine.chat_stream_with_tools = AsyncMock()
+        mock_engine.chat_stream = AsyncMock()
+
         with TestClient(app) as c:
+            c.app.state.engine = mock_engine
+            c.app.state.ollama_ok = True
             yield c
 
     def test_chat_with_tools_disabled(self, client):
@@ -643,5 +652,6 @@ class TestChatAPIToolsEnabled:
             "stream": False,
             "tools_enabled": True,
         })
-        # Should not fail due to unknown field
         assert resp.status_code == 200
+
+

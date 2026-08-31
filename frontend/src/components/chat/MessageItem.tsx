@@ -1,9 +1,14 @@
+/**
+ * frontend/src/components/chat/MessageItem.tsx
+ * --------------------------------------------
+ * Industrial Terminal Message Item (White & Light Blue Style)
+ */
+
 import React, { useState } from 'react';
 import type { ChatMessage, ToolEvent } from '../../types';
 import { MarkdownContent } from './MarkdownContent';
 import { SourceCard } from './SourceCard';
-import { Bot, User, Copy, Check, RotateCcw, AlertTriangle, Layers, Wrench, CheckCircle2, XCircle, ImageIcon } from 'lucide-react';
-import { Badge } from '../common/Badge';
+import { Terminal, User, Copy, Check, RotateCcw, AlertTriangle, Layers, Wrench, CheckCircle2, XCircle, ImageIcon } from 'lucide-react';
 import { PlanTimeline } from '../agent/PlanTimeline';
 import { ApprovalCard } from '../agent/ApprovalCard';
 
@@ -14,58 +19,102 @@ interface MessageItemProps {
   onReject?: (taskId: string) => void;
 }
 
-// Tool Activity Timeline component
 const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
+  const [expanded, setExpanded] = useState(false);
   if (!events || events.length === 0) return null;
 
+  const completedTools = events.filter((e) => e.type === 'tool_result');
+  const runningTool = events.find(
+    (e) => e.type === 'tool_start' && !events.some((r) => r.type === 'tool_result' && r.tool === e.tool)
+  );
+
+  const formatToolName = (tool: string) => {
+    switch (tool) {
+      case 'document_search':
+        return 'BENCHMARK_RAG_SEARCH';
+      case 'file_read':
+        return 'WORKSPACE_FILE_INGEST';
+      case 'calculator':
+        return 'NUMERIC_TOLERANCE_SOLVER';
+      case 'xlsx_report':
+        return 'XLSX_COMPLIANCE_BUILDER';
+      case 'file_write':
+        return 'SANDBOX_FILE_WRITE';
+      case 'artifact_verifier':
+        return 'CRYPTO_SHA256_VERIFIER';
+      default:
+        return tool.toUpperCase();
+    }
+  };
+
   return (
-    <div className="mb-3 p-3 rounded-lg bg-[#0a0f1a] border border-slate-800/80">
-      <div className="flex items-center gap-1.5 text-xs font-mono font-medium text-slate-400 mb-2">
-        <Wrench className="w-3.5 h-3.5 text-amber-400" />
-        <span>Agent Tool Activity</span>
+    <div className="mb-4 border-2 border-[#bae6fd] bg-[#f0f9ff] font-mono text-xs">
+      <div
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center justify-between p-3 bg-[#e0f2fe] border-b-2 border-[#bae6fd] cursor-pointer hover:bg-[#bae6fd]/50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className="px-1.5 py-0.5 bg-[#0284c7] text-white font-black text-[10px] uppercase">
+            {runningTool ? 'RUNNING' : 'COMPLETED'}
+          </span>
+          <span className="font-bold text-[#0369a1] uppercase tracking-tight">
+            // AGENT TOOL PIPELINE ({completedTools.length} ACTIONS)
+          </span>
+        </div>
+        <span className="text-[10px] font-bold text-[#0284c7] uppercase">
+          [{expanded ? 'HIDE_LOGS' : 'VIEW_LOGS'}]
+        </span>
       </div>
-      <div className="space-y-1.5">
-        {events.map((event, idx) => (
-          <div key={idx} className="flex items-start gap-2 text-xs">
-            {event.type === 'tool_start' ? (
-              <>
-                <span className="w-4 h-4 mt-0.5 flex items-center justify-center shrink-0">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                </span>
-                <div>
-                  <span className="font-mono font-semibold text-amber-300">{event.tool}</span>
-                  {event.arguments && Object.keys(event.arguments).length > 0 && (
-                    <span className="text-slate-500 ml-1.5">
-                      {Object.entries(event.arguments).map(([k, v]) => (
-                        <span key={k} className="ml-1">
-                          <span className="text-slate-600">{k}:</span>{' '}
-                          <span className="text-slate-400">{String(v).substring(0, 60)}</span>
-                        </span>
-                      ))}
+
+      {!expanded && completedTools.length > 0 && (
+        <div className="p-2.5 flex flex-wrap gap-1.5 bg-[#f0f9ff]">
+          {completedTools.map((ev, i) => (
+            <span
+              key={i}
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white border border-[#bae6fd] text-[10px] font-bold text-[#0369a1] uppercase"
+            >
+              <CheckCircle2 className="w-3 h-3 text-[#059669]" />
+              <span>{formatToolName(ev.tool)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {expanded && (
+        <div className="p-3 space-y-2 bg-[#f0f9ff]">
+          {events.map((event, idx) => (
+            <div key={idx} className="flex items-start gap-2 text-[11px]">
+              {event.type === 'tool_start' ? (
+                <>
+                  <span className="w-2 h-2 bg-[#0284c7] mt-1 shrink-0" />
+                  <div>
+                    <span className="font-bold text-[#0284c7] uppercase">
+                      &gt; {formatToolName(event.tool)}
                     </span>
-                  )}
-                </div>
-              </>
-            ) : (
-              <>
-                {event.success ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                ) : (
-                  <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                )}
-                <div>
-                  <span className="font-mono font-semibold text-slate-300">{event.tool}</span>
-                  {event.summary && (
-                    <span className={`ml-1.5 ${event.success ? 'text-emerald-400/80' : 'text-rose-400/80'}`}>
-                      — {event.summary}
+                    {event.arguments && (
+                      <span className="text-slate-600 ml-2">
+                        {JSON.stringify(event.arguments)}
+                      </span>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#059669] shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-[#0f172a] uppercase">
+                      &gt; {formatToolName(event.tool)} [OK]
                     </span>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        ))}
-      </div>
+                    {event.summary && (
+                      <span className="ml-2 text-slate-600">{event.summary}</span>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -86,195 +135,170 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
   if (isUser) {
     return (
-      <div className="flex justify-end gap-3 max-w-4xl mx-auto px-4 py-2">
-        <div className="flex flex-col items-end max-w-[80%]">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] font-mono text-slate-500">{message.timestamp}</span>
-            <span className="text-xs font-semibold text-slate-300">Operator</span>
+      <div className="flex justify-end gap-3 max-w-5xl mx-auto px-2 py-2 font-mono">
+        <div className="flex flex-col items-end max-w-[85%]">
+          <div className="flex items-center gap-2 mb-1 text-[10px] font-bold text-slate-500 uppercase">
+            <span>{message.timestamp}</span>
+            <span className="px-1 bg-[#e0f2fe] text-[#0369a1] border border-[#bae6fd]">OP_DISPATCH</span>
           </div>
 
-          {/* Phase 5: Image attachment thumbnail */}
           {message.attachments && message.attachments.length > 0 && (
             <div className="mb-2 flex flex-col items-end gap-1.5 w-full">
               {message.attachments.map((att) => (
-                <div key={att.id} className="max-w-xs rounded-xl overflow-hidden border border-blue-600/30 shadow-sm">
+                <div key={att.id} className="max-w-xs border-2 border-black bg-white p-1 brutal-shadow-blue">
                   <img
                     src={att.objectUrl}
                     alt={att.filename}
-                    className="w-full max-h-48 object-cover"
-                    style={{ display: 'block' }}
+                    className="w-full max-h-48 object-cover border border-[#cbd5e1]"
                   />
-                  <div className="flex items-center gap-1.5 px-2 py-1 bg-blue-950/60 text-[10px] font-mono text-blue-400">
-                    <ImageIcon className="w-2.5 h-2.5" />
+                  <div className="flex items-center justify-between px-2 py-1 text-[10px] font-bold text-[#0f172a] uppercase">
                     <span className="truncate max-w-[180px]">{att.filename}</span>
-                    <span className="text-slate-500 ml-auto">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
+                    <span className="text-[#059669]">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          <div className="p-3.5 rounded-xl rounded-tr-sm bg-blue-600/20 border border-blue-500/30 text-slate-100 text-sm leading-relaxed shadow-sm">
+          <div className="p-4 border-2 border-black bg-[#0284c7] text-white font-sans font-semibold text-sm leading-relaxed brutal-shadow-dark">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
-        </div>
-        <div className="w-8 h-8 rounded-lg bg-blue-950/80 border border-blue-600/40 flex items-center justify-center text-blue-400 shrink-0 mt-1">
-          <User className="w-4 h-4" />
         </div>
       </div>
     );
   }
 
-  // Assistant Message
+  // Assistant Message (White & Light Blue Terminal Output)
   const hasToolEvents = message.toolEvents && message.toolEvents.length > 0;
 
   return (
-    <div className="flex gap-3.5 max-w-4xl mx-auto px-4 py-3">
-      {/* Avatar */}
-      <div className="w-8 h-8 rounded-lg bg-emerald-950/80 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0 mt-1 shadow-sm">
-        <Bot className="w-4.5 h-4.5" />
+    <div className="flex flex-col gap-2 max-w-5xl mx-auto px-2 py-3 font-mono">
+      {/* Meta Header */}
+      <div className="flex items-center justify-between w-full text-[11px] font-bold border-b-2 border-[#cbd5e1] pb-1.5">
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-0.5 bg-[#0284c7] text-white font-black uppercase text-[10px]">
+            SOVEREIGN_CORE
+          </span>
+          {message.model_used && (
+            <span className="px-1.5 py-0.5 bg-[#e0f2fe] border border-[#bae6fd] text-[#0369a1] text-[10px]">
+              MODEL: {message.model_used.toUpperCase()}
+            </span>
+          )}
+        </div>
+        <span className="text-[10px] text-slate-500 font-bold">{message.timestamp}</span>
       </div>
 
-      {/* Message Card */}
-      <div className="flex-1 min-w-0 flex flex-col items-start">
-        {/* Header bar */}
-        <div className="flex items-center justify-between w-full mb-1.5 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-white tracking-tight">Sovereign Assistant</span>
-            {message.model_used && (
-              <Badge variant="slate" className="text-[10px]">
-                {message.model_used}
-              </Badge>
-            )}
-            {hasToolEvents && (
-              <Badge variant="amber" className="text-[10px] flex items-center gap-1">
-                <Wrench className="w-2.5 h-2.5" />
-                {message.toolEvents!.filter(e => e.type === 'tool_result').length} Tool{message.toolEvents!.filter(e => e.type === 'tool_result').length !== 1 ? 's' : ''}
-              </Badge>
-            )}
-            {message.sources && message.sources.length > 0 && (
-              <Badge variant="emerald" className="text-[10px] flex items-center gap-1">
-                <Layers className="w-2.5 h-2.5" />
-                {message.sources.length} {message.sources.length === 1 ? 'Source' : 'Sources'}
-              </Badge>
+      {/* Main Terminal Output Box */}
+      <div
+        className={`w-full p-5 bg-white border-2 ${
+          message.error
+            ? 'border-[#e11d48] text-[#be123c]'
+            : 'border-[#cbd5e1] text-[#0f172a] brutal-shadow-blue'
+        }`}
+      >
+        {message.error ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 font-black text-xs text-[#e11d48] uppercase">
+              <AlertTriangle className="w-4 h-4" />
+              <span>[INFERENCE_EXECUTION_FAILURE]</span>
+            </div>
+            <p className="text-xs font-mono">{message.content}</p>
+            {onRetry && (
+              <button
+                onClick={() => onRetry(message.content)}
+                className="mt-3 px-3 py-1 bg-[#e11d48] text-white font-black text-xs uppercase border-2 border-black brutal-btn"
+              >
+                Retry Dispatch
+              </button>
             )}
           </div>
-          <span className="text-[10px] font-mono text-slate-500">{message.timestamp}</span>
-        </div>
+        ) : (
+          <>
+            {/* Tool Activity Timeline */}
+            {hasToolEvents && <ToolActivity events={message.toolEvents!} />}
 
-        {/* Content Box */}
-        <div
-          className={`w-full p-4 rounded-xl rounded-tl-sm border text-sm leading-relaxed ${
-            message.error
-              ? 'bg-rose-950/20 border-rose-800/50 text-rose-200'
-              : 'bg-[#0f172a]/90 border-slate-800/90 text-slate-200 shadow-md'
-          }`}
-        >
-          {message.error ? (
-            <div className="flex items-start gap-2.5">
-              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium text-rose-300">Model Inference Error</p>
-                <p className="text-xs text-rose-400/90 mt-1">{message.content}</p>
-                {onRetry && (
-                  <button
-                    onClick={() => onRetry(message.content)}
-                    className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono bg-rose-900/50 hover:bg-rose-900 border border-rose-700/50 text-rose-200 transition-colors"
-                  >
-                    <RotateCcw className="w-3 h-3" /> Retry Generation
-                  </button>
-                )}
-              </div>
-            </div>
-          ) : (
-            <>
-              {/* Tool Activity Timeline */}
-              {hasToolEvents && <ToolActivity events={message.toolEvents!} />}
+            {/* Plan Timeline */}
+            {message.plan && message.plan.steps && message.plan.steps.length > 0 && (
+              <PlanTimeline
+                taskId={message.plan.taskId}
+                objective={message.plan.objective}
+                steps={message.plan.steps}
+              />
+            )}
 
-              {/* Phase 6: Plan Timeline */}
-              {message.plan && message.plan.steps && message.plan.steps.length > 0 && (
-                <PlanTimeline
-                  taskId={message.plan.taskId}
-                  objective={message.plan.objective}
-                  steps={message.plan.steps}
-                />
-              )}
+            {/* Approval Card */}
+            {message.pendingApproval && onApprove && onReject && (
+              <ApprovalCard
+                taskId={message.pendingApproval.task_id}
+                stepId={message.pendingApproval.step_id}
+                approvalId={message.pendingApproval.approval_id}
+                toolName={message.pendingApproval.tool_name}
+                arguments={message.pendingApproval.arguments_hash ? (message.pendingApproval as any).arguments || {} : {}}
+                riskLevel={message.pendingApproval.risk_level}
+                reason={message.pendingApproval.reason}
+                expiresAt={message.pendingApproval.expires_at}
+                onApprove={onApprove}
+                onReject={onReject}
+              />
+            )}
 
-              {/* Phase 6: Approval Card */}
-              {message.pendingApproval && onApprove && onReject && (
-                <ApprovalCard
-                  taskId={message.pendingApproval.task_id}
-                  stepId={message.pendingApproval.step_id}
-                  approvalId={message.pendingApproval.approval_id}
-                  toolName={message.pendingApproval.tool_name}
-                  arguments={message.pendingApproval.arguments_hash ? (message.pendingApproval as any).arguments || {} : {}}
-                  riskLevel={message.pendingApproval.risk_level}
-                  reason={message.pendingApproval.reason}
-                  expiresAt={message.pendingApproval.expires_at}
-                  onApprove={onApprove}
-                  onReject={onReject}
-                />
-              )}
-
-              {message.content ? (
+            {message.content ? (
+              <div className="font-sans">
                 <MarkdownContent content={message.content} />
-              ) : (
-                message.isStreaming && (
-                  <div className="flex items-center gap-2 text-xs text-slate-400 font-mono py-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>
-                      {hasToolEvents ? 'Executing tools and reasoning...' : 'Synthesizing response from local model...'}
-                    </span>
-                  </div>
-                )
-              )}
-
-              {/* Streaming Cursor Dot */}
-              {message.isStreaming && message.content && (
-                <span className="inline-block w-1.5 h-4 ml-1 align-middle bg-emerald-400 animate-pulse" />
-              )}
-            </>
-          )}
-
-          {/* RAG Sources Section */}
-          {message.sources && message.sources.length > 0 && (
-            <div className="mt-4 pt-3.5 border-t border-slate-800/80">
-              <div className="flex items-center gap-1.5 text-xs font-mono font-medium text-slate-400 mb-2">
-                <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Grounding Evidence ({message.sources.length} chunks retrieved from local vector store)</span>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {message.sources.map((src, idx) => (
-                  <SourceCard key={src.chunk_id || idx} source={src} />
-                ))}
-              </div>
+            ) : (
+              message.isStreaming && (
+                <div className="flex items-center gap-2 text-xs text-[#0284c7] font-mono py-2">
+                  <span className="w-2.5 h-2.5 bg-[#0284c7] animate-ping" />
+                  <span className="uppercase font-bold">
+                    {hasToolEvents ? 'EXECUTING AIR-GAPPED TOOLS...' : 'SYNTHESIZING DETERMINISTIC RESPONSE...'}
+                  </span>
+                </div>
+              )
+            )}
+
+            {message.isStreaming && message.content && (
+              <span className="inline-block w-2 h-4 ml-1 bg-[#0284c7] animate-pulse align-middle" />
+            )}
+          </>
+        )}
+
+        {/* Sources Grid */}
+        {message.sources && message.sources.length > 0 && (
+          <div className="mt-5 pt-4 border-t-2 border-[#e2e8f0]">
+            <div className="text-[10px] font-black text-[#0284c7] uppercase tracking-widest mb-2">
+              // GROUNDING BENCHMARK EVIDENCE ({message.sources.length} CHUNKS)
             </div>
-          )}
-        </div>
-
-        {/* Footer actions */}
-        {!message.isStreaming && !message.error && message.content && (
-          <div className="flex items-center gap-2 mt-1.5 ml-1 text-slate-500">
-            <button
-              onClick={handleCopy}
-              className="flex items-center gap-1 text-[11px] hover:text-slate-300 transition-colors px-1.5 py-0.5 rounded hover:bg-slate-800/40"
-              title="Copy message"
-            >
-              {copied ? (
-                <>
-                  <Check className="w-3 h-3 text-emerald-400" />
-                  <span className="text-emerald-400 font-mono">Copied</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3 h-3" />
-                  <span className="font-mono">Copy</span>
-                </>
-              )}
-            </button>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {message.sources.map((src, idx) => (
+                <SourceCard key={src.chunk_id || idx} source={src} />
+              ))}
+            </div>
           </div>
         )}
       </div>
+
+      {/* Copy / Actions Footer */}
+      {!message.isStreaming && !message.error && message.content && (
+        <div className="flex items-center justify-end gap-2 text-[10px]">
+          <button
+            onClick={handleCopy}
+            className="px-2.5 py-1 bg-white border border-[#cbd5e1] text-slate-700 hover:text-[#0284c7] hover:border-[#0284c7] uppercase font-bold flex items-center gap-1 shadow-sm"
+          >
+            {copied ? (
+              <>
+                <Check className="w-3 h-3 text-[#059669]" />
+                <span className="text-[#059669]">COPIED</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3 h-3" />
+                <span>COPY_OUTPUT</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
     </div>
   );
 };

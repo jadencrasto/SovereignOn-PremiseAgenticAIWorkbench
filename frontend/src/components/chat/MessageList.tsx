@@ -1,7 +1,13 @@
+/**
+ * frontend/src/components/chat/MessageList.tsx
+ * --------------------------------------------
+ * Industrial Terminal Stream & Dispatch Matrix (White & Light Blue Style)
+ */
+
 import React, { useEffect, useRef } from 'react';
 import type { ChatMessage } from '../../types';
 import { MessageItem } from './MessageItem';
-import { ShieldCheck, Database, Cpu } from 'lucide-react';
+import { ArrowUpRight } from 'lucide-react';
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -11,7 +17,13 @@ interface MessageListProps {
   onReject?: (taskId: string) => void;
 }
 
-export const MessageList: React.FC<MessageListProps> = ({ messages, onSelectPrompt, onRetry, onApprove, onReject }) => {
+export const MessageList: React.FC<MessageListProps> = ({
+  messages,
+  onSelectPrompt,
+  onRetry,
+  onApprove,
+  onReject,
+}) => {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -20,102 +32,121 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, onSelectProm
 
   if (messages.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-2xl mx-auto select-none">
-        <div className="w-12 h-12 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 flex items-center justify-center text-emerald-400 mb-4 shadow-lg shadow-emerald-950/50">
-          <ShieldCheck className="w-6 h-6" />
+      <div className="flex-1 flex flex-col justify-center p-8 max-w-5xl mx-auto select-none space-y-6">
+        {/* Header Block */}
+        <div className="border-2 border-[#cbd5e1] bg-white text-[#0f172a] p-6 brutal-shadow-blue">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b-2 border-[#f1f5f9] pb-3 mb-3">
+            <div className="font-display font-black text-2xl tracking-tighter uppercase text-[#0f172a]">
+              SOVEREIGN // INDUSTRIAL AGENT TERMINAL
+            </div>
+            <span className="font-mono text-xs font-black px-2.5 py-1 bg-[#0284c7] text-white uppercase self-start md:self-auto">
+              ZERO-EGRESS &bull; 100% LOCAL
+            </span>
+          </div>
+          <p className="font-mono text-xs font-bold leading-relaxed text-slate-600 max-w-3xl">
+            AUTONOMOUS ON-PREMISE ENGINE FOR REFINERY QA, MECHANICAL NDT CORROSION ANALYSIS, AND EMERGENCY INTERLOCK DISPATCH. ALL INFERENCE EXCLUSIVELY ON THIS HOST.
+          </p>
         </div>
 
-        <h2 className="text-xl font-semibold text-white tracking-tight">
-          Sovereign Agentic Workbench
-        </h2>
-        <p className="text-xs text-slate-400 mt-1 max-w-md">
-          Private on-premise reasoning engine. Ingest local documents, generate embeddings via Ollama, and query vector knowledge securely.
-        </p>
-
-        {/* Demo Prompt Starter Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-6 w-full text-left">
-          <button
-            onClick={() => onSelectPrompt?.("Search the local documents for recurring compressor issues, summarize the key findings, and calculate the total number of recurring issues reported.")}
-            className="p-3.5 rounded-xl border border-slate-800 bg-[#0d1424]/80 hover:bg-slate-800/90 hover:border-emerald-500/30 transition-all text-left group flex flex-col justify-between"
+        {/* 3 Dispatch Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 font-mono">
+          {/* Card 01 */}
+          <div
+            onClick={() =>
+              onSelectPrompt?.(
+                "Read the lab dataset 'mrpl_lab_composition_test.csv' and cross-check the chemical composition values against our internal refinery quality specifications. Identify all deviations exceeding maximum allowable thresholds, calculate the percentage variance for each, and generate a styled compliance report 'mrpl_chemical_compliance_report.xlsx' with pass/fail conditional formatting. Finally, verify the generated report."
+              )
+            }
+            className="border-2 border-[#cbd5e1] bg-white p-5 cursor-pointer brutal-btn hover:border-[#0284c7] brutal-shadow-blue flex flex-col justify-between space-y-4"
           >
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Database className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="text-xs font-semibold text-slate-200">Task 1: RAG + Calculation</span>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-2xl font-black font-display text-[#0284c7]">01</span>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#e0f2fe] text-[#0369a1] uppercase border border-[#bae6fd]">
+                  CSV &rarr; XLSX
+                </span>
               </div>
-              <p className="text-[11px] text-slate-400 leading-snug line-clamp-2">
-                "Search the local documents for recurring compressor issues, summarize the key findings, and calculate the total number of recurring issues reported."
+              <h3 className="font-display font-black text-sm uppercase text-[#0f172a] tracking-tight">
+                Hydrocarbon Chemical QA
+              </h3>
+              <p className="font-sans text-xs text-slate-600 leading-normal">
+                Cross-reference batch composition vs MRPL limit standard. Compute tolerances and build verified Excel artifact.
               </p>
             </div>
-            <div className="mt-2 text-[10px] font-mono text-emerald-400 flex items-center gap-1">
-              <span>Run Task 1</span> →
+            <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between text-xs font-bold text-[#0284c7]">
+              <span>[RUN PROCEDURE]</span>
+              <ArrowUpRight className="w-4 h-4" />
             </div>
-          </button>
+          </div>
 
-          <button
-            onClick={() => onSelectPrompt?.("Create a file named compressor_summary.txt containing a short summary of the recurring compressor issues found in the local documents.")}
-            className="p-3.5 rounded-xl border border-slate-800 bg-[#0d1424]/80 hover:bg-slate-800/90 hover:border-amber-500/30 transition-all text-left group flex flex-col justify-between"
+          {/* Card 02 */}
+          <div
+            onClick={() =>
+              onSelectPrompt?.(
+                "Analyze the inspection image of valve MOV-4102-B in the Desalter Unit. Identify visible corrosion defects, cross-reference with our equipment maintenance manual, and produce an inspection advisory with recommended remedial action."
+              )
+            }
+            className="border-2 border-[#cbd5e1] bg-white p-5 cursor-pointer brutal-btn hover:border-[#2563eb] brutal-shadow-sky flex flex-col justify-between space-y-4"
           >
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-xs font-semibold text-slate-200">Task 2: Approval + File Write</span>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-2xl font-black font-display text-[#2563eb]">02</span>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#dbeafe] text-[#1d4ed8] uppercase border border-[#bfdbfe]">
+                  VLM &rarr; SOP
+                </span>
               </div>
-              <p className="text-[11px] text-slate-400 leading-snug line-clamp-2">
-                "Create a file named compressor_summary.txt containing a short summary of the recurring compressor issues found in the local documents."
+              <h3 className="font-display font-black text-sm uppercase text-[#0f172a] tracking-tight">
+                Visual NDT Valve Inspection
+              </h3>
+              <p className="font-sans text-xs text-slate-600 leading-normal">
+                Examine valve MOV-4102-B photograph for pitting corrosion, query mechanical manual, and generate remedial advisory.
               </p>
             </div>
-            <div className="mt-2 text-[10px] font-mono text-amber-400 flex items-center gap-1">
-              <span>Run Task 2</span> →
+            <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between text-xs font-bold text-[#2563eb]">
+              <span>[RUN PROCEDURE]</span>
+              <ArrowUpRight className="w-4 h-4" />
             </div>
-          </button>
+          </div>
 
-          <button
-            onClick={() => onSelectPrompt?.("Search the local documents for information about aircraft engine failures and summarize the findings.")}
-            className="p-3.5 rounded-xl border border-slate-800 bg-[#0d1424]/80 hover:bg-slate-800/90 hover:border-sky-500/30 transition-all text-left group flex flex-col justify-between"
+          {/* Card 03 */}
+          <div
+            onClick={() =>
+              onSelectPrompt?.(
+                "Alert: Pressure transmitter PT-4011 on Flare Knock-Out Drum FKOD-101 has spiked to 2.85 bar gauge. Check the standard emergency operating procedure, list immediate interlock actions, and draft the control room incident dispatch log."
+              )
+            }
+            className="border-2 border-[#cbd5e1] bg-white p-5 cursor-pointer brutal-btn hover:border-[#d97706] brutal-shadow-yellow flex flex-col justify-between space-y-4"
           >
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Cpu className="w-3.5 h-3.5 text-sky-400" />
-                <span className="text-xs font-semibold text-slate-200">Out-of-Domain Relevance Test</span>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-2xl font-black font-display text-[#d97706]">03</span>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#fef3c7] text-[#92400e] uppercase border border-[#fde68a]">
+                  EMERGENCY
+                </span>
               </div>
-              <p className="text-[11px] text-slate-400 leading-snug line-clamp-2">
-                "Search the local documents for information about aircraft engine failures and summarize the findings."
+              <h3 className="font-display font-black text-sm uppercase text-[#0f172a] tracking-tight">
+                Flare Drum Pressure Anomaly
+              </h3>
+              <p className="font-sans text-xs text-slate-600 leading-normal">
+                Process transmitter spike, retrieve flare system runbook, verify interlock steps, and log control room dispatch.
               </p>
             </div>
-            <div className="mt-2 text-[10px] font-mono text-sky-400 flex items-center gap-1">
-              <span>Test Relevance Gate</span> →
+            <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between text-xs font-bold text-[#d97706]">
+              <span>[RUN PROCEDURE]</span>
+              <ArrowUpRight className="w-4 h-4" />
             </div>
-          </button>
-
-          <button
-            onClick={() => onSelectPrompt?.("Summarize the primary equipment maintenance findings across all indexed reports.")}
-            className="p-3.5 rounded-xl border border-slate-800 bg-[#0d1424]/80 hover:bg-slate-800/90 hover:border-purple-500/30 transition-all text-left group flex flex-col justify-between"
-          >
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Database className="w-3.5 h-3.5 text-purple-400" />
-                <span className="text-xs font-semibold text-slate-200">Multi-Asset Report Summary</span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-snug line-clamp-2">
-                "Summarize the primary equipment maintenance findings across all indexed reports."
-              </p>
-            </div>
-            <div className="mt-2 text-[10px] font-mono text-purple-400 flex items-center gap-1">
-              <span>Synthesize Knowledge</span> →
-            </div>
-          </button>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-y-auto py-4 space-y-2">
-      {messages.map((msg) => (
+    <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4 font-mono bg-[#f0f7ff]">
+      {messages.map((message) => (
         <MessageItem
-          key={msg.id}
-          message={msg}
+          key={message.id}
+          message={message}
           onRetry={onRetry}
           onApprove={onApprove}
           onReject={onReject}
