@@ -137,10 +137,14 @@ async def scan_local_models(request: Request):
     except Exception as exc:
         error_msg = str(exc)
 
-    # Check benchmark prerequisites
-    has_reasoning = any("qwen2.5" in m["name"].lower() for m in discovered_models)
-    has_vision = any("llava" in m["name"].lower() for m in discovered_models)
-    has_embedding = any("embed" in m["name"].lower() or "nomic" in m["name"].lower() for m in discovered_models)
+    # Dynamic detection based on discovered model capabilities
+    reasoning_models = [m["name"] for m in discovered_models if "chat" in m["capabilities"] or "reasoning" in m["capabilities"]]
+    vision_models = [m["name"] for m in discovered_models if "vision" in m["capabilities"]]
+    embedding_models = [m["name"] for m in discovered_models if "embedding" in m["capabilities"]]
+
+    has_reasoning = len(reasoning_models) > 0
+    has_vision = len(vision_models) > 0
+    has_embedding = len(embedding_models) > 0
 
     return {
         "status": "online" if service_online else "offline",
@@ -150,12 +154,16 @@ async def scan_local_models(request: Request):
         "error": error_msg,
         "readiness": {
             "reasoning_model_ready": has_reasoning,
+            "reasoning_model_name": reasoning_models[0] if reasoning_models else None,
             "vision_model_ready": has_vision,
+            "vision_model_name": vision_models[0] if vision_models else None,
             "embedding_model_ready": has_embedding,
-            "all_ready": (has_reasoning and has_vision and has_embedding),
+            "embedding_model_name": embedding_models[0] if embedding_models else None,
+            "all_ready": has_reasoning,
         },
-        "default_model": model_router.default_model_id,
+        "default_model": reasoning_models[0] if reasoning_models else model_router.default_model_id,
     }
+
 
 
 @router.post("/preload", summary="Pre-warm a model in VRAM to eliminate cold-start lag")

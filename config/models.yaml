@@ -63,6 +63,20 @@ models:
       - embedding
     description: "Dense text embedding model powering the local RAG pipeline"
 
+  ollama/gemma3:4b:
+    capabilities:
+      - chat
+      - reasoning
+      - vision
+    description: "Google Gemma 3 4B lightweight fast multimodal reasoning model"
+
+  ollama/deepseek-r1:8b:
+    capabilities:
+      - chat
+      - reasoning
+    description: "DeepSeek R1 8B high-performance reasoning model"
+
+
 # Phase 5: Capability routing rules
 # Defines which model to use for each capability
 capability_routing:
