@@ -66,6 +66,8 @@ from backend.tools.file_read import FileReadInput, create_file_read
 from backend.tools.file_write import FileWriteInput, create_file_write
 from backend.tools.xlsx_report import XlsxReportInput, create_xlsx_report
 from backend.tools.artifact_verifier import ArtifactVerifierInput, create_artifact_verifier
+from backend.tools.code_execution import CodeExecutionInput, create_code_execution
+from backend.tools.docx_create import DocxCreateInput, create_docx_create
 
 
 # Phase 6 & 7 imports
@@ -226,12 +228,48 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         enabled=_is_enabled("xlsx_report"),
     ))
 
-    # 7. artifact_verifier
+    # 7. docx_create
+    registry.register(ToolDefinition(
+        name="docx_create",
+        description=(
+            "Generate a real Microsoft Word document (.docx) in data/sandbox/. "
+            "Supports document title, structured paragraphs, sections, and tables. "
+            "Creates genuine OOXML format and computes cryptographic SHA-256 hash."
+        ),
+        input_schema=DocxCreateInput,
+        execute_fn=create_docx_create(settings.sandbox_dir),
+        category="File Operations",
+        read_only=False,
+        requires_confirmation=True,
+        risk_level="high",
+        requires_approval=True,
+        enabled=_is_enabled("docx_create"),
+    ))
+
+    # 8. code_execution
+    registry.register(ToolDefinition(
+        name="code_execution",
+        description=(
+            "Execute Python code safely inside the local sandbox boundary. "
+            "Use this when a task requires calculating, computing, or running Python logic. "
+            "Captures stdout, stderr, and returncode with strict execution timeout limits. "
+            "Never requires internet. Strictly enforced local isolation."
+        ),
+        input_schema=CodeExecutionInput,
+        execute_fn=create_code_execution(settings.sandbox_dir),
+        category="Computation",
+        read_only=False,
+        risk_level="medium",
+        requires_approval=False,
+        enabled=_is_enabled("code_execution"),
+    ))
+
+    # 9. artifact_verifier
     registry.register(ToolDefinition(
         name="artifact_verifier",
         description=(
-            "Inspect and verify a generated artifact (.xlsx, .csv, .md) on disk. "
-            "Re-reads row counts, verifies column presence, and computes cryptographic SHA-256 hash. "
+            "Inspect and verify a generated artifact (.docx, .xlsx, .csv, .md) on disk. "
+            "Re-reads row/paragraph counts, verifies column presence, and computes cryptographic SHA-256 hash. "
             "Use this as a mandatory verification step after generating reports or files."
         ),
         input_schema=ArtifactVerifierInput,

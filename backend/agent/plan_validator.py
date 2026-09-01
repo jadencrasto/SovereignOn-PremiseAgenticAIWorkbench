@@ -152,8 +152,17 @@ class PlanValidator:
             ))
             return errors
 
-        # --- Validate arguments against the tool's Pydantic schema ---
+        # --- Normalize arguments before Pydantic validation ---
         if step.arguments:
+            if step.tool_name == "artifact_verifier":
+                if "relative_path" not in step.arguments and "filename" in step.arguments:
+                    step.arguments["relative_path"] = step.arguments["filename"]
+                elif "relative_path" not in step.arguments and "filepath" in step.arguments:
+                    step.arguments["relative_path"] = step.arguments["filepath"]
+            elif step.tool_name == "file_read":
+                if "relative_path" not in step.arguments and "filename" in step.arguments:
+                    step.arguments["relative_path"] = step.arguments["filename"]
+
             try:
                 tool.input_schema(**step.arguments)
             except ValidationError as exc:

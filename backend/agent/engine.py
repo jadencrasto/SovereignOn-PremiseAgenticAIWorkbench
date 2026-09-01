@@ -416,14 +416,22 @@ class AgentEngine:
         vision_config = self._agent_config.get("vision", {})
         vision_model_id = vision_config.get("model", "ollama/llava:7b")
         try:
-            vision_provider, vision_model_name = self._router.get_provider_for_model(vision_model_id)
+            if hasattr(self._router, "resolve_vision_model"):
+                vision_provider, vision_model_name = self._router.resolve_vision_model()
+            else:
+                vision_provider, vision_model_name = self._router.get_provider_for_model(vision_model_id)
         except Exception as exc:
             logger.error("Failed to resolve vision model '%s': %s", vision_model_id, exc)
-            yield {"type": "agent_status", "status": "vision_unavailable"}
-            # Graceful degradation: fall through to text-only path
-            async for item in self.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
-                yield item
+            yield {"type": "agent_status", "status": "vision_error"}
+            yield f"Vision execution failed: Could not resolve or reach configured vision model '{vision_model_id}'. Error: {str(exc)}"
+            yield []  # empty sources sentinel
             return
+
+        yield {
+            "type": "tool_start",
+            "tool": "vision_analysis",
+            "arguments": {"model": vision_model_name},
+        }
 
         mm_service = MultimodalService(
             vision_provider=vision_provider,
@@ -436,11 +444,18 @@ class AgentEngine:
                 user_prompt=user_message,
                 temperature=self._agent_config.get("temperature", 0.3),
             )
-        except RuntimeError as exc:
+            if not visual_observation or not visual_observation.strip():
+                raise RuntimeError("Vision model returned an empty observation.")
+        except Exception as exc:
             logger.error("Vision analysis failed: %s", exc)
+            yield {
+                "type": "tool_result",
+                "tool": "vision_analysis",
+                "success": False,
+                "summary": f"Vision error: {str(exc)[:100]}",
+            }
             yield {"type": "agent_status", "status": "vision_error"}
-            error_msg = f"Vision model error: {str(exc)[:200]}"
-            yield error_msg
+            yield f"Vision model error: {str(exc)[:200]}. Cannot perform image analysis without vision capability."
             yield []  # empty sources sentinel
             return
 
@@ -448,6 +463,13 @@ class AgentEngine:
             "vision_complete | session=%s observation_len=%d",
             session_id, len(visual_observation),
         )
+
+        yield {
+            "type": "tool_result",
+            "tool": "vision_analysis",
+            "success": True,
+            "summary": f"Visual observation: {visual_observation.strip()[:100]}...",
+        }
 
         # ---- Step 2: Inject observation into reasoning tool loop ----
         yield {"type": "agent_status", "status": "reasoning"}
@@ -723,17 +745,90 @@ class AgentEngine:
             if step.tool_name == "file_write":
                 existing_content = step.arguments.get("content", "")
                 if self._is_placeholder_content(existing_content) or executed_step_results:
-                    synthesized = await self._synthesize_file_content(
-                        user_request=task.user_request,
-                        filename=step.arguments.get("filename", "output.txt"),
-                        step_description=step.description,
-                        executed_step_results=executed_step_results,
-                        sources=sources,
-                        provider=provider,
-                        model_name=model_name,
-                    )
-                    step.arguments["content"] = synthesized
+                    # Check if prior reasoning step produced the grounded summary
+                    prior_summary = None
+                    for prev in reversed(executed_step_results):
+                        if prev.get("tool") in ("reasoning", None) and prev.get("result"):
+                            res = prev["result"].strip()
+                            if len(res) > 50 and not self._is_placeholder_content(res):
+                                prior_summary = res
+                                break
+                    if prior_summary:
+                        step.arguments["content"] = prior_summary
+                    else:
+                        synthesized = await self._synthesize_file_content(
+                            user_request=task.user_request,
+                            filename=step.arguments.get("filename", "output.txt"),
+                            step_description=step.description,
+                            executed_step_results=executed_step_results,
+                            sources=sources,
+                            provider=provider,
+                            model_name=model_name,
+                        )
+                        step.arguments["content"] = synthesized
                     self._task_manager.set_plan(task.task_id, plan)
+
+            # Dynamic resolution for docx_create steps before approval/execution
+            elif step.tool_name == "docx_create":
+                from backend.agent.planner import is_placeholder_path
+                fname = step.arguments.get("filename") or ""
+                if not fname or is_placeholder_path(str(fname)):
+                    fname = "P204_Maintenance_Summary.docx" if ("p-204" in task.user_request.lower() or "p204" in task.user_request.lower()) else "Maintenance_Summary.docx"
+                if not fname.endswith(".docx"):
+                    fname += ".docx"
+                step.arguments["filename"] = fname
+
+                title = step.arguments.get("title") or ""
+                if not title or title.lower() in {"title", "document", "report", "none", "null", "placeholder"}:
+                    if "p-204" in task.user_request.lower() or "p204" in task.user_request.lower():
+                        step.arguments["title"] = "P-204 Hydrocracker Charge Pump Maintenance Summary"
+                    else:
+                        step.arguments["title"] = "Maintenance Summary Report"
+
+                existing_content = step.arguments.get("content", "")
+                if self._is_placeholder_content(existing_content) or executed_step_results:
+                    prior_summary = None
+                    for prev in reversed(executed_step_results):
+                        if prev.get("tool") in ("reasoning", None) and prev.get("result"):
+                            res = prev["result"].strip()
+                            if len(res) > 50 and not self._is_placeholder_content(res):
+                                prior_summary = res
+                                break
+                    if prior_summary:
+                        step.arguments["content"] = prior_summary
+                    else:
+                        synthesized = await self._synthesize_file_content(
+                            user_request=task.user_request,
+                            filename=fname,
+                            step_description=step.description,
+                            executed_step_results=executed_step_results,
+                            sources=sources,
+                            provider=provider,
+                            model_name=model_name,
+                        )
+                        step.arguments["content"] = synthesized
+                self._task_manager.set_plan(task.task_id, plan)
+
+            # Dynamic resolution for artifact_verifier steps
+            elif step.tool_name == "artifact_verifier":
+                from backend.agent.planner import is_placeholder_path
+                fname = step.arguments.get("filename") or step.arguments.get("filepath") or ""
+                if not fname or is_placeholder_path(str(fname)):
+                    for prev in reversed(executed_step_results):
+                        if prev.get("tool") in ("docx_create", "file_write", "xlsx_report"):
+                            prev_res = prev.get("result")
+                            if isinstance(prev_res, dict) and prev_res.get("filename"):
+                                step.arguments["filename"] = prev_res["filename"]
+                                break
+                            elif prev.get("arguments", {}).get("filename"):
+                                step.arguments["filename"] = prev.get("arguments", {}).get("filename")
+                                break
+                    if not step.arguments.get("filename"):
+                        for prev_s in plan.steps:
+                            if prev_s.tool_name in ("docx_create", "file_write", "xlsx_report") and prev_s.arguments.get("filename"):
+                                step.arguments["filename"] = prev_s.arguments["filename"]
+                                break
+                self._task_manager.set_plan(task.task_id, plan)
 
             # Dynamic resolution for calculator steps
             elif step.tool_name == "calculator":
@@ -798,6 +893,7 @@ class AgentEngine:
                         break
 
                 full_response = "".join(accumulated).strip()
+                logger.info("[DEBUG-PLANNING] Reasoning raw output from model: %s", full_response)
                 # Clean any accidental stray <tool_call> tags emitted in reasoning step
                 cleaned_response = re.sub(r"<tool_call>.*?</tool_call>", "", full_response, flags=re.DOTALL).strip()
                 if not cleaned_response:
@@ -820,7 +916,7 @@ class AgentEngine:
                 final_text_parts.append(full_response)
                 self._task_manager.update_step_status(
                     task.task_id, step.id, StepStatus.completed.value,
-                    result=full_response[:500]
+                    result=full_response
                 )
                 executed_step_results.append({
                     "step_id": step.id,
@@ -1171,7 +1267,7 @@ class AgentEngine:
         for step in remaining_steps:
             # Reload task for fresh state
             task = self._task_manager.get_task(task_id)
-            if self._task_manager.is_cancelled(task_id):
+            if task is None or task.status == TaskStatus.CANCELLED:
                 yield {"type": "task_cancelled", "task_id": task_id}
                 yield []
                 return
@@ -1180,17 +1276,89 @@ class AgentEngine:
             if step.tool_name == "file_write":
                 existing_content = step.arguments.get("content", "")
                 if self._is_placeholder_content(existing_content) or executed_step_results:
-                    synthesized = await self._synthesize_file_content(
-                        user_request=task.user_request,
-                        filename=step.arguments.get("filename", "output.txt"),
-                        step_description=step.description,
-                        executed_step_results=executed_step_results,
-                        sources=sources,
-                        provider=provider,
-                        model_name=model_name,
-                    )
-                    step.arguments["content"] = synthesized
+                    prior_summary = None
+                    for prev in reversed(executed_step_results):
+                        if prev.get("tool") in ("reasoning", None) and prev.get("result"):
+                            res = prev["result"].strip()
+                            if len(res) > 50 and not self._is_placeholder_content(res):
+                                prior_summary = res
+                                break
+                    if prior_summary:
+                        step.arguments["content"] = prior_summary
+                    else:
+                        synthesized = await self._synthesize_file_content(
+                            user_request=task.user_request,
+                            filename=step.arguments.get("filename", "output.txt"),
+                            step_description=step.description,
+                            executed_step_results=executed_step_results,
+                            sources=sources,
+                            provider=provider,
+                            model_name=model_name,
+                        )
+                        step.arguments["content"] = synthesized
                     self._task_manager.set_plan(task_id, task.plan)
+
+            # Dynamic resolution for docx_create steps
+            elif step.tool_name == "docx_create":
+                from backend.agent.planner import is_placeholder_path
+                fname = step.arguments.get("filename") or ""
+                if not fname or is_placeholder_path(str(fname)):
+                    fname = "P204_Maintenance_Summary.docx" if ("p-204" in task.user_request.lower() or "p204" in task.user_request.lower()) else "Maintenance_Summary.docx"
+                if not fname.endswith(".docx"):
+                    fname += ".docx"
+                step.arguments["filename"] = fname
+
+                title = step.arguments.get("title") or ""
+                if not title or title.lower() in {"title", "document", "report", "none", "null", "placeholder"}:
+                    if "p-204" in task.user_request.lower() or "p204" in task.user_request.lower():
+                        step.arguments["title"] = "P-204 Hydrocracker Charge Pump Maintenance Summary"
+                    else:
+                        step.arguments["title"] = "Maintenance Summary Report"
+
+                existing_content = step.arguments.get("content", "")
+                if self._is_placeholder_content(existing_content) or executed_step_results:
+                    prior_summary = None
+                    for prev in reversed(executed_step_results):
+                        if prev.get("tool") in ("reasoning", None) and prev.get("result"):
+                            res = prev["result"].strip()
+                            if len(res) > 50 and not self._is_placeholder_content(res):
+                                prior_summary = res
+                                break
+                    if prior_summary:
+                        step.arguments["content"] = prior_summary
+                    else:
+                        synthesized = await self._synthesize_file_content(
+                            user_request=task.user_request,
+                            filename=fname,
+                            step_description=step.description,
+                            executed_step_results=executed_step_results,
+                            sources=sources,
+                            provider=provider,
+                            model_name=model_name,
+                        )
+                        step.arguments["content"] = synthesized
+                self._task_manager.set_plan(task_id, task.plan)
+
+            # Dynamic resolution for artifact_verifier steps
+            elif step.tool_name == "artifact_verifier":
+                from backend.agent.planner import is_placeholder_path
+                fname = step.arguments.get("filename") or step.arguments.get("filepath") or ""
+                if not fname or is_placeholder_path(str(fname)):
+                    for prev in reversed(executed_step_results):
+                        if prev.get("tool") in ("docx_create", "file_write", "xlsx_report"):
+                            prev_res = prev.get("result")
+                            if isinstance(prev_res, dict) and prev_res.get("filename"):
+                                step.arguments["filename"] = prev_res["filename"]
+                                break
+                            elif prev.get("arguments", {}).get("filename"):
+                                step.arguments["filename"] = prev.get("arguments", {}).get("filename")
+                                break
+                    if not step.arguments.get("filename"):
+                        for prev_s in task.plan.steps:
+                            if prev_s.tool_name in ("docx_create", "file_write", "xlsx_report") and prev_s.arguments.get("filename"):
+                                step.arguments["filename"] = prev_s.arguments["filename"]
+                                break
+                self._task_manager.set_plan(task_id, task.plan)
 
             # Dynamic resolution for calculator steps
             elif step.tool_name == "calculator":
@@ -1275,7 +1443,7 @@ class AgentEngine:
                 final_text_parts.append(full_response)
                 self._task_manager.update_step_status(
                     task_id, step.id, StepStatus.completed.value,
-                    result=full_response[:500]
+                    result=full_response
                 )
                 executed_step_results.append({
                     "step_id": step.id,
@@ -1467,6 +1635,87 @@ class AgentEngine:
 
         return path_arg
 
+    @staticmethod
+    def _format_step_result_content(tool_name: Optional[str], raw_res: Any) -> str:
+        """
+        Format an executed tool result into clean, unescaped text for reasoning, synthesis,
+        and grounding prompts. Preserves [DOCUMENT CONTENT] blocks for document retrieval.
+        """
+        if raw_res is None:
+            return ""
+
+        if tool_name == "document_search":
+            if isinstance(raw_res, list):
+                if not raw_res:
+                    return "[]"
+                parts = []
+                for i, item in enumerate(raw_res, start=1):
+                    if isinstance(item, dict):
+                        fn = item.get("filename", "Unknown")
+                        page = item.get("page")
+                        page_info = f" (Page {page})" if page else ""
+                        txt = item.get("text", "")
+                        parts.append(
+                            f"[DOCUMENT SOURCE {i}]\n"
+                            f"filename: {fn}{page_info}\n"
+                            f"source_type: retrieved_document\n"
+                            f"[DOCUMENT CONTENT]\n"
+                            f"{txt}\n"
+                            f"[END DOCUMENT CONTENT]"
+                        )
+                    else:
+                        parts.append(str(item))
+                res_formatted = "\n\n".join(parts)
+                logger.info("[DEBUG-PLANNING] _format_step_result_content: document_search formatted %d chunks, total len=%d", len(raw_res), len(res_formatted))
+                return res_formatted
+            elif isinstance(raw_res, str):
+                if "[DOCUMENT CONTENT]" in raw_res:
+                    return raw_res
+                return (
+                    f"[DOCUMENT SOURCE]\n"
+                    f"source_type: retrieved_document\n"
+                    f"[DOCUMENT CONTENT]\n"
+                    f"{raw_res}\n"
+                    f"[END DOCUMENT CONTENT]"
+                )
+
+        elif tool_name == "file_read":
+            if isinstance(raw_res, dict):
+                fn = raw_res.get("filename", "")
+                content = raw_res.get("content", "")
+                return (
+                    f"[DOCUMENT SOURCE]\n"
+                    f"filename: {fn}\n"
+                    f"source_type: file_read\n"
+                    f"[DOCUMENT CONTENT]\n"
+                    f"{content}\n"
+                    f"[END DOCUMENT CONTENT]"
+                )
+            elif isinstance(raw_res, str):
+                if "[DOCUMENT CONTENT]" in raw_res:
+                    return raw_res
+                return (
+                    f"[DOCUMENT SOURCE]\n"
+                    f"source_type: file_read\n"
+                    f"[DOCUMENT CONTENT]\n"
+                    f"{raw_res}\n"
+                    f"[END DOCUMENT CONTENT]"
+                )
+
+        elif tool_name == "code_execution":
+            if isinstance(raw_res, dict):
+                stdout_val = raw_res.get("stdout", "")
+                exit_code_val = raw_res.get("exit_code", 0)
+                return f"Exit Code: {exit_code_val}\nStdout:\n{stdout_val}"
+            return str(raw_res)
+
+        elif tool_name in ("reasoning", None):
+            return str(raw_res)
+
+        if isinstance(raw_res, (dict, list)):
+            return json.dumps(raw_res, indent=2, default=str)
+        return str(raw_res)
+
     async def _resolve_calculator_expression(
         self,
         expression: str,
@@ -1493,12 +1742,9 @@ class AgentEngine:
             tool = item.get("tool", "step")
             desc = item.get("description", "")
             raw_res = item.get("result") or item.get("summary")
-            if isinstance(raw_res, (dict, list)):
-                res_str = json.dumps(raw_res, indent=2, default=str)
-            else:
-                res_str = str(raw_res)
-            if len(res_str) > 3000:
-                res_str = res_str[:3000] + "\n... (truncated)"
+            res_str = self._format_step_result_content(tool, raw_res)
+            if len(res_str) > 10000:
+                res_str = res_str[:10000] + "\n... (truncated)"
             obs_blocks.append(f"[{tool} - {desc}]\n{res_str}")
 
         if not obs_blocks:
@@ -1578,12 +1824,9 @@ class AgentEngine:
 
             if success:
                 res = item.get("result") if item.get("result") is not None else (item.get("summary") or "Completed")
-                if isinstance(res, (dict, list)):
-                    res_str = json.dumps(res, indent=2, default=str)
-                else:
-                    res_str = str(res)
-                if len(res_str) > 2000:
-                    res_str = res_str[:2000] + "\n... (truncated)"
+                res_str = self._format_step_result_content(tool, res)
+                if len(res_str) > 15000:
+                    res_str = res_str[:15000] + "\n... (truncated)"
                 log_lines.append(f"- Step {idx} ({tool}{args_str}): SUCCESS\n  Result:\n{res_str}")
             else:
                 err = item.get("error", "Unknown error")
@@ -1596,28 +1839,34 @@ class AgentEngine:
         if sources:
             doc_parts.append("RETRIEVED DOCUMENT EVIDENCE:")
             for i, chunk in enumerate(sources, start=1):
+                page_str = f" (Page {chunk.page})" if getattr(chunk, "page", None) else ""
                 doc_parts.append(
-                    f"[Document {i}: {getattr(chunk, 'filename', 'unknown')}]\n"
-                    f"{getattr(chunk, 'text', '')}"
+                    f"[Document {i}: {getattr(chunk, 'filename', 'unknown')}{page_str}]\n"
+                    f"[DOCUMENT CONTENT]\n"
+                    f"{getattr(chunk, 'text', '')}\n"
+                    f"[END DOCUMENT CONTENT]"
                 )
         doc_context = "\n\n".join(doc_parts) if doc_parts else ""
 
         grounding_instructions = (
             "CRITICAL FACTUAL GROUNDING RULES (Reasoning & Synthesis Step):\n"
             "1. You are providing the direct final response to the user. Do NOT emit <tool_call> tags or attempt to invoke tools.\n"
-            "2. Base your response strictly on the factual evidence and successful tool outputs in the execution log above.\n"
-            "3. If document search or retrieval returned 0 results, or if no sufficiently relevant local evidence was found for the requested topic, you MUST explicitly state that no sufficiently relevant local documents were found in the knowledge base. State clearly that the available local knowledge base contains refinery and industrial equipment documents, but no evidence was found for the requested topic, and that you cannot provide a grounded answer from the available local evidence.\n"
-            "4. If any step FAILED (e.g. file_read failed or calculator failed), explicitly mention that the operation could not be performed and state the reason. NEVER claim or imply that a failed step was successful.\n"
-            "5. If a calculation succeeded, cite the calculated total. If a calculation failed or was not performed, state that the calculation could not be completed.\n"
-            "6. NEVER fabricate information, invent facts, or reinterpret/transfer facts from unrelated equipment into the requested topic.\n"
-            "7. Do NOT claim that documents support a topic when they do not.\n"
-            "8. Provide a clear, honest, and well-structured response summarizing the actual findings."
+            "2. Base findings, equipment details, dates, and recommendations ONLY on factual statements inside [DOCUMENT CONTENT] and successful tool outputs in the execution log above.\n"
+            "3. Search metadata, filenames, scores, and chunk IDs are NOT evidence for document content.\n"
+            "4. If a requested field (e.g. equipment name, maintenance date, findings, actions, OEM warranty expiration date, next scheduled maintenance date) is not explicitly stated in [DOCUMENT CONTENT], output exactly 'Not stated in retrieved document.'.\n"
+            "5. If document search or retrieval returned 0 results, or if no sufficiently relevant local evidence was found for the requested topic, you MUST explicitly state that no sufficiently relevant local documents were found in the knowledge base. State clearly that the available local knowledge base contains refinery and industrial equipment documents, but no evidence was found for the requested topic, and that you cannot provide a grounded answer from the available local evidence.\n"
+            "6. NEVER invent boilerplate maintenance advice (e.g. 'No significant issues were identified during the maintenance.', 'Standard cleaning and lubrication procedures were followed.', 'Inspection of seals and couplings revealed no abnormalities.', 'Pressure and temperature checks were within acceptable ranges.', 'Continue routine maintenance schedule.', 'Schedule next maintenance within the standard interval.', 'Further inspection may be required.', 'Ensure all components are functioning.').\n"
+            "7. If any step FAILED (e.g. file_read failed or calculator failed), explicitly mention that the operation could not be performed and state the reason. NEVER claim or imply that a failed step was successful.\n"
+            "8. If a calculation succeeded, cite the calculated total. If a calculation failed or was not performed, state that the calculation could not be completed.\n"
+            "9. NEVER fabricate information, invent facts, or reinterpret/transfer facts from unrelated equipment into the requested topic.\n"
+            "10. If preparing a summary for file creation, show the proposed summary clearly first and ask for approval before any file creation tool (docx_create) is called."
         )
 
         task_context_msg = Message(
             role="system",
             content=f"{execution_log}\n\n{doc_context}\n\n{grounding_instructions}".strip()
         )
+        logger.info("[DEBUG-PLANNING] _build_task_reasoning_messages system context:\n%s", task_context_msg.content)
 
         if history and history[-1].role == "user":
             return list(history[:-1]) + [task_context_msg, history[-1]]
@@ -1663,21 +1912,25 @@ class AgentEngine:
             tool = item.get("tool", "step")
             desc = item.get("description", "")
             raw_res = item.get("result")
-            if isinstance(raw_res, (dict, list)):
-                res_str = json.dumps(raw_res, indent=2, default=str)
-            else:
-                res_str = str(raw_res)
-            if len(res_str) > 4000:
-                res_str = res_str[:4000] + "\n... (truncated)"
+            res_str = self._format_step_result_content(tool, raw_res)
+            if len(res_str) > 15000:
+                res_str = res_str[:15000] + "\n... (truncated)"
             context_blocks.append(f"[Step: {tool} - {desc}]\n{res_str}")
 
         # 2. Add RAG retrieved document sources
         if sources:
-            for s in sources:
+            for i, s in enumerate(sources, start=1):
                 fname = getattr(s, "filename", "unknown")
+                page_str = f" (Page {s.page})" if getattr(s, "page", None) else ""
                 text = getattr(s, "text", "")
                 if text:
-                    context_blocks.append(f"[Retrieved Document: {fname}]\n{text}")
+                    context_blocks.append(
+                        f"[Document Source {i}]\n"
+                        f"filename: {fname}{page_str}\n"
+                        f"[DOCUMENT CONTENT]\n"
+                        f"{text}\n"
+                        f"[END DOCUMENT CONTENT]"
+                    )
 
         accumulated_context = "\n\n".join(context_blocks) if context_blocks else "(No previous step observations or retrieved documents)"
 
@@ -1688,7 +1941,9 @@ class AgentEngine:
             "1. Output ONLY the raw content to be saved to the file — do NOT wrap the entire output in markdown code fences (do NOT start with ```text or ```markdown around the response).\n"
             "2. Do NOT include conversational filler, preamble, greeting, or sign-offs (e.g., 'Here is the summary:', 'Hope this helps').\n"
             "3. Base all facts, measurements, equipment IDs, root causes, and findings strictly on the provided context.\n"
-            "4. Be concise, factual, structured, and thorough. Never output generic placeholders (e.g., 'Summary of ...', 'text', 'TODO', '[insert]')."
+            "4. Be concise, factual, structured, and thorough. Never output generic placeholders (e.g., 'Summary of ...', 'text', 'TODO', '[insert]').\n"
+            "5. If a requested field is absent from the context, state 'Not stated in retrieved document.'.\n"
+            "6. NEVER invent generic maintenance boilerplate (e.g., 'No significant issues were identified during the maintenance.', 'Standard cleaning and lubrication procedures were followed.', 'Inspection of seals and couplings revealed no abnormalities.', 'Pressure and temperature checks were within acceptable ranges.', 'Continue routine maintenance schedule.', 'Schedule next maintenance within the standard interval.', 'Further inspection may be required.', 'Ensure all components are functioning.')."
         )
 
         user_prompt = (
@@ -1835,6 +2090,9 @@ class AgentEngine:
         if isinstance(r, dict):
             if "result" in r:
                 return f"Result: {r['result']}"
+            if "stdout" in r:
+                out = str(r["stdout"]).strip()
+                return f"Output: {out[:100]}" if out else "Execution finished (no stdout)"
             if "content" in r:
                 return f"File content: {len(str(r['content']))} chars"
             if "filename" in r:
@@ -1845,19 +2103,85 @@ class AgentEngine:
     @staticmethod
     def _format_observation(tool_name: str, result) -> str:
         """Format a tool execution result as an observation for the model."""
+        if tool_name == "code_execution":
+            if result.success:
+                stdout_val = result.result.get("stdout", "") if isinstance(result.result, dict) else str(result.result)
+                exit_code_val = result.result.get("exit_code", 0) if isinstance(result.result, dict) else 0
+                return (
+                    f"[TOOL RESULT: code_execution]\n"
+                    f"Status: success\n"
+                    f"Exit Code: {exit_code_val}\n"
+                    f"Stdout:\n{stdout_val}\n"
+                    f"[END TOOL RESULT]\n\n"
+                    f"The code executed successfully in the sandbox with exit code {exit_code_val}. "
+                    f"Provide your final answer to the user containing the exact stdout and exit code. "
+                    f"Do NOT invent or recalculate any values."
+                )
+            else:
+                err_val = result.error or (result.result.get("stderr") if isinstance(result.result, dict) else "Execution failed")
+                return (
+                    f"[TOOL RESULT: code_execution]\n"
+                    f"Status: blocked / error\n"
+                    f"Error: {err_val}\n"
+                    f"[END TOOL RESULT]\n\n"
+                    f"CRITICAL CODE EXECUTION POLICY:\n"
+                    f"The requested code execution was BLOCKED or failed in the sandbox.\n"
+                    f"1. You MUST report this exact error and blocked status directly to the user.\n"
+                    f"2. You must NEVER modify, rewrite, or 'correct' the user's code.\n"
+                    f"3. You must NEVER retry execution with modified code.\n"
+                    f"4. You must NEVER simulate, calculate, or invent execution output or syntax errors.\n"
+                    f"5. Provide your final response now reporting the failure."
+                )
+
         if result.success:
-            result_str = json.dumps(result.result, indent=2, default=str)
+            if tool_name == "document_search" and isinstance(result.result, list):
+                if not result.result:
+                    content_str = "No relevant document passages found matching the search query."
+                else:
+                    parts = []
+                    for i, item in enumerate(result.result, start=1):
+                        fn = item.get("filename", "Unknown")
+                        page = item.get("page")
+                        page_info = f" (Page {page})" if page else ""
+                        txt = item.get("text", "")
+                        parts.append(
+                            f"[DOCUMENT SOURCE {i}]\n"
+                            f"filename: {fn}{page_info}\n"
+                            f"source_type: retrieved_document\n"
+                            f"[DOCUMENT CONTENT]\n"
+                            f"{txt}\n"
+                            f"[END DOCUMENT CONTENT]"
+                        )
+                    content_str = "\n\n".join(parts)
+            elif tool_name == "file_read" and isinstance(result.result, dict):
+                fn = result.result.get("filename", "")
+                content = result.result.get("content", "")
+                content_str = (
+                    f"[DOCUMENT SOURCE]\n"
+                    f"filename: {fn}\n"
+                    f"source_type: file_read\n"
+                    f"[DOCUMENT CONTENT]\n"
+                    f"{content}\n"
+                    f"[END DOCUMENT CONTENT]"
+                )
+            else:
+                content_str = json.dumps(result.result, indent=2, default=str)
+
             # Cap observation size to avoid context overflow
-            if len(result_str) > 3000:
-                result_str = result_str[:3000] + "\n... (truncated)"
+            if len(content_str) > 15000:
+                content_str = content_str[:15000] + "\n... (truncated)"
+
             return (
                 f"[TOOL RESULT: {tool_name}]\n"
                 f"Status: success\n"
-                f"Result:\n{result_str}\n"
+                f"Result:\n{content_str}\n"
                 f"[END TOOL RESULT]\n\n"
-                f"Now analyze this result and continue. "
-                f"If you have enough information, provide your final answer to the user. "
-                f"If you need another tool, emit another <tool_call>."
+                f"GROUNDING REQUIREMENTS:\n"
+                f"1. Base findings, equipment details, dates, and recommendations ONLY on factual statements inside [DOCUMENT CONTENT].\n"
+                f"2. Search metadata, filenames, scores, and chunk IDs are NOT evidence for document content.\n"
+                f"3. If a requested field (e.g. equipment name, maintenance date, findings, actions, OEM warranty expiration date, next scheduled maintenance date) is not explicitly stated in [DOCUMENT CONTENT], output exactly 'Not stated in retrieved document.'.\n"
+                f"4. NEVER invent boilerplate maintenance advice (e.g. 'No significant issues were identified during the maintenance.', 'Standard cleaning and lubrication procedures were followed.', 'Inspection of seals and couplings revealed no abnormalities.', 'Pressure and temperature checks were within acceptable ranges.', 'Continue routine maintenance schedule.', 'Schedule next maintenance within the standard interval.', 'Further inspection may be required.', 'Ensure all components are functioning.').\n"
+                f"5. If preparing a summary for file creation, show the proposed summary first and wait for approval before any file creation tool (docx_create) is called."
             )
         else:
             return (
@@ -1865,8 +2189,9 @@ class AgentEngine:
                 f"Status: error\n"
                 f"Error: {result.error}\n"
                 f"[END TOOL RESULT]\n\n"
-                f"The tool returned an error. "
-                f"Try a different approach or provide your best answer with available information."
+                f"The tool returned an error or non-zero exit code. "
+                f"Report the actual tool failure directly to the user. "
+                f"Do NOT invent a fallback result, and do NOT claim execution succeeded."
             )
 
     # ------------------------------------------------------------------
@@ -1940,8 +2265,10 @@ class AgentEngine:
                 f"[Source {i}]\n"
                 f"Document: {chunk.filename}\n"
                 f"{page_str + chr(10) if page_str else ''}"
-                f"Relevance score: {chunk.score:.4f}\n\n"
-                f"{chunk.text}"
+                f"Relevance score: {chunk.score:.4f}\n"
+                f"[DOCUMENT CONTENT]\n"
+                f"{chunk.text}\n"
+                f"[END DOCUMENT CONTENT]"
             )
 
         context_parts.append(

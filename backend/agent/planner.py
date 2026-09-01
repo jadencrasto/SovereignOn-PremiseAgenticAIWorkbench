@@ -87,12 +87,15 @@ _MULTI_STEP_INDICATORS = [
     r"\band\b.*\b(then|also|after|next)\b",
     r"\bfirst\b.*\bthen\b",
     r"\bstep\s*\d",
-    r"\bcreate\b.*\b(report|file|summary)\b.*\b(from|using|based)\b",
-    r"\bsearch\b.*\b(and|then)\b.*\b(calculate|write|create|summarize)\b",
+    r"\bcreate\b.*\b(report|file|document|artifact|docx|word)\b",
+    r"\bsearch\b.*\b(and|then)\b.*\b(calculate|write|create)\b",
     r"\bcalculate\b.*\b(and|then)\b.*\b(write|create|save|export)\b",
-    r"\bfind\b.*\b(and|then)\b.*\b(compare|calculate|write)\b",
+    r"\bfind\b.*\b(and|then)\b.*\b(compare|calculate|write|create)\b",
     r"\banalyze\b.*\b(and|then)\b",
     r"\bsummarize\b.*\b(and|then)\b.*\b(save|write|create)\b",
+    r"\b(create|modify|save|write)\b.*\b(file|document|report|artifact|docx|word)\b",
+    r"\b(until|after|before)\b.*\b(approve|approval|approved)\b",
+    r"\b(first|proposed|draft)\b.*\b(approve|approval|confirm)\b",
 ]
 
 _SIMPLE_PATTERNS = [
@@ -109,7 +112,10 @@ _WRITE_KEYWORDS = [
     "create a report", "write a report", "generate a report",
     "save the result", "write to file", "save to file",
     "compliance", "runbook", "benchmark", "incident", "anomaly",
-    "xlsx", "excel", "diligence", "diagnostics", "cross-check",
+    "xlsx", "excel", "docx", "word document", "diligence", "diagnostics", "cross-check",
+    "create or modify", "modify any file", "create any file", "modify file",
+    "until i explicitly approve", "until i approve", "after i approve", "explicitly approve",
+    "approval", "docx_create", "artifact",
 ]
 
 
@@ -187,12 +193,21 @@ RULES:
    - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this whenever the user asks to search, find, or summarize information from documents. document_search directly retrieves the full grounded text content. Do NOT follow document_search with file_read.
    - file_read: Reads an existing text file from the workspace (e.g. 'mrpl_lab_composition_test.csv'). ONLY use file_read when the user explicitly provides a specific known filename in their prompt. NEVER call file_read on indexed documents or RAG results. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
    - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2").
+   - code_execution: Executes Python code inside the local sandbox (e.g. for computation or data processing). Captures stdout/stderr.
+   - docx_create: Generates a genuine Microsoft Word (.docx) document in the sandbox with title, paragraphs, and tables. Always set requires_approval to true.
    - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Always set requires_approval to true.
-   - file_write: Creates an output file or incident log in the sandbox. Always set requires_approval to true.
-   - artifact_verifier: Verifies a generated report or artifact on disk (checks rows, columns, and SHA-256 hash). Follow xlsx_report or file_write with artifact_verifier whenever creating reports.
+   - file_write: Creates a text output file or incident log in the sandbox. Always set requires_approval to true.
+   - artifact_verifier: Verifies a generated report or artifact on disk (checks rows/paragraphs, columns, and SHA-256 hash). Follow docx_create, xlsx_report, or file_write with artifact_verifier whenever creating reports or documents.
    - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the final grounded decision-support response.
 
-5. Maximum {max_steps} steps.
+5. Approval-gated summary workflow:
+   When the user asks to prepare a summary, show it first, and create a document/file after approval (e.g. DOCX or Word document or report):
+   - Step 1: document_search (search for the requested document in knowledge base)
+   - Step 2: reasoning (tool_name = null) to synthesize and present the grounded proposed summary to the user first.
+   - Step 3: docx_create (or file_write or xlsx_report) with requires_approval: true.
+   - Step 4: artifact_verifier to verify the generated artifact.
+
+6. Maximum {max_steps} steps.
 
 OUTPUT FORMAT (JSON array of steps):
 [

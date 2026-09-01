@@ -70,18 +70,75 @@ def create_document_search(retriever) -> callable:
             )
             return []
 
+        # If vector_store is available, expand matched relevant documents to include all ordered chunks
+        vector_store = getattr(retriever, "_store", None)
+        seen_doc_ids = set()
         results = []
-        for chunk in relevant_chunks:
-            results.append({
-                "filename": chunk.filename,
-                "relative_path": chunk.filename,
-                "document_id": getattr(chunk, "document_id", chunk.filename),
-                "chunk_id": chunk.chunk_id,
-                "chunk_index": chunk.chunk_index,
-                "page": chunk.page,
-                "score": round(chunk.score, 4),
-                "text": chunk.text[:1000],  # Cap text length for tool result
-            })
+
+        if vector_store and hasattr(vector_store, "get_document_chunks"):
+            for chunk in relevant_chunks:
+                doc_id = getattr(chunk, "document_id", chunk.filename)
+                if doc_id in seen_doc_ids:
+                    continue
+                try:
+                    stored = vector_store.get_document_chunks(doc_id) if hasattr(vector_store, "get_document_chunks") else None
+                    docs = stored.get("documents", []) if isinstance(stored, dict) else []
+                    metas = stored.get("metadatas", []) if isinstance(stored, dict) else []
+                    ids = stored.get("ids", []) if isinstance(stored, dict) else []
+                    if isinstance(docs, list) and len(docs) > 0:
+                        paired = []
+                        for cid, doc_txt, meta in zip(ids, docs, metas):
+                            c_idx = meta.get("chunk_index", 0) if isinstance(meta, dict) else 0
+                            paired.append((c_idx, cid, doc_txt, meta))
+                        paired.sort(key=lambda x: x[0])
+                        for c_idx, cid, doc_txt, meta in paired:
+                            fn = meta.get("filename", chunk.filename) if isinstance(meta, dict) else chunk.filename
+                            page = meta.get("page") if isinstance(meta, dict) else chunk.page
+                            results.append({
+                                "filename": fn,
+                                "relative_path": fn,
+                                "document_id": doc_id,
+                                "chunk_id": cid,
+                                "chunk_index": c_idx,
+                                "page": page,
+                                "score": round(chunk.score, 4),
+                                "text": doc_txt,
+                            })
+                    else:
+                        results.append({
+                            "filename": chunk.filename,
+                            "relative_path": chunk.filename,
+                            "document_id": doc_id,
+                            "chunk_id": chunk.chunk_id,
+                            "chunk_index": chunk.chunk_index,
+                            "page": chunk.page,
+                            "score": round(chunk.score, 4),
+                            "text": chunk.text,
+                        })
+                except Exception as exc:
+                    logger.warning("Failed to expand document chunks for doc_id=%s: %s", doc_id, exc)
+                    results.append({
+                        "filename": chunk.filename,
+                        "relative_path": chunk.filename,
+                        "document_id": doc_id,
+                        "chunk_id": chunk.chunk_id,
+                        "chunk_index": chunk.chunk_index,
+                        "page": chunk.page,
+                        "score": round(chunk.score, 4),
+                        "text": chunk.text,
+                    })
+        else:
+            for chunk in relevant_chunks:
+                results.append({
+                    "filename": chunk.filename,
+                    "relative_path": chunk.filename,
+                    "document_id": getattr(chunk, "document_id", chunk.filename),
+                    "chunk_id": chunk.chunk_id,
+                    "chunk_index": chunk.chunk_index,
+                    "page": chunk.page,
+                    "score": round(chunk.score, 4),
+                    "text": chunk.text,
+                })
 
         logger.info(
             "document_search | query_len=%d top_k=%d results=%d/%d",

@@ -20,7 +20,23 @@ tools:
     enabled: true
     risk_level: low
     requires_approval: false
+  code_execution:
+    enabled: true
+    risk_level: medium
+    requires_approval: false
   file_write:
     enabled: true
     risk_level: high
     requires_approval: true
+  docx_create:
+    enabled: true
+    risk_level: high
+    requires_approval: true
+  xlsx_report:
+    enabled: true
+    risk_level: high
+    requires_approval: true
+  artifact_verifier:
+    enabled: true
+    risk_level: low
+    requires_approval: false
