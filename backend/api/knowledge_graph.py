@@ -1,19 +1,21 @@
 """
 backend/api/knowledge_graph.py
 ------------------------------
-Company & Industrial Knowledge Graph API with Role-Based Authorization (RBAC) filtering.
+Company & Industrial Knowledge Graph API with Role-Based Authorization (RBAC) filtering
+and Dynamic Live Document Vector Integration.
 
 Entities:
-  - Units (Refinery Units, Hydrocracker, Desalter, Flare)
-  - Equipment Assets (MOV-4102-B, V-401, FKOD-101, E-302, P-101A)
-  - Sensors & Telemetry (PT-4011, TT-302, VIB-101)
-  - Defects & Failure Modes (Stem Galling, Pitting Corrosion, Graphite Degradation)
-  - Standards & SOPs (MRPL QA Spec, API 570, ASME B16.20, OSHA PSM)
-  - Classified Enterprise Records (Proprietary Formulations, Interlock SCADA Keys)
+  - Units (Refinery Processing Units, Hydrocracker, Desalter, Coker, Hydrogen Plant, Flare)
+  - Equipment Assets (Valves, Compressors, Pumps, Columns, Reboilers, Separation Drums)
+  - Sensors & Telemetry (Pressure Transmitters, Vibration, Temperature Skin, H2S Detectors)
+  - Defects & Failure Modes (Pitting Corrosion, Stem Galling, HTHA, Cavitation, Packing Leak)
+  - Standards & SOPs (API 570, ASME B16.20, OSHA PSM, MRPL QA Spec, Flare SOP)
+  - Live Ingested Documents (Dynamic nodes from ChromaDB vector store)
+  - Classified Enterprise Records (Proprietary Catalysts, SCADA SIL-3 Keys, Audit Roots)
 
 Clearance Levels:
-  - viewer (Level 1): Operational topology, public equipment, telemetry
-  - operator (Level 2): Technical failure modes, maintenance manuals, tolerances
+  - viewer (Level 1): Operational topology, public equipment, telemetry, public documents
+  - operator (Level 2): Technical failure modes, maintenance manuals, tolerances, live SOPs
   - admin (Level 3): Full graph, proprietary formulations, safety interlock overrides
 """
 
@@ -34,66 +36,94 @@ ROLE_LEVELS: Dict[str, int] = {
     "admin": 3,
 }
 
-# Complete Company Knowledge Graph Dataset
+# Rich Company Knowledge Graph Base Dataset
 RAW_NODES = [
-    # Units (Level 1)
+    # -------------------------------------------------------------
+    # 1. Operational Units (Level 1: Viewer)
+    # -------------------------------------------------------------
     {
         "id": "UNIT_HC04",
         "label": "Hydrocracker Unit 04",
         "category": "unit",
         "clearance": "viewer",
-        "description": "High-pressure catalytic hydrocracking unit operating at 145 bar and 420°C.",
-        "properties": {"capacity_bpd": "45,000", "status": "ACTIVE", "criticality": "HIGH"},
+        "description": "High-pressure catalytic hydrocracking unit operating at 145 bar and 420°C for diesel yield maximization.",
+        "properties": {"capacity_bpd": "45,000", "status": "ACTIVE", "criticality": "HIGH", "operating_temp": "420°C", "design_pressure": "145 bar"},
     },
     {
         "id": "UNIT_DS02",
         "label": "Desalter Unit 02",
         "category": "unit",
         "clearance": "viewer",
-        "description": "Crude oil electro-static desalting and dehydration train.",
-        "properties": {"throughput_m3h": "320", "status": "ACTIVE", "criticality": "MEDIUM"},
+        "description": "Crude oil electro-static desalting and dehydration train for BS&W salt removal.",
+        "properties": {"throughput_m3h": "320", "status": "ACTIVE", "criticality": "MEDIUM", "salt_target": "< 3.0 PTB"},
+    },
+    {
+        "id": "UNIT_CDU01",
+        "label": "Crude Distillation Unit 01",
+        "category": "unit",
+        "clearance": "viewer",
+        "description": "Primary atmospheric crude fractionation column separating naphtha, kerosene, and gas oils.",
+        "properties": {"capacity_bpd": "120,000", "status": "ACTIVE", "criticality": "HIGH", "column_trays": "48"},
+    },
+    {
+        "id": "UNIT_DCU03",
+        "label": "Delayed Coker Unit 03",
+        "category": "unit",
+        "clearance": "viewer",
+        "description": "Thermal cracking unit upgrading vacuum residue into light distillate products and petroleum coke.",
+        "properties": {"cycle_hours": "18.0", "status": "ACTIVE", "criticality": "HIGH", "coke_drums": "4"},
+    },
+    {
+        "id": "UNIT_HGU02",
+        "label": "Hydrogen Generation Unit 02",
+        "category": "unit",
+        "clearance": "viewer",
+        "description": "Steam methane reforming unit producing 99.9% pure hydrogen for hydroprocessing.",
+        "properties": {"output_nm3h": "70,000", "purity": "99.95%", "status": "ACTIVE", "criticality": "HIGH"},
     },
     {
         "id": "UNIT_FLARE",
-        "label": "Flare & Blowdown System",
+        "label": "Emergency Flare & Relief Stack",
         "category": "unit",
         "clearance": "viewer",
-        "description": "Emergency high-pressure flare relief and hydrocarbon containment system.",
-        "properties": {"design_press_barg": "10.5", "status": "STANDBY_ARMED", "criticality": "CRITICAL"},
+        "description": "Emergency high-pressure flare relief and hydrocarbon containment system with sonic tip burners.",
+        "properties": {"design_press_barg": "10.5", "status": "STANDBY_ARMED", "criticality": "CRITICAL", "smokeless_steam": "AUTO"},
     },
     {
         "id": "UNIT_LAB",
         "label": "Central QA/QC Laboratory",
         "category": "unit",
         "clearance": "viewer",
-        "description": "Refinery analytical chemistry and chromatography testing laboratory.",
-        "properties": {"accreditation": "ISO/IEC 17025", "status": "OPERATIONAL", "criticality": "HIGH"},
+        "description": "Refinery analytical chemistry, gas chromatography, and ASTM compliance testing facility.",
+        "properties": {"accreditation": "ISO/IEC 17025", "status": "OPERATIONAL", "criticality": "HIGH", "daily_assays": "140"},
     },
 
-    # Equipment Assets (Level 1)
+    # -------------------------------------------------------------
+    # 2. Major Equipment Assets (Level 1: Viewer)
+    # -------------------------------------------------------------
     {
         "id": "EQ_MOV4102B",
         "label": "MOV-4102-B Motor-Operated Valve",
         "category": "equipment",
         "clearance": "viewer",
-        "description": "12-inch 300# carbon steel motor-operated isolation valve on desalter crude feed.",
-        "properties": {"tag": "MOV-4102-B", "rating": "ASME Class 300", "body_material": "ASTM A216 WCB"},
+        "description": "12-inch 300# carbon steel motor-operated isolation valve on desalter crude feed manifold.",
+        "properties": {"tag": "MOV-4102-B", "rating": "ASME Class 300", "body_material": "ASTM A216 WCB", "actuator": "Rotork IQ3"},
     },
     {
         "id": "EQ_V401",
         "label": "V-401 Emergency Depressuring Valve",
         "category": "equipment",
         "clearance": "viewer",
-        "description": "Critical emergency depressurizing control valve in hydrocracker reaction loop.",
-        "properties": {"tag": "V-401", "design_pressure": "165 bar", "trim": "Stellite 6 faced"},
+        "description": "Critical emergency depressurizing control valve in hydrocracker reaction loop (SIL-3 rated).",
+        "properties": {"tag": "V-401", "design_pressure": "165 bar", "trim": "Stellite 6 faced", "failsafe": "FAIL_OPEN"},
     },
     {
         "id": "EQ_FKOD101",
         "label": "FKOD-101 Knock-Out Drum",
         "category": "equipment",
         "clearance": "viewer",
-        "description": "Vertical liquid-vapor separator drum upstream of main flare stack.",
-        "properties": {"tag": "FKOD-101", "volume_m3": "85.0", "relief_set_barg": "3.5"},
+        "description": "Vertical liquid-vapor separator drum upstream of main flare stack preventing liquid carryover.",
+        "properties": {"tag": "FKOD-101", "volume_m3": "85.0", "relief_set_barg": "3.5", "demister_pad": "316L Mesh"},
     },
     {
         "id": "EQ_E302",
@@ -101,17 +131,35 @@ RAW_NODES = [
         "category": "equipment",
         "clearance": "viewer",
         "description": "Shell and tube thermosiphon reboiler in stabilization column.",
-        "properties": {"tag": "E-302", "shell_press_barg": "18.0", "tube_material": "316L SS"},
+        "properties": {"tag": "E-302", "shell_press_barg": "18.0", "tube_material": "316L SS", "duty_mw": "14.2"},
+    },
+    {
+        "id": "EQ_P101A",
+        "label": "P-101A Heavy Feed Charge Pump",
+        "category": "equipment",
+        "clearance": "viewer",
+        "description": "Multi-stage centrifugal boiler feed and heavy gas oil charge pump driven by 450kW induction motor.",
+        "properties": {"tag": "P-101A", "flow_m3h": "280", "head_m": "620", "seal_plan": "API Plan 53B"},
+    },
+    {
+        "id": "EQ_C201",
+        "label": "C-201 Wet Gas Compressor Train",
+        "category": "equipment",
+        "clearance": "viewer",
+        "description": "Two-stage centrifugal hydrocarbon compressor driven by condensing steam turbine.",
+        "properties": {"tag": "C-201", "speed_rpm": "8,450", "discharge_press": "24.5 bar", "power_mw": "6.8"},
     },
 
-    # Sensors (Level 1 & 2)
+    # -------------------------------------------------------------
+    # 3. Telemetry & Sensor Probes (Level 1: Viewer)
+    # -------------------------------------------------------------
     {
         "id": "SENS_PT4011",
         "label": "PT-4011 Pressure Transmitter",
         "category": "sensor",
         "clearance": "viewer",
         "description": "Smart 4-20mA HART pressure sensor on FKOD-101 vapor dome.",
-        "properties": {"range": "0 - 5.0 bar", "trip_threshold": "2.80 bar", "current_val": "2.85 bar [ALERT]"},
+        "properties": {"range": "0 - 5.0 bar", "trip_threshold": "2.80 bar", "current_val": "2.85 bar [ALERT]", "sample_rate": "100ms"},
     },
     {
         "id": "SENS_TT302",
@@ -119,17 +167,35 @@ RAW_NODES = [
         "category": "sensor",
         "clearance": "viewer",
         "description": "Duplex PT100 RTD measuring reboiler tube skin temperature.",
-        "properties": {"range": "0 - 450°C", "current_val": "242.4°C"},
+        "properties": {"range": "0 - 450°C", "current_val": "242.4°C", "drift_pct": "< 0.05%"},
+    },
+    {
+        "id": "SENS_VIB101",
+        "label": "VIB-101 Tri-Axial Vibration Probe",
+        "category": "sensor",
+        "clearance": "viewer",
+        "description": "Continuous piezoelectric accelerometer monitoring P-101A pump bearing housing.",
+        "properties": {"rms_velocity_mms": "4.2", "iso_limit_mms": "4.5", "status": "WARNING_ELEVATED"},
+    },
+    {
+        "id": "SENS_AT501",
+        "label": "AT-501 H2S Gas Toxic Detector",
+        "category": "sensor",
+        "clearance": "viewer",
+        "description": "Electrochemical trace gas sensor array deployed in hydrocracker compressor shelter.",
+        "properties": {"range": "0 - 100 ppm", "current_val": "0.4 ppm [NORMAL]", "calibration_due": "2026-11-15"},
     },
 
-    # Failure Modes & Defects (Level 2: Operator / Engineer)
+    # -------------------------------------------------------------
+    # 4. Failure Modes & Defects (Level 2: Operator / Engineer)
+    # -------------------------------------------------------------
     {
         "id": "DEF_CORROSION_01",
         "label": "Atmospheric Pitting Corrosion",
         "category": "defect",
         "clearance": "operator",
         "description": "Localized chloride and marine salt pitting on external valve bonnet flanges.",
-        "properties": {"pit_depth_mm": "1.4", "threshold_mm": "1.8", "risk": "MODERATE"},
+        "properties": {"pit_depth_mm": "1.4", "threshold_mm": "1.8", "risk": "MODERATE", "ndt_technique": "Phased Array UT"},
     },
     {
         "id": "DEF_GALLING_02",
@@ -137,7 +203,7 @@ RAW_NODES = [
         "category": "defect",
         "clearance": "operator",
         "description": "Micro-welding and mechanical binding on 410 SS stem during partial stroke test.",
-        "properties": {"actuator_torque_pct": "142%", "status": "REQUIRES_LUBRICATION"},
+        "properties": {"actuator_torque_pct": "142%", "status": "REQUIRES_LUBRICATION", "remedy": "Molykote paste"},
     },
     {
         "id": "DEF_PACKING_03",
@@ -145,7 +211,7 @@ RAW_NODES = [
         "category": "defect",
         "clearance": "operator",
         "description": "High-pressure graphite packing elasticity loss due to thermal oxidation in sour H2S service.",
-        "properties": {"leakage_rate_ppm": "420", "threshold_ppm": "100", "remedy": "Chesterton 1600"},
+        "properties": {"leakage_rate_ppm": "420", "threshold_ppm": "100", "remedy": "Chesterton 1600 replacement"},
     },
     {
         "id": "DEF_VAPOR_SURGE",
@@ -153,10 +219,20 @@ RAW_NODES = [
         "category": "defect",
         "clearance": "operator",
         "description": "Excess liquid slugging causing sudden vapor pressure excursion above 2.8 bar.",
-        "properties": {"mitigation": "Immediate FKOD bottom pumpout & steam ratio increase"},
+        "properties": {"mitigation": "Immediate FKOD bottom pumpout & steam ratio increase", "criticality": "HIGH"},
+    },
+    {
+        "id": "DEF_CAVITATION",
+        "label": "Impeller Vane Cavitation Erosion",
+        "category": "defect",
+        "clearance": "operator",
+        "description": "Low suction NPSHa margin causing vapor bubble collapse and micro-pitting on P-101A first stage impeller.",
+        "properties": {"npsh_margin_m": "0.35", "vibration_signature": "High Frequency Acoustic Shock"},
     },
 
-    # Standards & Compliance SOPs (Level 1 & 2)
+    # -------------------------------------------------------------
+    # 5. Standards & Compliance SOPs (Level 1 & 2)
+    # -------------------------------------------------------------
     {
         "id": "SOP_MRPL_QA",
         "label": "MRPL Hydrocarbon Quality Specification",
@@ -189,8 +265,18 @@ RAW_NODES = [
         "description": "Standard operating procedure for high-pressure alarm response on Knock-Out Drum.",
         "properties": {"action_1": "Open bypass XV-4012", "action_2": "Energize assist steam", "action_3": "Trip feed"},
     },
+    {
+        "id": "SOP_OSHA_PSM",
+        "label": "OSHA PSM 1910.119 Process Safety",
+        "category": "sop",
+        "clearance": "operator",
+        "description": "Mandatory Management of Change (MOC) and Mechanical Integrity verification framework.",
+        "properties": {"audit_frequency": "3 Years", "compliance_tier": "MANDATORY_FEDERAL"},
+    },
 
-    # Classified & Secret Enterprise Assets (Level 3: Admin Only)
+    # -------------------------------------------------------------
+    # 6. Classified Enterprise Assets (Level 3: Admin Only)
+    # -------------------------------------------------------------
     {
         "id": "SEC_CATALYST_FORMULA",
         "label": "Proprietary Hydrocracking Catalyst Ratio",
@@ -218,29 +304,43 @@ RAW_NODES = [
 ]
 
 RAW_EDGES = [
+    # Units -> Units & Pipelines
+    {"source": "UNIT_CDU01", "target": "UNIT_DS02", "label": "RECEIVES_DESALTED_CRUDE", "clearance": "viewer"},
+    {"source": "UNIT_CDU01", "target": "UNIT_HC04", "label": "FEEDS_VACUUM_GAS_OIL", "clearance": "viewer"},
+    {"source": "UNIT_CDU01", "target": "UNIT_DCU03", "label": "TRANSFERS_VACUUM_RESIDUE", "clearance": "viewer"},
+    {"source": "UNIT_HGU02", "target": "UNIT_HC04", "label": "SUPPLIES_HIGH_PURITY_H2", "clearance": "viewer"},
+    {"source": "UNIT_HC04", "target": "UNIT_FLARE", "label": "RELIEVES_OVERPRESSURE_TO", "clearance": "viewer"},
+
     # Unit -> Equipment
     {"source": "UNIT_DS02", "target": "EQ_MOV4102B", "label": "CONTAINS", "clearance": "viewer"},
     {"source": "UNIT_HC04", "target": "EQ_V401", "label": "CONTAINS", "clearance": "viewer"},
     {"source": "UNIT_FLARE", "target": "EQ_FKOD101", "label": "CONTAINS", "clearance": "viewer"},
     {"source": "UNIT_HC04", "target": "EQ_E302", "label": "CONTAINS", "clearance": "viewer"},
+    {"source": "UNIT_CDU01", "target": "EQ_P101A", "label": "OPERATES", "clearance": "viewer"},
+    {"source": "UNIT_DCU03", "target": "EQ_C201", "label": "OPERATES", "clearance": "viewer"},
 
     # Equipment -> Sensors
     {"source": "EQ_FKOD101", "target": "SENS_PT4011", "label": "MONITORED_BY", "clearance": "viewer"},
     {"source": "EQ_E302", "target": "SENS_TT302", "label": "MONITORED_BY", "clearance": "viewer"},
+    {"source": "EQ_P101A", "target": "SENS_VIB101", "label": "MONITORED_BY", "clearance": "viewer"},
+    {"source": "EQ_C201", "target": "SENS_AT501", "label": "SURROUNDED_BY", "clearance": "viewer"},
 
     # Equipment -> Defects (Operator)
     {"source": "EQ_MOV4102B", "target": "DEF_CORROSION_01", "label": "VULNERABLE_TO", "clearance": "operator"},
     {"source": "EQ_V401", "target": "DEF_GALLING_02", "label": "VULNERABLE_TO", "clearance": "operator"},
     {"source": "EQ_V401", "target": "DEF_PACKING_03", "label": "VULNERABLE_TO", "clearance": "operator"},
     {"source": "EQ_FKOD101", "target": "DEF_VAPOR_SURGE", "label": "RISK_OF", "clearance": "operator"},
+    {"source": "EQ_P101A", "target": "DEF_CAVITATION", "label": "PRONE_TO", "clearance": "operator"},
 
     # Defects -> Standards & SOPs (Operator)
     {"source": "DEF_CORROSION_01", "target": "SOP_API_570", "label": "REMEDIATED_BY", "clearance": "operator"},
     {"source": "DEF_PACKING_03", "target": "SOP_ASME_B16", "label": "SPECIFIES_REPLACEMENT", "clearance": "operator"},
     {"source": "DEF_VAPOR_SURGE", "target": "SOP_FLARE_EMERGENCY", "label": "TRIGGERS", "clearance": "operator"},
+    {"source": "DEF_CAVITATION", "target": "SOP_OSHA_PSM", "label": "LOGGED_UNDER", "clearance": "operator"},
 
     # Lab / Process -> QA Specs
     {"source": "UNIT_LAB", "target": "SOP_MRPL_QA", "label": "GOVERNS_BATCHES", "clearance": "viewer"},
+    {"source": "UNIT_HC04", "target": "SOP_MRPL_QA", "label": "AUDITED_AGAINST", "clearance": "viewer"},
 
     # Classified Admin Edges (Admin Only)
     {"source": "UNIT_HC04", "target": "SEC_CATALYST_FORMULA", "label": "UTILIZES_SECRET_RECIPE", "clearance": "admin"},
@@ -249,14 +349,14 @@ RAW_EDGES = [
 ]
 
 
-@router.get("", summary="Fetch company knowledge graph filtered by role authorization")
+@router.get("", summary="Fetch company knowledge graph filtered by role authorization and dynamic documents")
 async def get_knowledge_graph(
     request: Request,
     clearance: Optional[str] = Query(None, description="Requested clearance level override: viewer, operator, admin"),
 ):
     """
     Returns nodes and edges filtered according to user role authorization.
-    Higher clearance levels see more granular, proprietary, and restricted nodes.
+    Dynamically attaches indexed documents from the local ChromaDB / doc store into the graph!
     """
     # Detect current user role from session
     current_role = "viewer"
@@ -274,14 +374,14 @@ async def get_knowledge_graph(
     effective_role = clearance if clearance in ROLE_LEVELS else current_role
     effective_level = ROLE_LEVELS.get(effective_role, 1)
 
-    # Filter nodes based on authorization level
-    filtered_nodes = []
+    # 1. Base Nodes filtering
+    filtered_nodes: List[Dict[str, Any]] = []
     hidden_node_count = 0
 
     for node in RAW_NODES:
         node_req_level = ROLE_LEVELS.get(node["clearance"], 1)
         if effective_level >= node_req_level:
-            filtered_nodes.append(node)
+            filtered_nodes.append(dict(node))
         else:
             hidden_node_count += 1
             # For viewer, show a redacted placeholder for classified nodes to demonstrate RBAC gating
@@ -295,11 +395,59 @@ async def get_knowledge_graph(
                     "properties": {"access_status": "DENIED_RBAC_GATE"},
                 })
 
+    # 2. Dynamic Ingested Documents from Local Document Service
+    dynamic_doc_edges: List[Dict[str, Any]] = []
+    try:
+        if hasattr(request.app.state, "doc_service"):
+            indexed_docs = request.app.state.doc_service.list_documents()
+            for doc in indexed_docs:
+                doc_node_id = f"DOC_{doc.document_id[:8]}"
+                doc_node = {
+                    "id": doc_node_id,
+                    "label": f"📄 {doc.filename}",
+                    "category": "document",
+                    "clearance": "viewer",
+                    "description": f"Live Ingested Sovereign Document ({doc.file_type.upper()}) stored in local ChromaDB with {doc.chunk_count} indexed chunks.",
+                    "properties": {
+                        "filename": doc.filename,
+                        "file_type": doc.file_type.upper(),
+                        "chunks_indexed": str(doc.chunk_count),
+                        "vector_store": "ChromaDB Local",
+                        "status": "READY_FOR_RAG",
+                    },
+                }
+                filtered_nodes.append(doc_node)
+
+                # Dynamically link document to Central QA Lab and SOPs or relevant unit
+                fn_lower = doc.filename.lower()
+                target_link = "UNIT_LAB"
+                if "valve" in fn_lower or "mov" in fn_lower:
+                    target_link = "EQ_MOV4102B"
+                elif "flare" in fn_lower or "fkod" in fn_lower:
+                    target_link = "UNIT_FLARE"
+                elif "hydro" in fn_lower or "catalyst" in fn_lower:
+                    target_link = "UNIT_HC04"
+                elif "coker" in fn_lower or "compressor" in fn_lower:
+                    target_link = "UNIT_DCU03"
+                elif "spec" in fn_lower or "qa" in fn_lower or "sop" in fn_lower:
+                    target_link = "SOP_MRPL_QA"
+
+                dynamic_doc_edges.append({
+                    "source": doc_node_id,
+                    "target": target_link,
+                    "label": "INDEXED_REFERENCE_FOR",
+                    "clearance": "viewer",
+                })
+    except Exception as exc:
+        logger.warning("Could not fetch live documents for knowledge graph: %s", exc)
+
     visible_node_ids = {n["id"] for n in filtered_nodes}
 
-    # Filter edges
-    filtered_edges = []
-    for edge in RAW_EDGES:
+    # 3. Filter edges
+    filtered_edges: List[Dict[str, Any]] = []
+    all_candidate_edges = RAW_EDGES + dynamic_doc_edges
+
+    for edge in all_candidate_edges:
         edge_req_level = ROLE_LEVELS.get(edge["clearance"], 1)
         if (
             effective_level >= edge_req_level
@@ -323,6 +471,7 @@ async def get_knowledge_graph(
             "sensor": "Telemetry & Sensor Probes",
             "defect": "NDT Defects & Failure Modes (Level 2+)",
             "sop": "Standards & Compliance SOPs",
+            "document": "Live Ingested Documents (ChromaDB)",
             "classified": "Sovereign Classified Formulas & Keys (Level 3)",
         },
     }
