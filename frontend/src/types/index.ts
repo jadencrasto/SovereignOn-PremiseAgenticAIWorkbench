@@ -237,7 +237,8 @@ export type ActiveTab =
   | 'audit'
   | 'health'
   | 'security'
-  | 'settings';
+  | 'settings'
+  | 'roles';
 
 
 
