@@ -92,7 +92,10 @@ class DocumentParser:
         doc_id = cls._make_doc_id(filename, content)
 
         if suffix == ".pdf":
-            text, metadata = cls._parse_pdf(content)
+            try:
+                text, metadata = cls._parse_pdf(content)
+            except Exception as exc:
+                raise ValueError(f"Failed to parse PDF '{filename}': {exc}") from exc
         elif suffix == ".docx":
             text, metadata = cls._parse_docx(content)
         else:
@@ -116,37 +119,326 @@ class DocumentParser:
 
     @staticmethod
     def _parse_pdf(content: bytes) -> tuple[str, dict]:
-        """Extract text from PDF page by page."""
+        """
+        Extract text from PDF with structured table preservation.
+
+        3-tier extraction hierarchy:
+          1. pdfplumber (if installed) — structured table extraction
+          2. Lightweight line-based heuristic — detect tabular patterns
+          3. pypdf extract_text() — final fallback (existing behavior)
+
+        A failure in table detection NEVER causes the entire PDF ingestion to fail.
+        """
         try:
             from pypdf import PdfReader
         except ImportError:
             raise RuntimeError("pypdf is required for PDF parsing: pip install pypdf")
 
         reader = PdfReader(io.BytesIO(content))
+        page_count = len(reader.pages)
+        pages = []
+
+        # Tier 1: Try pdfplumber for structured table extraction
+        pdfplumber_available = False
+        try:
+            import pdfplumber
+            pdfplumber_available = True
+        except ImportError:
+            pass
+
+        if pdfplumber_available:
+            try:
+                pdf_pl = pdfplumber.open(io.BytesIO(content))
+                table_settings = {"snap_x_tolerance": 6, "join_x_tolerance": 6}
+
+                for page_num, pl_page in enumerate(pdf_pl.pages, start=1):
+                    page_parts = []
+                    try:
+                        found_tables = []
+                        if hasattr(pl_page, "find_tables"):
+                            try:
+                                found_tables = pl_page.find_tables(table_settings) or []
+                            except Exception:
+                                found_tables = []
+
+                        table_bboxes = [t.bbox for t in found_tables if hasattr(t, "bbox") and t.bbox]
+
+                        raw_tables = []
+                        for t in found_tables:
+                            if hasattr(t, "extract"):
+                                extr = t.extract()
+                                if extr:
+                                    raw_tables.append(extr)
+                        if not raw_tables and hasattr(pl_page, "extract_tables"):
+                            try:
+                                raw_tables = pl_page.extract_tables() or []
+                            except Exception:
+                                raw_tables = []
+                        if not raw_tables and hasattr(pl_page, "extract_tables"):
+                            try:
+                                raw_tables = pl_page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"}) or []
+                            except Exception:
+                                raw_tables = []
+
+                        # Extract tables as structured Markdown tables
+                        md_tables = []
+                        for raw_table in raw_tables:
+                            if not raw_table or len(raw_table) < 1:
+                                continue
+
+                            num_cols = max(len(r) for r in raw_table)
+                            # Identify columns that have at least one non-empty cell across rows
+                            col_has_content = [
+                                any(c_idx < len(r) and r[c_idx] is not None and str(r[c_idx]).strip() != "" for r in raw_table)
+                                for c_idx in range(num_cols)
+                            ]
+
+                            cleaned_rows = []
+                            for row in raw_table:
+                                row_padded = list(row) + [""] * (num_cols - len(row))
+                                cleaned = [
+                                    str(cell or "").strip().replace("\n", " ").replace("|", "\\|")
+                                    for i, cell in enumerate(row_padded)
+                                    if col_has_content[i]
+                                ]
+                                if any(cleaned):
+                                    cleaned_rows.append(cleaned)
+
+                            if cleaned_rows and len(cleaned_rows) >= 2:
+                                headers = cleaned_rows[0]
+                                md_lines = [
+                                    "| " + " | ".join(headers) + " |",
+                                    "| " + " | ".join(["---"] * len(headers)) + " |",
+                                ]
+                                for row_cells in cleaned_rows[1:]:
+                                    md_lines.append("| " + " | ".join(row_cells) + " |")
+                                md_tables.append("\n".join(md_lines))
+
+                        # Extract text outside tables by filtering out table bounding boxes
+                        if table_bboxes:
+                            def not_within_tables(obj):
+                                ox0 = obj.get("x0", 0)
+                                ox1 = obj.get("x1", 0)
+                                otop = obj.get("top", 0)
+                                obottom = obj.get("bottom", 0)
+                                for bx0, btop, bx1, bbottom in table_bboxes:
+                                    if (ox0 >= bx0 - 2 and ox1 <= bx1 + 2 and otop >= btop - 2 and obottom <= bbottom + 2):
+                                        return False
+                                return True
+                            try:
+                                filtered_page = pl_page.filter(not_within_tables)
+                                non_table_text = filtered_page.extract_text() or ""
+                            except Exception:
+                                non_table_text = pl_page.extract_text() or ""
+                        else:
+                            non_table_text = pl_page.extract_text() or ""
+
+                        if non_table_text.strip():
+                            # If no tables were detected by pdfplumber on this page, run table heuristic
+                            if not md_tables:
+                                non_table_text = DocumentParser._apply_table_heuristic(non_table_text)
+                            page_parts.append(non_table_text.strip())
+                        if md_tables:
+                            page_parts.extend(md_tables)
+
+                    except Exception as page_exc:
+                        # Tier 1 failed for this page — fall through to tier 3 for this page
+                        logger.debug("pdfplumber failed for page %d: %s", page_num, page_exc)
+                        fallback_text = reader.pages[page_num - 1].extract_text() or ""
+                        if fallback_text.strip():
+                            page_parts.append(fallback_text.strip())
+
+                    if page_parts:
+                        combined = "\n\n".join(page_parts)
+                        pages.append(f"[Page {page_num}]\n{combined}")
+
+                pdf_pl.close()
+
+                if pages:
+                    text = "\n\n".join(pages)
+                    metadata = {"page_count": page_count, "source_format": "pdf", "extraction_method": "pdfplumber"}
+                    logger.debug("PDF parsed (pdfplumber): %d pages, %d chars", page_count, len(text))
+                    return text, metadata
+                # If pdfplumber produced no output, fall through to tier 3
+            except Exception as exc:
+                logger.debug("pdfplumber extraction failed entirely: %s — falling back to pypdf", exc)
+
+        # Tier 2 & 3: pypdf extract_text with lightweight table heuristic
         pages = []
         for page_num, page in enumerate(reader.pages, start=1):
             page_text = page.extract_text() or ""
-            if page_text.strip():
-                pages.append(f"[Page {page_num}]\n{page_text.strip()}")
+            if not page_text.strip():
+                continue
+
+            # Tier 2: Lightweight heuristic — detect lines with multiple whitespace-separated columns
+            enhanced_text = DocumentParser._apply_table_heuristic(page_text)
+            pages.append(f"[Page {page_num}]\n{enhanced_text.strip()}")
 
         text = "\n\n".join(pages)
-        metadata = {"page_count": len(reader.pages), "source_format": "pdf"}
-        logger.debug("PDF parsed: %d pages, %d chars", len(reader.pages), len(text))
+        metadata = {
+            "page_count": page_count,
+            "source_format": "pdf",
+            "extraction_method": "pypdf" + ("+heuristic" if text != "\n\n".join(
+                f"[Page {i+1}]\n{(reader.pages[i].extract_text() or '').strip()}"
+                for i in range(page_count) if (reader.pages[i].extract_text() or '').strip()
+            ) else ""),
+        }
+        logger.debug("PDF parsed (pypdf): %d pages, %d chars", page_count, len(text))
         return text, metadata
 
     @staticmethod
+    def _apply_table_heuristic(page_text: str) -> str:
+        """
+        Lightweight heuristic to detect tabular patterns in extracted PDF text.
+
+        Looks for consecutive lines with 2+ whitespace-separated columns
+        and formats them as Markdown tables with aligned rows and padded blank cells.
+
+        Returns the page text with detected tables converted to Markdown format.
+        If no tables are detected, returns the text unchanged.
+        """
+        lines = page_text.split("\n")
+        result_parts = []
+        table_buffer = []
+
+        def _flush_table(buf):
+            """Convert buffered table-like lines to Markdown table with preserved columns."""
+            if len(buf) < 2:
+                return "\n".join(buf)
+
+            # Strategy 1: Positional column spans from header
+            header_line = buf[0]
+            header_matches = list(re.finditer(r"\S+(?:\s\S+)*?(?=\s{2,}|\t|$)", header_line.strip()))
+
+            if len(header_matches) >= 2:
+                col_starts = [m.start() for m in header_matches]
+                headers = [m.group().strip().replace("|", "\\|") for m in header_matches]
+                num_cols = len(headers)
+
+                parsed_rows = [headers]
+                use_positional = True
+                for line in buf[1:]:
+                    row_cells = []
+                    for i in range(num_cols):
+                        start = col_starts[i]
+                        if i + 1 < num_cols:
+                            next_start = col_starts[i + 1]
+                            cell_text = line[start:next_start] if len(line) > start else ""
+                        else:
+                            cell_text = line[start:] if len(line) > start else ""
+                        row_cells.append(cell_text.strip().replace("|", "\\|"))
+                    if not any(row_cells):
+                        use_positional = False
+                        break
+                    parsed_rows.append(row_cells)
+
+                if use_positional and len(parsed_rows) >= 2:
+                    md_lines = [
+                        "| " + " | ".join(parsed_rows[0]) + " |",
+                        "| " + " | ".join(["---"] * num_cols) + " |",
+                    ]
+                    for row in parsed_rows[1:]:
+                        md_lines.append("| " + " | ".join(row) + " |")
+                    return "\n".join(md_lines)
+
+            # Strategy 2: Fallback to token splitting
+            parsed_rows = []
+            for line in buf:
+                cells = [c.strip() for c in re.split(r"\s{2,}|\t", line.strip()) if c.strip()]
+                if cells:
+                    parsed_rows.append(cells)
+            if len(parsed_rows) < 2:
+                return "\n".join(buf)
+
+            max_cols = max(len(r) for r in parsed_rows)
+            if max_cols < 2:
+                return "\n".join(buf)
+
+            headers = parsed_rows[0] + [""] * (max_cols - len(parsed_rows[0]))
+            headers = [c.replace("|", "\\|") for c in headers]
+            md_lines = [
+                "| " + " | ".join(headers) + " |",
+                "| " + " | ".join(["---"] * max_cols) + " |",
+            ]
+            for row in parsed_rows[1:]:
+                padded = row + [""] * (max_cols - len(row))
+                cleaned = [c.replace("|", "\\|") for c in padded]
+                md_lines.append("| " + " | ".join(cleaned) + " |")
+
+            return "\n".join(md_lines)
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                if table_buffer:
+                    result_parts.append(_flush_table(table_buffer))
+                    table_buffer = []
+                result_parts.append("")
+                continue
+
+            # Heuristic: line has 2+ segments separated by 2+ spaces or tabs
+            segments = [c.strip() for c in re.split(r"\s{2,}|\t", stripped) if c.strip()]
+            if len(segments) >= 2:
+                table_buffer.append(stripped)
+            else:
+                if table_buffer:
+                    result_parts.append(_flush_table(table_buffer))
+                    table_buffer = []
+                result_parts.append(stripped)
+
+        if table_buffer:
+            result_parts.append(_flush_table(table_buffer))
+
+        return "\n".join(result_parts)
+
+    @staticmethod
     def _parse_docx(content: bytes) -> tuple[str, dict]:
-        """Extract paragraphs from a DOCX file."""
+        """Extract paragraphs and tables from a DOCX file in document body order."""
         try:
             from docx import Document as DocxDocument
+            from docx.table import Table as DocxTable
+            from docx.text.paragraph import Paragraph as DocxParagraph
+            from docx.oxml.ns import qn
         except ImportError:
             raise RuntimeError("python-docx is required: pip install python-docx")
 
         doc = DocxDocument(io.BytesIO(content))
-        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        text = "\n\n".join(paragraphs)
+
+        # Iterate body elements in document order to interleave paragraphs and tables
+        parts = []
+        table_count = 0
+        paragraph_count = 0
+
+        for element in doc.element.body:
+            tag = element.tag.split("}")[-1] if "}" in element.tag else element.tag
+
+            if tag == "p":
+                # Paragraph element
+                para = DocxParagraph(element, doc)
+                text = para.text.strip()
+                if text:
+                    parts.append(text)
+                    paragraph_count += 1
+
+            elif tag == "tbl":
+                # Table element — convert to Markdown table
+                table = DocxTable(element, doc)
+                table_count += 1
+                md_lines = []
+                for r_idx, row in enumerate(table.rows):
+                    cells = [cell.text.strip().replace("|", "\\|") for cell in row.cells]
+                    md_lines.append("| " + " | ".join(cells) + " |")
+                    if r_idx == 0:
+                        # Add Markdown header separator after first row
+                        md_lines.append("| " + " | ".join(["---"] * len(cells)) + " |")
+                if md_lines:
+                    parts.append("\n".join(md_lines))
+
+        text = "\n\n".join(parts)
         metadata = {
-            "paragraph_count": len(paragraphs),
+            "paragraph_count": paragraph_count,
+            "table_count": table_count,
+            "has_tables": table_count > 0,
             "source_format": "docx",
         }
         # Extract core properties if available
@@ -158,7 +450,7 @@ class DocumentParser:
                 metadata["author"] = cp.author
         except Exception:
             pass
-        logger.debug("DOCX parsed: %d paragraphs, %d chars", len(paragraphs), len(text))
+        logger.debug("DOCX parsed: %d paragraphs, %d tables, %d chars", paragraph_count, table_count, len(text))
         return text, metadata
 
     @staticmethod

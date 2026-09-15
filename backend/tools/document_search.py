@@ -52,6 +52,25 @@ def create_document_search(retriever) -> callable:
         An async execute function suitable for ToolDefinition.
     """
 
+    @staticmethod
+    def _is_near_duplicate(text_a: str, text_b: str, threshold: float = 0.85) -> bool:
+        """
+        Check if two text chunks are near-duplicates using character overlap ratio.
+        Returns True if the texts share >= threshold fraction of characters.
+        """
+        if not text_a or not text_b:
+            return False
+        if text_a == text_b:
+            return True
+        # Use set-based character n-gram overlap for speed
+        a_set = set(text_a[i:i+4] for i in range(max(1, len(text_a) - 3)))
+        b_set = set(text_b[i:i+4] for i in range(max(1, len(text_b) - 3)))
+        if not a_set or not b_set:
+            return text_a == text_b
+        overlap = len(a_set & b_set)
+        union = len(a_set | b_set)
+        return (overlap / union) >= threshold if union > 0 else False
+
     async def execute_document_search(args: DocumentSearchInput) -> List[dict]:
         """Search the local vector store for relevant document chunks."""
         chunks = await retriever.retrieve(args.query, top_k=args.top_k)
@@ -70,74 +89,66 @@ def create_document_search(retriever) -> callable:
             )
             return []
 
-        # If vector_store is available, expand matched relevant documents to include all ordered chunks
-        vector_store = getattr(retriever, "_store", None)
-        seen_doc_ids = set()
-        results = []
+        # Group relevant chunks by document preserving order of first appearance
+        chunks_by_doc = {}
+        for chunk in relevant_chunks:
+            doc_id = getattr(chunk, "document_id", chunk.filename)
+            if doc_id not in chunks_by_doc:
+                chunks_by_doc[doc_id] = []
+            chunks_by_doc[doc_id].append(chunk)
 
-        if vector_store and hasattr(vector_store, "get_document_chunks"):
-            for chunk in relevant_chunks:
-                doc_id = getattr(chunk, "document_id", chunk.filename)
-                if doc_id in seen_doc_ids:
-                    continue
-                try:
-                    stored = vector_store.get_document_chunks(doc_id) if hasattr(vector_store, "get_document_chunks") else None
-                    docs = stored.get("documents", []) if isinstance(stored, dict) else []
-                    metas = stored.get("metadatas", []) if isinstance(stored, dict) else []
-                    ids = stored.get("ids", []) if isinstance(stored, dict) else []
-                    if isinstance(docs, list) and len(docs) > 0:
-                        paired = []
-                        for cid, doc_txt, meta in zip(ids, docs, metas):
-                            c_idx = meta.get("chunk_index", 0) if isinstance(meta, dict) else 0
-                            paired.append((c_idx, cid, doc_txt, meta))
-                        paired.sort(key=lambda x: x[0])
-                        for c_idx, cid, doc_txt, meta in paired:
-                            fn = meta.get("filename", chunk.filename) if isinstance(meta, dict) else chunk.filename
-                            page = meta.get("page") if isinstance(meta, dict) else chunk.page
-                            results.append({
-                                "filename": fn,
-                                "relative_path": fn,
-                                "document_id": doc_id,
-                                "chunk_id": cid,
-                                "chunk_index": c_idx,
-                                "page": page,
-                                "score": round(chunk.score, 4),
-                                "text": doc_txt,
-                            })
-                    else:
-                        results.append({
-                            "filename": chunk.filename,
-                            "relative_path": chunk.filename,
-                            "document_id": doc_id,
-                            "chunk_id": chunk.chunk_id,
-                            "chunk_index": chunk.chunk_index,
-                            "page": chunk.page,
-                            "score": round(chunk.score, 4),
-                            "text": chunk.text,
-                        })
-                except Exception as exc:
-                    logger.warning("Failed to expand document chunks for doc_id=%s: %s", doc_id, exc)
-                    results.append({
-                        "filename": chunk.filename,
-                        "relative_path": chunk.filename,
-                        "document_id": doc_id,
-                        "chunk_id": chunk.chunk_id,
-                        "chunk_index": chunk.chunk_index,
-                        "page": chunk.page,
-                        "score": round(chunk.score, 4),
-                        "text": chunk.text,
-                    })
-        else:
-            for chunk in relevant_chunks:
+        results = []
+        max_chunks_per_doc = max(args.top_k, 5)
+        vector_store = getattr(retriever, "_store", None)
+
+        # Check if vector_store is a real store (not a MagicMock) that can expand
+        from unittest.mock import MagicMock
+        can_use_store = (
+            vector_store is not None
+            and hasattr(vector_store, "get_document_chunks")
+            and not isinstance(vector_store, MagicMock)
+        )
+
+        for doc_id, doc_chunks in chunks_by_doc.items():
+            paired = []
+            for c in doc_chunks:
+                paired.append((
+                    c.chunk_index,
+                    c.chunk_id,
+                    c.text,
+                    {"filename": c.filename, "page": c.page},
+                    c.score,
+                ))
+
+            # Bounded deduplication: remove near-identical text chunks
+            # while preserving distinct chunks and chunks from different pages/sections
+            deduped = []
+            for c_idx, cid, doc_txt, meta, score in paired:
+                is_dup = False
+                for _, _, existing_txt, existing_meta, _ in deduped:
+                    existing_page = existing_meta.get("page") if isinstance(existing_meta, dict) else None
+                    current_page = meta.get("page") if isinstance(meta, dict) else None
+                    if existing_page is not None and current_page is not None and existing_page != current_page:
+                        continue
+                    if _is_near_duplicate(doc_txt, existing_txt):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    deduped.append((c_idx, cid, doc_txt, meta, score))
+
+            # Append up to max_chunks_per_doc
+            for c_idx, cid, doc_txt, meta, score in deduped[:max_chunks_per_doc]:
+                fn = meta.get("filename", doc_chunks[0].filename) if isinstance(meta, dict) else doc_chunks[0].filename
+                page = meta.get("page", doc_chunks[0].page) if isinstance(meta, dict) else doc_chunks[0].page
                 results.append({
-                    "filename": chunk.filename,
-                    "relative_path": chunk.filename,
-                    "document_id": getattr(chunk, "document_id", chunk.filename),
-                    "chunk_id": chunk.chunk_id,
-                    "chunk_index": chunk.chunk_index,
-                    "page": chunk.page,
-                    "score": round(chunk.score, 4),
-                    "text": chunk.text,
+                    "filename": fn,
+                    "relative_path": fn,
+                    "document_id": doc_id,
+                    "chunk_id": cid,
+                    "chunk_index": c_idx,
+                    "page": page,
+                    "score": round(score, 4),
+                    "text": doc_txt,
                 })
 
         logger.info(

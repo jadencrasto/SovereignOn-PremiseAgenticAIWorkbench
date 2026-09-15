@@ -15,7 +15,6 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 import {
   Shield,
   Lock,
-  Unlock,
   Key,
   Users,
   Sliders,
@@ -24,21 +23,13 @@ import {
   FileText,
   Activity,
   Terminal,
-  FileSpreadsheet,
   ArrowRight,
-  Sparkles,
-  Server,
-  Zap,
   Check,
   X,
   Plus,
   Trash2,
-  ExternalLink,
-  Layers,
-  Database,
   Cpu,
   History,
-  AlertOctagon,
 } from 'lucide-react';
 import type { UserRole } from '../../types';
 

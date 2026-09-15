@@ -7,18 +7,12 @@
 import React, { useState, useEffect } from 'react';
 import { useWorkbench } from '../../context/WorkbenchContext';
 import {
-  FileSpreadsheet,
-  Eye,
   AlertTriangle,
   Play,
   CheckCircle2,
   ArrowRight,
   ShieldCheck,
-  Cpu,
-  Layers,
   FileCheck,
-  Activity,
-  Zap,
 } from 'lucide-react';
 
 interface DemoScenario {
@@ -38,7 +32,7 @@ interface DemoScenario {
 
 export const DemoScenarioLauncher: React.FC = () => {
   const [scenarios, setScenarios] = useState<DemoScenario[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [, setLoading] = useState<boolean>(true);
   const [selectedScenario, setSelectedScenario] = useState<DemoScenario | null>(null);
 
   const { setActiveTab, addToast } = useWorkbench();

@@ -18,6 +18,7 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const defaultHeaders: Record<string, string> = {
     Accept: 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
   };
 
   if (!(options.body instanceof FormData)) {
@@ -26,6 +27,7 @@ export async function apiRequest<T>(
 
   const response = await fetch(url, {
     ...options,
+    credentials: options.credentials ?? 'include',
     headers: {
       ...defaultHeaders,
       ...options.headers,
@@ -73,9 +75,11 @@ export async function streamSSE(
 ): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
+      'X-Requested-With': 'XMLHttpRequest',
     },
     body: JSON.stringify(payload),
     signal,
@@ -215,7 +219,11 @@ export async function streamSSEFromFormData(
 ): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
-    headers: { Accept: 'text/event-stream' },
+    credentials: 'include',
+    headers: {
+      Accept: 'text/event-stream',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
     body: formData,
     signal,
   });

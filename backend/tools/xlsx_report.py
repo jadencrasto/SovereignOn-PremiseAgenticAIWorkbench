@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend.tools.safety import atomic_write_file, sanitize_filename, validate_path_within
 
@@ -38,14 +38,17 @@ class XlsxReportInput(BaseModel):
         min_length=3,
         description="Report title, e.g. 'MRPL Refinery Hydrocarbon Stream Lab Compliance Report'.",
     )
-    headers: List[str] = Field(
-        ...,
-        min_length=1,
+    headers: Optional[List[str]] = Field(
+        default=None,
         description="List of column headers, e.g. ['Sample ID', 'Parameter', 'Measured Value', 'Standard', 'Status'].",
     )
-    rows: List[List[Any]] = Field(
-        ...,
+    rows: Optional[List[List[Any]]] = Field(
+        default=None,
         description="Matrix of data rows matching the header columns.",
+    )
+    table: Optional[List[List[Any]]] = Field(
+        default=None,
+        description="Optional full 2D table matrix where first row contains headers.",
     )
     summary_notes: Optional[str] = Field(
         default="",
@@ -55,6 +58,46 @@ class XlsxReportInput(BaseModel):
         default=True,
         description="Whether to overwrite if file exists.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_table_and_rows(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # If 2D table was provided instead of separate headers/rows
+            tbl = data.get("table")
+            if tbl and isinstance(tbl, list) and len(tbl) > 0:
+                if not data.get("headers"):
+                    data["headers"] = [str(cell) for cell in tbl[0]]
+                    if data.get("rows") is None:
+                        data["rows"] = tbl[1:]
+
+            # If rows contains dicts instead of lists
+            rows = data.get("rows")
+            headers = data.get("headers")
+            if rows and isinstance(rows, list) and len(rows) > 0 and isinstance(rows[0], dict):
+                if not headers:
+                    headers = [str(k) for k in rows[0].keys()]
+                    data["headers"] = headers
+                norm_rows = []
+                for r in rows:
+                    if isinstance(r, dict):
+                        norm_rows.append([r.get(h, "") for h in headers])
+                    elif isinstance(r, list):
+                        norm_rows.append(r)
+                data["rows"] = norm_rows
+
+            # Ensure headers is a list of strings
+            if data.get("headers") is None:
+                data["headers"] = ["Item", "Details"]
+            else:
+                data["headers"] = [str(h) for h in data["headers"]]
+
+            # Ensure rows is a list of lists
+            if data.get("rows") is None:
+                data["rows"] = []
+            else:
+                data["rows"] = [r if isinstance(r, list) else [r] for r in data["rows"]]
+        return data
 
 
 def create_xlsx_report(sandbox_dir: Path) -> callable:

@@ -13,9 +13,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from backend.auth.dependencies import require_permission
+from backend.auth.models import Permission, User
 from backend.config import settings
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
@@ -89,6 +91,8 @@ DEMO_SCENARIOS = [
 
 
 @router.get("/scenarios", summary="List preloaded industrial demo scenarios")
-async def list_scenarios():
+async def list_scenarios(
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """Returns the list of 3 official industrial demo scenarios with metadata and prompts."""
     return {"scenarios": DEMO_SCENARIOS}

@@ -54,6 +54,23 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+_DUMMY_ARGON2_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$1EZVwjdOXqYe9MNv+R7aCA$VHhIAoDpN44zJKydGtOdTaCmYExqz6E12e5ywqqjjF8"
+)
+
+
+def dummy_verify_password(password: str) -> bool:
+    """
+    Perform dummy Argon2id verification in constant time when a requested user does
+    not exist, preventing username enumeration timing attacks. Always returns False.
+    """
+    try:
+        _ph.verify(_DUMMY_ARGON2_HASH, password)
+    except Exception:
+        pass
+    return False
+
+
 def hash_token(raw_token: str) -> str:
     """Compute deterministic SHA-256 hash of a raw session token."""
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()

@@ -94,11 +94,82 @@ async def chat(
     )
 
     if body.stream:
+        # Phase A: Check if an approval is currently pending for a task in this session
+        has_tm = hasattr(engine, "_task_manager") and engine._task_manager is not None
+        has_am = hasattr(engine, "_approval_manager") and engine._approval_manager is not None
+        if has_tm and has_am:
+            import json
+            import re
+            from backend.agent.task import TaskStatus
+            clean_msg = body.message.strip().lower()
+            clean_msg = re.sub(r"^[^\w]+|[^\w]+$", "", clean_msg)
+            is_nlp_approval = bool(re.match(r"^(yes(\s+approve)?|approve[d]?|proceed|continue|confirm|go ahead|looks good)\b", clean_msg))
+            is_nlp_rejection = bool(re.match(r"^(no|reject(ed)?|deny|denied|cancel(led)?|stop|do not|don't)\b", clean_msg))
+
+            if is_nlp_approval or is_nlp_rejection:
+                pending_task = None
+                for t in engine._task_manager.list_tasks(status=TaskStatus.AWAITING_APPROVAL):
+                    if t.session_id == session_id:
+                        pending_task = t
+                        break
+                if pending_task:
+                    pending = engine._approval_manager.get_pending_for_task(pending_task.task_id)
+                    if pending:
+                        from backend.auth.models import Permission, has_permission
+                        if is_nlp_approval and not has_permission(current_user.role, Permission.APPROVE_TASKS):
+                            logger.warning(
+                                "chat_approval_denied | session=%s task=%s user=%s role=%s",
+                                session_id, pending_task.task_id, current_user.username, current_user.role,
+                            )
+                            async def _stream_denied_approval():
+                                yield f"data: {json.dumps({'type': 'error', 'content': f'Permission denied: role \'{current_user.role}\' cannot approve tasks.'})}\n\n"
+                                yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+
+                            return StreamingResponse(
+                                _stream_denied_approval(),
+                                media_type="text/event-stream",
+                                headers={
+                                    "Cache-Control": "no-cache",
+                                    "X-Accel-Buffering": "no",
+                                    "Connection": "keep-alive",
+                                },
+                            )
+
+                        logger.info(
+                            "chat_approval_intercept | session=%s task=%s approval=%s action=%s",
+                            session_id, pending_task.task_id, pending.approval_id, "approve" if is_nlp_approval else "reject"
+                        )
+                        async def _stream_intercepted_approval():
+                            async for item in engine.resume_agent_task(
+                                task_id=pending_task.task_id,
+                                approval_id=pending.approval_id,
+                                approved=is_nlp_approval,
+                                user_role=current_user.role,
+                            ):
+                                if isinstance(item, str):
+                                    yield f"data: {json.dumps({'type': 'delta', 'content': item})}\n\n"
+                                elif isinstance(item, dict):
+                                    yield f"data: {json.dumps(item)}\n\n"
+                            yield f"data: {json.dumps({'type': 'done', 'task_id': pending_task.task_id})}\n\n"
+
+                        return StreamingResponse(
+                            _stream_intercepted_approval(),
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                "Connection": "keep-alive",
+                            },
+                        )
+
+        # Check if the query is a general knowledge question (should remain pure conversational response)
+        from backend.agent.planner import is_general_knowledge_query, should_use_planning
+        is_general = is_general_knowledge_query(body.message)
+
         # Choose tool-enabled or plain streaming
-        use_tools = body.tools_enabled and hasattr(engine, '_tool_registry') and engine._tool_registry is not None
+        use_tools = body.tools_enabled and hasattr(engine, '_tool_registry') and engine._tool_registry is not None and not is_general
         if use_tools:
             # Phase 6: Deterministic complexity heuristic — decide BEFORE execution
-            from backend.agent.planner import should_use_planning
             use_planning = should_use_planning(
                 message=body.message,
                 planning_enabled=body.planning_enabled if body.planning_enabled is not None else True,
@@ -107,6 +178,18 @@ async def chat(
             if use_planning and hasattr(engine, '_task_manager') and engine._task_manager is not None:
                 return StreamingResponse(
                     _stream_sse_with_planning(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                        "Connection": "keep-alive",
+                    },
+                )
+            # Phase 6 unified: route through tracked wrapper when TaskManager is wired
+            has_task_manager = hasattr(engine, '_task_manager') and engine._task_manager is not None
+            if has_task_manager:
+                return StreamingResponse(
+                    _stream_sse_with_tools_tracked(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -429,6 +512,260 @@ async def _stream_sse_with_tools(
 
 
 # ---------------------------------------------------------------------------
+# SSE generator — Tracked tool-enabled (Phase 6 unified)
+# ---------------------------------------------------------------------------
+
+async def _stream_sse_with_tools_tracked(
+    engine,
+    session_id: str,
+    user_message: str,
+    model_id,
+    model_used: str,
+    user_role: Optional[str] = None,
+) -> AsyncGenerator[str, None]:
+    """
+    SSE generator that wraps engine.chat_stream_with_tools() DIRECTLY
+    and creates lightweight persistent task records via TaskManager.
+
+    Task tracking logic lives here (not in the engine) because the SSE
+    layer has full visibility of ALL event types, including the sources
+    sentinel needed for RAG task tracking.
+
+    Task creation triggers:
+      - First tool_start event  → tool-based task (calculator, etc.)
+      - Non-empty sources list  → RAG-based task (document retrieval)
+      - No tools AND no sources → ordinary conversation, NO task created
+
+    All original SSE event semantics are preserved identically to
+    _stream_sse_with_tools — text deltas, tool events, sources, done/error.
+    """
+    import json as _json  # noqa: F811 — kept for potential debug use
+
+    from backend.agent.planner import AgentPlan, PlanStep, StepStatus
+
+    task_manager = getattr(engine, '_task_manager', None)
+
+    # Task tracking state
+    task_id: Optional[str] = None
+    task_created = False
+    plan_steps: list = []
+    step_counter = 0
+    current_tool_step_id: Optional[str] = None
+    any_tool_failed = False
+    final_text_parts: list = []
+
+    def _create_task_if_needed() -> None:
+        """Create the task on first execution indicator."""
+        nonlocal task_id, task_created
+        if task_created or task_manager is None:
+            return
+        task = task_manager.create_task(
+            session_id=session_id,
+            user_request=user_message[:500],
+            user_role=user_role,
+        )
+        task_id = task.task_id
+        task_created = True
+        task_manager.update_status(task_id, "planning")
+        task_manager.update_status(task_id, "executing")
+
+    try:
+        sources: list = []
+
+        # Call engine.chat_stream_with_tools() DIRECTLY — no nested wrapper
+        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
+            if isinstance(item, str):
+                # Text delta — stream to client and buffer for task result
+                final_text_parts.append(item)
+                chunk = StreamChunk(type="delta", content=item)
+                yield f"data: {chunk.model_dump_json()}\n\n"
+
+            elif isinstance(item, dict):
+                event_type = item.get("type", "agent_status")
+
+                if event_type == "tool_start":
+                    # Create task on first tool execution
+                    _create_task_if_needed()
+                    if task_created and task_id:
+                        # Emit task_started to frontend on first tool
+                        if step_counter == 0:
+                            task_evt = StreamChunk(type="task_started", content=task_id, session_id=session_id)
+                            yield f"data: {task_evt.model_dump_json()}\n\n"
+
+                        # Create a plan step for this tool
+                        step_counter += 1
+                        step_id = f"step_{step_counter}"
+                        tool_name = item.get("tool", "unknown")
+                        tool_args = item.get("arguments", {})
+
+                        plan_step = PlanStep(
+                            id=step_id,
+                            description=f"Execute {tool_name}",
+                            tool_name=tool_name,
+                            arguments=tool_args if isinstance(tool_args, dict) else {},
+                            requires_approval=False,
+                            status=StepStatus.running.value,
+                        )
+                        plan_steps.append(plan_step)
+                        current_tool_step_id = step_id
+
+                        plan = AgentPlan(
+                            task_id=task_id,
+                            objective=user_message[:300],
+                            steps=list(plan_steps),
+                            status="executing",
+                        )
+                        task_manager.set_plan(task_id, plan)
+
+                    # Forward tool_start to frontend
+                    chunk = StreamChunk(
+                        type="tool_start",
+                        content="",
+                        tool=item.get("tool", ""),
+                        tool_args=item.get("arguments", {}),
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+                elif event_type == "tool_result":
+                    # Update step status in task
+                    if task_created and task_id and current_tool_step_id:
+                        success = item.get("success", False)
+                        summary = item.get("summary", "")
+                        if success:
+                            task_manager.update_step_status(
+                                task_id, current_tool_step_id,
+                                StepStatus.completed.value,
+                                result=summary[:500] if summary else "Completed",
+                            )
+                        else:
+                            any_tool_failed = True
+                            task_manager.update_step_status(
+                                task_id, current_tool_step_id,
+                                StepStatus.failed.value,
+                                error=summary[:500] if summary else "Failed",
+                            )
+                        current_tool_step_id = None
+
+                    # Forward tool_result to frontend
+                    chunk = StreamChunk(
+                        type="tool_result",
+                        content="",
+                        tool=item.get("tool", ""),
+                        success=item.get("success", False),
+                        summary=item.get("summary", ""),
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+                elif event_type == "agent_status":
+                    chunk = StreamChunk(
+                        type="agent_status",
+                        content=item.get("status", "thinking"),
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+            elif isinstance(item, list):
+                # Sources sentinel
+                sources = item
+
+        # ---------------------------------------------------------------
+        # Post-stream: RAG task creation (if no tool_start created one)
+        # ---------------------------------------------------------------
+        if sources and not task_created and task_manager is not None:
+            _create_task_if_needed()
+            if task_created and task_id:
+                # Add a "Document retrieval" step for RAG
+                step_counter += 1
+                retrieval_step = PlanStep(
+                    id=f"step_{step_counter}",
+                    description=f"Document retrieval ({len(sources)} sources)",
+                    tool_name="document_search",
+                    requires_approval=False,
+                    status=StepStatus.completed.value,
+                    result=f"Retrieved {len(sources)} document chunks",
+                )
+                plan_steps.append(retrieval_step)
+
+                # Emit task_started for frontend
+                task_evt = StreamChunk(type="task_started", content=task_id, session_id=session_id)
+                yield f"data: {task_evt.model_dump_json()}\n\n"
+
+        # ---------------------------------------------------------------
+        # Post-stream: Finalize task
+        # ---------------------------------------------------------------
+        if task_created and task_id and task_manager is not None:
+            # Add a final "Generate response" step
+            step_counter += 1
+            response_step = PlanStep(
+                id=f"step_{step_counter}",
+                description="Generate response",
+                tool_name=None,
+                requires_approval=False,
+                status=StepStatus.completed.value,
+            )
+            plan_steps.append(response_step)
+
+            # Persist the final plan
+            final_plan = AgentPlan(
+                task_id=task_id,
+                objective=user_message[:300],
+                steps=list(plan_steps),
+                status="completed" if not any_tool_failed else "failed",
+            )
+            task_manager.set_plan(task_id, final_plan)
+
+            # Finalize task status
+            full_result = "".join(final_text_parts)
+            if any_tool_failed:
+                task_manager.update_status(
+                    task_id, "failed",
+                    error="One or more tool executions failed",
+                )
+                task_fail = StreamChunk(type="task_failed", content=task_id)
+                yield f"data: {task_fail.model_dump_json()}\n\n"
+            else:
+                task_manager.update_status(
+                    task_id, "completed",
+                    result=full_result[:1000] if full_result else "Completed",
+                )
+                task_done = StreamChunk(type="task_completed", content=task_id)
+                yield f"data: {task_done.model_dump_json()}\n\n"
+
+            logger.info(
+                "tracked_task_done | task=%s steps=%d failed=%s",
+                task_id, step_counter, any_tool_failed,
+            )
+
+        # Emit sources event (if any) before done
+        if sources:
+            source_refs = _sources_to_refs(sources)
+            sources_chunk = StreamChunk(
+                type="sources",
+                content="",
+                sources=source_refs,
+            )
+            yield f"data: {sources_chunk.model_dump_json()}\n\n"
+
+        # Final done event
+        done_chunk = StreamChunk(
+            type="done",
+            content="",
+            session_id=session_id,
+            model_used=model_used,
+        )
+        yield f"data: {done_chunk.model_dump_json()}\n\n"
+
+    except RuntimeError as exc:
+        logger.error("tracked tool stream error | session=%s: %s", session_id, exc)
+        error_chunk = StreamChunk(type="error", content=str(exc))
+        yield f"data: {error_chunk.model_dump_json()}\n\n"
+
+    except Exception as exc:
+        logger.exception("unexpected tracked tool stream error | session=%s", session_id)
+        error_chunk = StreamChunk(type="error", content="Internal server error")
+        yield f"data: {error_chunk.model_dump_json()}\n\n"
+
+
+# ---------------------------------------------------------------------------
 # SSE generator — Multimodal (Phase 5 NEW)
 # ---------------------------------------------------------------------------
 
@@ -638,10 +975,23 @@ async def _stream_sse_with_planning(
 # ---------------------------------------------------------------------------
 
 def _sources_to_refs(sources: List) -> List[_SourceRef]:
-    """Convert RetrievedChunk objects to _SourceRef schema objects."""
+    """Convert RetrievedChunk objects to _SourceRef schema objects with bounded deduplication."""
     refs = []
+    seen_chunks = set()
+    doc_counts = {}
+
     for s in sources:
         try:
+            cid = getattr(s, "chunk_id", None) or f"{getattr(s, 'filename', 'doc')}_{getattr(s, 'chunk_index', 0)}"
+            if cid in seen_chunks:
+                continue
+            seen_chunks.add(cid)
+
+            doc_key = getattr(s, "document_id", None) or getattr(s, "filename", "unknown")
+            if doc_counts.get(doc_key, 0) >= 2:
+                continue
+            doc_counts[doc_key] = doc_counts.get(doc_key, 0) + 1
+
             refs.append(_SourceRef(
                 document_id=s.document_id,
                 filename=s.filename,

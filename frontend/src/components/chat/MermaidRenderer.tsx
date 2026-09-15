@@ -4,12 +4,18 @@
  * Interactive, high-fidelity Mermaid Diagram Renderer for Visual AI Explanations.
  * Supports flowcharts, sequence diagrams, state diagrams, class diagrams, Gantt charts,
  * entity-relationship diagrams, and git graphs with modern dark aesthetics.
+ *
+ * Improvements:
+ *   - Pre-render sanitization of LLM-generated Mermaid source (safe node IDs, escaped labels)
+ *   - Pre-render validation via mermaid.parse() before attempting render
+ *   - Graceful fallback for invalid diagrams (no repeated error spam)
+ *   - Deterministic render IDs based on chart content hash
+ *   - Proper DOM cleanup on unmount
  */
 
 import React, { useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
 import {
-  Maximize2,
   ZoomIn,
   ZoomOut,
   RotateCcw,
@@ -19,6 +25,7 @@ import {
   Eye,
   AlertCircle,
 } from 'lucide-react';
+import { sanitizeMermaidSource, generateDeterministicId } from './mermaidUtils';
 
 interface MermaidRendererProps {
   chart: string;
@@ -64,23 +71,50 @@ export const MermaidRenderer: React.FC<MermaidRendererProps> = ({ chart }) => {
 
   const cleanChart = chart.trim();
 
+  // Sanitize the Mermaid source for safe rendering
+  const sanitizedChart = sanitizeMermaidSource(cleanChart);
+
+  // Generate a deterministic render ID from chart content
+  const renderId = generateDeterministicId(sanitizedChart);
+
   useEffect(() => {
     let isMounted = true;
-    const renderId = `mermaid_${Math.random().toString(36).substring(2, 9)}`;
+    // Use a unique suffix per render cycle to avoid stale DOM element collisions
+    const renderElId = `${renderId}_${Date.now()}`;
 
     const renderChart = async () => {
-      if (!cleanChart) return;
+      if (!sanitizedChart) return;
+
       try {
         setHasError(false);
-        const { svg } = await mermaid.render(renderId, cleanChart);
+        setErrorMessage('');
+
+        // Step 1: Pre-validate with mermaid.parse()
+        // This catches syntax errors before creating DOM elements
+        try {
+          await mermaid.parse(sanitizedChart);
+        } catch (parseErr: unknown) {
+          if (isMounted) {
+            const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+            console.warn('Mermaid parse validation failed:', msg);
+            setHasError(true);
+            setErrorMessage('Workflow diagram unavailable — diagram syntax could not be validated.');
+          }
+          return;
+        }
+
+        // Step 2: Render the validated chart
+        const { svg } = await mermaid.render(renderElId, sanitizedChart);
         if (isMounted) {
           setSvgContent(svg);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (isMounted) {
-          console.warn('Mermaid render issue:', err);
+          const msg = err instanceof Error ? err.message : String(err);
+          // Log once, don't spam
+          console.warn('Mermaid render issue:', msg);
           setHasError(true);
-          setErrorMessage(err?.message || 'Syntax error in diagram definition.');
+          setErrorMessage('Workflow diagram unavailable — view source for details.');
         }
       }
     };
@@ -89,11 +123,14 @@ export const MermaidRenderer: React.FC<MermaidRendererProps> = ({ chart }) => {
 
     return () => {
       isMounted = false;
-      // Clean up temporary DOM element created by mermaid if any
-      const tempEl = document.getElementById(renderId);
+      // Clean up temporary DOM elements created by mermaid
+      const tempEl = document.getElementById(renderElId);
       if (tempEl) tempEl.remove();
+      // Also clean up any element with a 'd' prefix that mermaid creates
+      const dEl = document.getElementById(`d${renderElId}`);
+      if (dEl) dEl.remove();
     };
-  }, [cleanChart]);
+  }, [sanitizedChart, renderId]);
 
   const handleCopy = async () => {
     try {
@@ -180,12 +217,11 @@ export const MermaidRenderer: React.FC<MermaidRendererProps> = ({ chart }) => {
         <div className="p-4 bg-amber-950/20 border-t border-amber-900/30 flex flex-col gap-2 text-xs">
           <div className="flex items-center gap-2 text-amber-400 font-semibold">
             <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>Diagram Definition</span>
+            <span>{errorMessage || 'Workflow diagram unavailable'}</span>
           </div>
-          <p className="text-slate-400 font-mono text-[11px]">{errorMessage}</p>
-          <pre className="p-2.5 rounded bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[11px] overflow-x-auto">
-            <code>{cleanChart}</code>
-          </pre>
+          <p className="text-slate-500 text-[11px]">
+            Click &quot;Source&quot; above to view the raw diagram definition.
+          </p>
         </div>
       ) : (
         <div

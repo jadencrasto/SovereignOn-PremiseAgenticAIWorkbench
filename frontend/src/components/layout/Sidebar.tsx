@@ -12,13 +12,10 @@ import {
   Terminal,
   FileSpreadsheet,
   BookOpen,
-  FileCode,
   Shield,
   Sliders,
   Cpu,
   History,
-  User as UserIcon,
-  Play,
   Zap,
 } from 'lucide-react';
 import { LoginModal } from '../auth/LoginModal';

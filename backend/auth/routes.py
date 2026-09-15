@@ -24,13 +24,22 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from backend.auth.dependencies import get_current_user, require_role
-from backend.auth.models import AuthStore, User, UserPublic, UserRole
+from backend.auth.models import (
+    AuthStore,
+    ClearanceLevel,
+    DEFAULT_CLEARANCE_MAP,
+    User,
+    UserPublic,
+    UserRole,
+)
 from backend.auth.security import (
     BruteForceProtector,
     SessionManager,
+    dummy_verify_password,
     hash_password,
     verify_password,
 )
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +69,12 @@ class CreateUserRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_\-]+$")
     password: str = Field(..., min_length=8, max_length=128)
     role: UserRole = UserRole.OPERATOR
+    clearance: Optional[str] = None
 
 
 class UpdateUserRequest(BaseModel):
     role: Optional[UserRole] = None
+    clearance: Optional[str] = None
     is_active: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
@@ -125,6 +136,9 @@ async def login(
     valid = False
     if user and user.is_active:
         valid = verify_password(body.password, user.password_hash)
+    else:
+        # Prevent timing-based username enumeration
+        dummy_verify_password(body.password)
 
     if not valid:
         is_now_locked = bf_protector.record_failure(body.username, client_ip)
@@ -147,14 +161,21 @@ async def login(
     # Create session
     raw_token, session = session_mgr.create_session(user.id)
 
-    # Set httpOnly SameSite=Lax cookie
+    # Set httpOnly SameSite cookie with configurable security settings
+    active_settings = getattr(request.app.state, "settings", settings)
+    cookie_secure = active_settings.auth_cookie_secure
+    if active_settings.app_env.lower() == "production" and request.url.scheme == "https":
+        cookie_secure = True
+
     response.set_cookie(
         key="session_token",
         value=raw_token,
         httponly=True,
-        samesite="lax",
-        secure=False,  # Set True if HTTPS in production
-        max_age=86400,
+        samesite=active_settings.auth_cookie_samesite.lower(),
+        secure=cookie_secure,
+        domain=active_settings.auth_cookie_domain,
+        path="/",
+        max_age=active_settings.auth_max_session_seconds,
     )
 
     _log_auth_event(request, "auth.login_success", user.id, user.username, user.role, True)
@@ -190,7 +211,19 @@ async def logout(
     if session_mgr and raw_token:
         session_mgr.revoke_session(raw_token)
 
-    response.delete_cookie("session_token")
+    active_settings = getattr(request.app.state, "settings", settings)
+    cookie_secure = active_settings.auth_cookie_secure
+    if active_settings.app_env.lower() == "production" and request.url.scheme == "https":
+        cookie_secure = True
+
+    response.delete_cookie(
+        key="session_token",
+        path="/",
+        domain=active_settings.auth_cookie_domain,
+        httponly=True,
+        samesite=active_settings.auth_cookie_samesite.lower(),
+        secure=cookie_secure,
+    )
     _log_auth_event(request, "auth.logout", current_user.id, current_user.username, current_user.role, True)
     return {"message": "Successfully logged out"}
 
@@ -206,6 +239,7 @@ async def get_me(current_user: User = Depends(get_current_user)):
         must_change_password=current_user.must_change_password,
         created_at=current_user.created_at,
         last_login_at=current_user.last_login_at,
+        clearance=current_user.clearance,
     )
 
 
@@ -268,11 +302,17 @@ async def create_user(
         )
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    clearance_val = (
+        body.clearance
+        if body.clearance
+        else DEFAULT_CLEARANCE_MAP.get(body.role, ClearanceLevel.L1).value
+    )
     new_user = User(
         id=f"user_{uuid.uuid4().hex[:12]}",
         username=body.username,
         password_hash=hash_password(body.password),
         role=body.role.value,
+        clearance=clearance_val,
         is_active=True,
         must_change_password=False,
         created_at=now_iso,
@@ -287,6 +327,7 @@ async def create_user(
         is_active=new_user.is_active,
         must_change_password=new_user.must_change_password,
         created_at=new_user.created_at,
+        clearance=new_user.clearance,
     )
 
 
@@ -312,6 +353,7 @@ async def update_user(
     auth_store.update_user(
         user_id,
         role=role_val,
+        clearance=body.clearance,
         is_active=body.is_active,
         password_hash=pwd_hash,
     )
@@ -327,4 +369,5 @@ async def update_user(
         must_change_password=updated.must_change_password,
         created_at=updated.created_at,
         last_login_at=updated.last_login_at,
+        clearance=updated.clearance,
     )

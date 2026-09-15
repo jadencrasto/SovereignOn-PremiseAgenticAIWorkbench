@@ -26,7 +26,11 @@ import logging
 from contextlib import asynccontextmanager
 
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
@@ -250,10 +254,10 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
     registry.register(ToolDefinition(
         name="code_execution",
         description=(
-            "Execute Python code safely inside the local sandbox boundary. "
-            "Use this when a task requires calculating, computing, or running Python logic. "
-            "Captures stdout, stderr, and returncode with strict execution timeout limits. "
-            "Never requires internet. Strictly enforced local isolation."
+            "Execute Python code safely inside the workbench sandbox boundary using "
+            "hardened local subprocess execution (or container isolation if enabled). "
+            "Captures stdout, stderr, and exit codes with strict timeout and output limits. "
+            "Air-gapped; never accesses external networks."
         ),
         input_schema=CodeExecutionInput,
         execute_fn=create_code_execution(settings.sandbox_dir),
@@ -334,7 +338,7 @@ async def lifespan(app: FastAPI):
         print(" Notice: Password change will be required upon first login.")
         print("=" * 70 + "\n")
 
-    if not getattr(settings, "auth_enabled", True):
+    if not getattr(active_settings, "auth_enabled", True):
         print("\n" + "!" * 70)
         print(" [SECURITY WARNING] AUTHENTICATION IS DISABLED (DEVELOPMENT MODE)")
         print(" Requests will assume synthetic local admin identity.")
@@ -392,6 +396,38 @@ async def lifespan(app: FastAPI):
     tool_registry.set_audit_logger(audit_logger)
     tools_config = _load_tools_config()
     _register_tools(tool_registry, retriever, tools_config)
+
+    # ---- Code Execution Isolation Startup Diagnostics ----
+    isolation_mode = getattr(settings, "code_exec_isolation", "subprocess").lower()
+    if isolation_mode == "docker":
+        from backend.tools.code_execution import check_docker_daemon_available, check_docker_image_available
+        daemon_ok = check_docker_daemon_available()
+        image_name = getattr(settings, "code_exec_docker_image", "sovereign-code-sandbox:latest")
+        image_ok = check_docker_image_available(image_name) if daemon_ok else False
+
+        if not daemon_ok:
+            logger.error(
+                "[CODE EXECUTION] Docker container isolation is configured, but Docker daemon is unreachable or stopped. "
+                "Disabling code_execution tool to fail-closed."
+            )
+            tool_registry.disable("code_execution")
+        elif not image_ok:
+            logger.error(
+                "[CODE EXECUTION] Docker container isolation is configured, but local sovereign image '%s' is missing. "
+                "Air-gap policy prohibits automatic pulls. Disabling code_execution tool to fail-closed.",
+                image_name
+            )
+            tool_registry.disable("code_execution")
+        else:
+            logger.info(
+                "[CODE EXECUTION] Container isolation ACTIVE via Docker (image: %s, --network none, read-only root).",
+                image_name
+            )
+    else:
+        logger.warning(
+            "[CODE EXECUTION ADVISORY] Hardened local subprocess execution active (process group isolation, "
+            "env sanitization, AST checks). Container-level OS boundary is NOT active."
+        )
 
     # ---- Agent engine ----
     engine = AgentEngine(
@@ -482,6 +518,13 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     from fastapi import Request
 
     active_settings = custom_settings or settings
+    is_prod = active_settings.app_env.lower() in ("production", "prod")
+    show_docs = (not is_prod) or getattr(active_settings, "enable_docs_in_prod", False)
+
+    docs_url = "/docs" if show_docs else None
+    redoc_url = "/redoc" if show_docs else None
+    openapi_url = "/openapi.json" if show_docs else None
+
     app = FastAPI(
         title="Sovereign On-Premise Agentic AI Workbench",
         description=(
@@ -489,29 +532,158 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
             "document reasoning, tool execution, and provider-agnostic model routing."
         ),
         version=active_settings.app_version,
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
         lifespan=lifespan,
     )
     app.state.settings = active_settings
 
-    # ---- Request ID & Context Tracing Middleware (Phase 7) ----
+    # ---- Request ID & Context Tracing Middleware (Phase 7 & Step 9 Error Guard) ----
     @app.middleware("http")
     async def request_tracing_middleware(request: Request, call_next):
         req_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:12]}"
         token = request_id_ctx.set(req_id)
         try:
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                logger.exception(
+                    "Unhandled server exception on %s %s [req_id=%s]: %s",
+                    request.method,
+                    request.url.path,
+                    req_id,
+                    exc,
+                )
+                audit_logger = getattr(request.app.state, "audit_logger", None)
+                if audit_logger:
+                    audit_logger.log(
+                        event_type="system.internal_error",
+                        action=f"{request.method} {request.url.path}",
+                        resource=request.url.path,
+                        success=False,
+                        failure_reason=f"{type(exc).__name__}: unhandled exception",
+                        request_id=req_id,
+                        metadata={
+                            "exception_type": type(exc).__name__,
+                            "path": request.url.path,
+                            "method": request.method,
+                        },
+                    )
+
+                if is_prod:
+                    response = JSONResponse(
+                        status_code=500,
+                        content={
+                            "detail": "An internal server error occurred.",
+                            "error_code": "INTERNAL_SERVER_ERROR",
+                            "request_id": req_id,
+                        },
+                    )
+                else:
+                    response = JSONResponse(
+                        status_code=500,
+                        content={
+                            "detail": f"Internal server error: {str(exc)}",
+                            "error_code": "INTERNAL_SERVER_ERROR",
+                            "exception_type": type(exc).__name__,
+                            "request_id": req_id,
+                        },
+                    )
             response.headers["X-Request-ID"] = req_id
             return response
         finally:
             request_id_ctx.reset(token)
 
+    # ---- Security Headers Middleware (Phase B Step 9) ----
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = (
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+            "magnetometer=(), microphone=(), payment=(), usb=()"
+        )
+        response.headers["X-XSS-Protection"] = "0"
+        return response
+
+    # ---- Cache-Control Middleware for Sensitive Endpoints (Phase B Step 9) ----
+    @app.middleware("http")
+    async def cache_control_middleware(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if (
+            path.startswith(("/api/auth", "/api/audit", "/api/tasks", "/api/chat", "/api/security"))
+            and not path.startswith(("/health", "/ready"))
+        ):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+    # ---- Global Exception Handler (Phase B Step 9) ----
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        if isinstance(exc, (HTTPException, StarletteHTTPException)):
+            return await http_exception_handler(request, exc)
+        if isinstance(exc, RequestValidationError):
+            return await request_validation_exception_handler(request, exc)
+
+        req_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:12]}"
+        logger.exception(
+            "Unhandled server exception on %s %s [req_id=%s]: %s",
+            request.method,
+            request.url.path,
+            req_id,
+            exc,
+        )
+
+        audit_logger = getattr(request.app.state, "audit_logger", None)
+        if audit_logger:
+            audit_logger.log(
+                event_type="system.internal_error",
+                action=f"{request.method} {request.url.path}",
+                resource=request.url.path,
+                success=False,
+                failure_reason=f"{type(exc).__name__}: unhandled exception",
+                request_id=req_id,
+                metadata={
+                    "exception_type": type(exc).__name__,
+                    "path": request.url.path,
+                    "method": request.method,
+                },
+            )
+
+        if is_prod:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": "An internal server error occurred.",
+                    "error_code": "INTERNAL_SERVER_ERROR",
+                    "request_id": req_id,
+                },
+                headers={"X-Request-ID": req_id},
+            )
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": f"Internal server error: {str(exc)}",
+                    "error_code": "INTERNAL_SERVER_ERROR",
+                    "exception_type": type(exc).__name__,
+                    "request_id": req_id,
+                },
+                headers={"X-Request-ID": req_id},
+            )
+
     # ---- CORS ----
+    cors_origins = active_settings.cors_origins_list
+    allow_creds = "*" not in cors_origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=active_settings.cors_origins_list,
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=allow_creds,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -530,8 +702,6 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(security_router)
     app.include_router(knowledge_graph_router)
-
-
 
     return app
 

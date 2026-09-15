@@ -36,6 +36,10 @@ class ArtifactVerifierInput(BaseModel):
         default=None,
         description="Optional list of column names or headings that must exist in the artifact.",
     )
+    expected_content: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of keywords or text strings that must appear in the artifact content.",
+    )
     min_row_count: Optional[int] = Field(
         default=1,
         description="Minimum expected data rows or paragraphs.",
@@ -108,22 +112,63 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
                 import openpyxl
                 wb = openpyxl.load_workbook(target_path, data_only=True)
                 ws = wb.active
+                if ws is None:
+                    raise ValueError(f"Workbook '{clean_name}' contains no active worksheet.")
 
-                # Find header row (row 4 in styled template or row 1)
-                header_row_idx = 4 if ws.max_row >= 4 and ws.cell(row=4, column=1).value else 1
+                # In styled xlsx_report, headers are in row 4; otherwise find row with multiple values
+                header_row_idx = 4 if ws.max_row >= 4 and any(ws.cell(row=4, column=c).value is not None for c in range(1, min(ws.max_column + 1, 10))) else 1
+                if header_row_idx != 4 or not any(ws.cell(row=4, column=c).value is not None for c in range(1, min(ws.max_column + 1, 10))):
+                    best_row = 1
+                    best_cnt = 0
+                    for r in range(1, min(ws.max_row + 1, 11)):
+                        cnt = sum(1 for c in range(1, ws.max_column + 1) if ws.cell(row=r, column=c).value is not None)
+                        if cnt > best_cnt:
+                            best_cnt = cnt
+                            best_row = r
+                    header_row_idx = best_row
+
                 for col in range(1, ws.max_column + 1):
                     val = ws.cell(row=header_row_idx, column=col).value
-                    if val is not None:
-                        detected_headers.append(str(val))
+                    if val is not None and str(val).strip():
+                        detected_headers.append(str(val).strip())
 
+                all_cell_texts: List[str] = []
                 # Count data rows
                 for r in range(header_row_idx + 1, ws.max_row + 1):
-                    row_vals = [ws.cell(row=r, column=c).value for c in range(1, len(detected_headers) + 1)]
-                    if any(v is not None for v in row_vals):
+                    row_vals = [ws.cell(row=r, column=c).value for c in range(1, max(len(detected_headers), ws.max_column) + 1)]
+                    if any(v is not None and str(v).strip() for v in row_vals):
                         row_count += 1
+                        for v in row_vals:
+                            if v is not None:
+                                all_cell_texts.append(str(v))
                         if len(preview_rows) < 5:
                             preview_rows.append(row_vals)
 
+                extra_metadata["column_count"] = len(detected_headers)
+                extra_metadata["sheet_names"] = wb.sheetnames
+                extra_metadata["all_cell_texts"] = all_cell_texts
+
+                data_cells = [str(t).strip() for t in all_cell_texts if str(t).strip()]
+                if not data_cells:
+                    raise ValueError(f"Artifact verification failed: Workbook '{clean_name}' contains no populated data cells.")
+                if all("not stated" in c.lower() or c.lower() in ("todo", "n/a", "none") for c in data_cells):
+                    raise ValueError(f"Artifact verification failed: Workbook '{clean_name}' contains no grounded evidence (all data cells are unpopulated or 'Not stated').")
+                # If headers request findings/observations/actions, ensure they are not all 'Not stated'
+                detail_headers = [
+                    idx for idx, h in enumerate(detected_headers)
+                    if any(k in h.lower() for k in ("finding", "observation", "action", "recommend", "cause", "defect", "repair"))
+                ]
+                if detail_headers and len(all_cell_texts) >= len(detected_headers):
+                    detail_cells = []
+                    for r_idx in range(row_count):
+                        for col_idx in detail_headers:
+                            cell_pos = r_idx * len(detected_headers) + col_idx
+                            if cell_pos < len(all_cell_texts):
+                                detail_cells.append(str(all_cell_texts[cell_pos]).strip())
+                    if detail_cells and all("not stated" in c.lower() or c.lower() in ("todo", "n/a", "none", "") for c in detail_cells):
+                        raise ValueError(
+                            f"Artifact verification failed: Workbook '{clean_name}' contains no substantive evidence in maintenance data columns (all findings/observations/actions are 'Not stated')."
+                        )
                 wb.close()
             except Exception as exc:
                 raise ValueError(f"Corrupted or invalid XLSX workbook: {exc}")
@@ -162,6 +207,35 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
             if missing_columns:
                 raise ValueError(
                     f"Artifact verification failed: Missing required columns/headings: {missing_columns}. Found: {detected_headers}"
+                )
+
+        # Validate expected content
+        if args.expected_content:
+            corpus = ""
+            if suffix == ".docx":
+                corpus = " ".join(paragraphs) + " " + " ".join(str(c) for r in preview_rows for c in r)
+            elif suffix == ".xlsx":
+                corpus = " ".join(detected_headers) + " " + " ".join(extra_metadata.get("all_cell_texts", []))
+            else:
+                corpus = file_bytes.decode("utf-8", errors="ignore")
+
+            corpus_lower = corpus.lower()
+            missing_content = []
+            for exp in args.expected_content:
+                s_exp = str(exp).strip()
+                s_lower = s_exp.lower()
+                # Skip generic placeholder labels if present
+                if (
+                    s_lower.endswith(" text")
+                    or s_lower.startswith("text ")
+                    or s_lower in ("text", "findings text", "observations text", "actions text", "placeholder", "todo", "sample", "example")
+                ):
+                    continue
+                if s_lower not in corpus_lower:
+                    missing_content.append(exp)
+            if missing_content:
+                raise ValueError(
+                    f"Artifact verification failed: Required content not found in {clean_name}: {missing_content}"
                 )
 
         logger.info(

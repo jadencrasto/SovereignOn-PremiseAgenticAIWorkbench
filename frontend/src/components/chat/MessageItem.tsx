@@ -8,7 +8,7 @@ import React, { useState } from 'react';
 import type { ChatMessage, ToolEvent } from '../../types';
 import { MarkdownContent } from './MarkdownContent';
 import { SourceCard } from './SourceCard';
-import { Terminal, User, Copy, Check, RotateCcw, AlertTriangle, Layers, Wrench, CheckCircle2, XCircle, ImageIcon } from 'lucide-react';
+import { Copy, Check, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { PlanTimeline } from '../agent/PlanTimeline';
 import { ApprovalCard } from '../agent/ApprovalCard';
 

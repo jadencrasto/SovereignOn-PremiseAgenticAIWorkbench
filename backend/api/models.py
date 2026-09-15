@@ -12,11 +12,12 @@ Phase 5: /api/models now also returns capability info in the response,
 and a new /api/models/capabilities endpoint exposes the full enriched list.
 """
 
-from __future__ import annotations
-
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from backend.auth.dependencies import require_permission
+from backend.auth.models import Permission, User
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,10 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 
 
 @router.get("", summary="List available models from all providers")
-async def list_models(request: Request):
+async def list_models(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """
     Query each configured provider and return available model names.
 
@@ -62,13 +66,19 @@ async def list_models(request: Request):
 
 
 @router.get("/default", summary="Return the default model identifier")
-async def get_default_model(request: Request):
+async def get_default_model(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     model_router = request.app.state.model_router
     return {"default_model": model_router.default_model_id}
 
 
 @router.get("/capabilities", summary="List models with capability metadata (Phase 5)")
-async def list_models_with_capabilities(request: Request):
+async def list_models_with_capabilities(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """
     Return all configured models with their capability metadata.
 
@@ -84,7 +94,10 @@ async def list_models_with_capabilities(request: Request):
 
 
 @router.get("/scan", summary="Scan and discover installed local models on host")
-async def scan_local_models(request: Request):
+async def scan_local_models(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """
     Actively scan local Ollama service and host disk for installed models,
     capabilities, quantization formats, and readiness status.
@@ -167,7 +180,10 @@ async def scan_local_models(request: Request):
 
 
 @router.post("/preload", summary="Pre-warm a model in VRAM to eliminate cold-start lag")
-async def preload_model(request: Request):
+async def preload_model(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.MANAGE_CONFIG)),
+):
     """
     Preload model weights into VRAM so subsequent chat interactions respond instantly.
     """

@@ -95,6 +95,9 @@ class TaskState(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     completed_at: Optional[str] = None
+    user_id: Optional[str] = None
+    user_role: Optional[str] = None
+    clearance: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -114,16 +117,22 @@ class TaskManager:
         self,
         session_id: str,
         user_request: str,
+        user_id: Optional[str] = None,
+        user_role: Optional[str] = None,
+        clearance: Optional[str] = None,
     ) -> TaskState:
         """Create a new task in PENDING state."""
         task = TaskState(
             session_id=session_id,
             user_request=user_request,
+            user_id=user_id,
+            user_role=user_role,
+            clearance=clearance,
         )
         self._persist(task)
         logger.info(
-            "task_created | task=%s session=%s request_len=%d",
-            task.task_id, session_id, len(user_request),
+            "task_created | task=%s session=%s user_role=%s request_len=%d",
+            task.task_id, session_id, user_role, len(user_request),
         )
         return task
 
@@ -310,6 +319,9 @@ class TaskManager:
             "created_at": task.created_at,
             "updated_at": task.updated_at,
             "completed_at": task.completed_at,
+            "user_id": task.user_id,
+            "user_role": task.user_role,
+            "clearance": task.clearance,
         })
 
     def recover_tasks_on_startup(
@@ -458,4 +470,7 @@ class TaskManager:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             completed_at=row.get("completed_at"),
+            user_id=row.get("user_id"),
+            user_role=row.get("user_role"),
+            clearance=row.get("clearance"),
         )

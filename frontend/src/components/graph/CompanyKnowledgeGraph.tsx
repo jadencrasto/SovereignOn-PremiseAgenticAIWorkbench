@@ -36,7 +36,6 @@ import {
   Database,
   Table,
   Network,
-  Eye,
   Key,
   Flame,
 } from 'lucide-react';
@@ -209,7 +208,9 @@ export const CompanyKnowledgeGraph: React.FC = () => {
   const fetchGraph = async (clearance: string) => {
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/knowledge-graph?clearance=${clearance}`);
+      const res = await fetch(`/api/knowledge-graph?clearance=${clearance}`, {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
       if (res.ok) {
         const data: GraphResponse = await res.json();
         setGraphMeta(data);

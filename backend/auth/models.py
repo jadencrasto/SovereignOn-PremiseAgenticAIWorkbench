@@ -23,10 +23,55 @@ from pydantic import BaseModel, Field
 # Enums & RBAC Permission Table
 # ---------------------------------------------------------------------------
 
+
 class UserRole(str, Enum):
     ADMIN = "admin"
     OPERATOR = "operator"
     VIEWER = "viewer"
+
+
+class ClearanceLevel(str, Enum):
+    L1 = "L1"
+    L2 = "L2"
+    L3 = "L3"
+
+
+CLEARANCE_HIERARCHY: Dict[ClearanceLevel, int] = {
+    ClearanceLevel.L1: 1,
+    ClearanceLevel.L2: 2,
+    ClearanceLevel.L3: 3,
+}
+
+DEFAULT_CLEARANCE_MAP: Dict[UserRole, ClearanceLevel] = {
+    UserRole.VIEWER: ClearanceLevel.L1,
+    UserRole.OPERATOR: ClearanceLevel.L2,
+    UserRole.ADMIN: ClearanceLevel.L3,
+}
+
+
+def parse_clearance(val: Any) -> Optional[ClearanceLevel]:
+    """Parse and normalize clearance input (e.g. 'L1', 'Level 1: Read-Only', 'viewer', 1)."""
+    if val is None:
+        return None
+    if isinstance(val, ClearanceLevel):
+        return val
+    s = str(val).strip().upper()
+    if s in ("L1", "LEVEL 1", "LEVEL 1: READ-ONLY", "VIEWER", "1"):
+        return ClearanceLevel.L1
+    if s in ("L2", "LEVEL 2", "LEVEL 2: OPERATIONS", "OPERATOR", "2"):
+        return ClearanceLevel.L2
+    if s in ("L3", "LEVEL 3", "LEVEL 3: FULL AIRGAP", "ADMIN", "3"):
+        return ClearanceLevel.L3
+    return None
+
+
+def is_clearance_sufficient(user_clearance: Any, min_clearance: Any) -> bool:
+    """Check if user's clearance meets or exceeds min_clearance."""
+    parsed_user = parse_clearance(user_clearance)
+    parsed_min = parse_clearance(min_clearance)
+    if not parsed_user or not parsed_min:
+        return False
+    return CLEARANCE_HIERARCHY.get(parsed_user, 0) >= CLEARANCE_HIERARCHY.get(parsed_min, 999)
 
 
 class Permission(str, Enum):
@@ -51,6 +96,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[Permission]] = {
         Permission.EXECUTE_WRITE_TOOLS,
         Permission.APPROVE_TASKS,
         Permission.MANAGE_TASKS,
+        Permission.VIEW_SECURITY,
     },
     UserRole.ADMIN: {
         Permission.VIEW_DATA,
@@ -91,6 +137,40 @@ def is_role_sufficient(user_role: str, min_role: UserRole) -> bool:
         return False
 
 
+def check_authorization(
+    user_role: Optional[str],
+    user_clearance: Optional[str] = None,
+    required_permission: Optional[Permission] = None,
+    min_role: Optional[UserRole] = None,
+    min_clearance: Optional[ClearanceLevel] = None,
+) -> tuple[bool, str]:
+    """
+    Centralized server-side authorization check.
+    Returns (authorized: bool, reason: str).
+    Fails closed if role is missing or invalid.
+    """
+    if not user_role:
+        return False, "Access denied: missing user role identity"
+
+    try:
+        role_enum = UserRole(user_role)
+    except (ValueError, KeyError):
+        return False, f"Access denied: unknown role '{user_role}'"
+
+    effective_clearance = parse_clearance(user_clearance) or DEFAULT_CLEARANCE_MAP.get(role_enum, ClearanceLevel.L1)
+
+    if min_role and not is_role_sufficient(user_role, min_role):
+        return False, f"Forbidden: '{min_role.value}' role or higher required"
+
+    if min_clearance and not is_clearance_sufficient(effective_clearance, min_clearance):
+        return False, f"Forbidden: '{min_clearance.value}' clearance or higher required"
+
+    if required_permission and not has_permission(user_role, required_permission):
+        return False, f"Forbidden: permission '{required_permission.value}' required"
+
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # Pydantic Schemas
 # ---------------------------------------------------------------------------
@@ -100,6 +180,7 @@ class User(BaseModel):
     username: str
     password_hash: str
     role: str = UserRole.VIEWER.value
+    clearance: str = ClearanceLevel.L1.value
     is_active: bool = True
     must_change_password: bool = False
     created_at: str
@@ -110,6 +191,7 @@ class UserPublic(BaseModel):
     id: str
     username: str
     role: str
+    clearance: str = ClearanceLevel.L1.value
     is_active: bool
     must_change_password: bool
     created_at: str
@@ -135,6 +217,7 @@ CREATE TABLE IF NOT EXISTS users (
     username             TEXT UNIQUE NOT NULL,
     password_hash        TEXT NOT NULL,
     role                 TEXT NOT NULL DEFAULT 'viewer',
+    clearance            TEXT NOT NULL DEFAULT 'L1',
     is_active            INTEGER NOT NULL DEFAULT 1,
     must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at           TEXT NOT NULL,
@@ -182,6 +265,10 @@ class AuthStore:
                 conn.execute(_CREATE_USERS_TABLE)
                 conn.execute(_CREATE_SESSIONS_TABLE)
                 conn.execute(_CREATE_FAILED_LOGINS_TABLE)
+                try:
+                    conn.execute("ALTER TABLE users ADD COLUMN clearance TEXT NOT NULL DEFAULT 'L1'")
+                except sqlite3.OperationalError:
+                    pass
                 conn.commit()
             finally:
                 conn.close()
@@ -197,18 +284,20 @@ class AuthStore:
     # ------------------------------------------------------------------
 
     def create_user(self, user: User) -> None:
+        clearance = user.clearance or DEFAULT_CLEARANCE_MAP.get(UserRole(user.role), ClearanceLevel.L1).value
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
                     """INSERT INTO users
-                       (id, username, password_hash, role, is_active, must_change_password, created_at, last_login_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (id, username, password_hash, role, clearance, is_active, must_change_password, created_at, last_login_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         user.id,
                         user.username,
                         user.password_hash,
                         user.role,
+                        clearance,
                         1 if user.is_active else 0,
                         1 if user.must_change_password else 0,
                         user.created_at,
@@ -228,11 +317,15 @@ class AuthStore:
                 ).fetchone()
                 if not row:
                     return None
+                role_val = row["role"]
+                row_keys = row.keys() if hasattr(row, "keys") else []
+                clearance = row["clearance"] if "clearance" in row_keys else DEFAULT_CLEARANCE_MAP.get(UserRole(role_val), ClearanceLevel.L1).value
                 return User(
                     id=row["id"],
                     username=row["username"],
                     password_hash=row["password_hash"],
-                    role=row["role"],
+                    role=role_val,
+                    clearance=clearance,
                     is_active=bool(row["is_active"]),
                     must_change_password=bool(row["must_change_password"]),
                     created_at=row["created_at"],
@@ -250,11 +343,15 @@ class AuthStore:
                 ).fetchone()
                 if not row:
                     return None
+                role_val = row["role"]
+                row_keys = row.keys() if hasattr(row, "keys") else []
+                clearance = row["clearance"] if "clearance" in row_keys else DEFAULT_CLEARANCE_MAP.get(UserRole(role_val), ClearanceLevel.L1).value
                 return User(
                     id=row["id"],
                     username=row["username"],
                     password_hash=row["password_hash"],
-                    role=row["role"],
+                    role=role_val,
+                    clearance=clearance,
                     is_active=bool(row["is_active"]),
                     must_change_password=bool(row["must_change_password"]),
                     created_at=row["created_at"],
@@ -268,18 +365,24 @@ class AuthStore:
             conn = self._connect()
             try:
                 rows = conn.execute("SELECT * FROM users ORDER BY created_at ASC").fetchall()
-                return [
-                    UserPublic(
-                        id=r["id"],
-                        username=r["username"],
-                        role=r["role"],
-                        is_active=bool(r["is_active"]),
-                        must_change_password=bool(r["must_change_password"]),
-                        created_at=r["created_at"],
-                        last_login_at=r["last_login_at"],
+                result = []
+                for r in rows:
+                    role_val = r["role"]
+                    r_keys = r.keys() if hasattr(r, "keys") else []
+                    clearance = r["clearance"] if "clearance" in r_keys else DEFAULT_CLEARANCE_MAP.get(UserRole(role_val), ClearanceLevel.L1).value
+                    result.append(
+                        UserPublic(
+                            id=r["id"],
+                            username=r["username"],
+                            role=role_val,
+                            clearance=clearance,
+                            is_active=bool(r["is_active"]),
+                            must_change_password=bool(r["must_change_password"]),
+                            created_at=r["created_at"],
+                            last_login_at=r["last_login_at"],
+                        )
                     )
-                    for r in rows
-                ]
+                return result
             finally:
                 conn.close()
 
@@ -296,6 +399,7 @@ class AuthStore:
         self,
         user_id: str,
         role: Optional[str] = None,
+        clearance: Optional[str] = None,
         is_active: Optional[bool] = None,
         password_hash: Optional[str] = None,
         must_change_password: Optional[bool] = None,
@@ -309,6 +413,15 @@ class AuthStore:
                 if role is not None:
                     fields.append("role = ?")
                     values.append(role)
+                    if clearance is None:
+                        try:
+                            fields.append("clearance = ?")
+                            values.append(DEFAULT_CLEARANCE_MAP.get(UserRole(role), ClearanceLevel.L1).value)
+                        except Exception:
+                            pass
+                if clearance is not None:
+                    fields.append("clearance = ?")
+                    values.append(clearance)
                 if is_active is not None:
                     fields.append("is_active = ?")
                     values.append(1 if is_active else 0)

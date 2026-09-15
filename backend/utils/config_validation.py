@@ -40,7 +40,8 @@ class ConfigValidator:
         results: List[Dict[str, Any]] = []
 
         # 1. Environment & Auth consistency
-        if self._cfg.app_env.lower() == "production" and not getattr(self._cfg, "auth_enabled", True):
+        is_prod = self._cfg.app_env.lower() == "production"
+        if is_prod and not getattr(self._cfg, "auth_enabled", True):
             results.append({
                 "rule": "prod_auth_enabled",
                 "status": "FAIL",
@@ -51,6 +52,58 @@ class ConfigValidator:
                 "rule": "prod_auth_enabled",
                 "status": "PASS",
                 "message": "Authentication configuration matches environment.",
+            })
+
+        # 1b. Production vs Dev Mode conflict check
+        dev_mode_flag = getattr(self._cfg, "dev_mode", None)
+        if is_prod and dev_mode_flag is True:
+            results.append({
+                "rule": "prod_dev_mode_conflict",
+                "status": "FAIL",
+                "message": "Contradictory security configuration: app_env is production but dev_mode is True. Production mode fails closed.",
+            })
+        else:
+            results.append({
+                "rule": "prod_dev_mode_conflict",
+                "status": "PASS",
+                "message": "No contradictory development flags detected in production.",
+            })
+
+        # 1c. Production Cookie Security check
+        cookie_secure = getattr(self._cfg, "auth_cookie_secure", False)
+        if is_prod:
+            if cookie_secure:
+                results.append({
+                    "rule": "prod_cookie_security",
+                    "status": "PASS",
+                    "message": "Production cookie flagged Secure.",
+                })
+            else:
+                results.append({
+                    "rule": "prod_cookie_security",
+                    "status": "WARN",
+                    "message": "Production cookie is not Secure; deployment must guarantee HTTPS/TLS protection externally if TLS is terminated by a trusted reverse proxy.",
+                })
+        else:
+            results.append({
+                "rule": "prod_cookie_security",
+                "status": "PASS",
+                "message": "Development cookie policy active (Secure flag optional on local loopback).",
+            })
+
+        # 1d. Documentation Exposure check
+        docs_enabled_in_prod = getattr(self._cfg, "enable_docs_in_prod", False)
+        if is_prod and docs_enabled_in_prod:
+            results.append({
+                "rule": "prod_docs_exposure",
+                "status": "WARN",
+                "message": "Interactive API documentation (/docs, /redoc, /openapi.json) is enabled in production environment.",
+            })
+        else:
+            results.append({
+                "rule": "prod_docs_exposure",
+                "status": "PASS",
+                "message": "Interactive API documentation exposure matches environment policy.",
             })
 
         # 2. CORS configuration check

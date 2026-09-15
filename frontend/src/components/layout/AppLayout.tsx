@@ -206,7 +206,7 @@ export const AppLayout: React.FC = () => {
       </header>
 
       {/* Main Full-Screen Native Studio Workspace */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#f0f7ff]">
+      <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[#f0f7ff]">
         {activeTab === 'demo' && <DemoScenarioLauncher />}
         {activeTab === 'chat' && <ChatView />}
         {activeTab === 'tasks' && <TaskHistoryView />}

@@ -16,11 +16,14 @@ import {
   FileText,
   Download,
   RefreshCw,
-  CheckCircle2,
   Shield,
   Clock,
   HardDrive,
   FileCode,
+  Eye,
+  EyeOff,
+  AlertCircle,
+  X,
 } from 'lucide-react';
 import { useWorkbench } from '../../context/WorkbenchContext';
 
@@ -38,6 +41,10 @@ export const ArtifactViewer: React.FC = () => {
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [lastRefreshed, setLastRefreshed] = useState<string>('');
+  const [previewFilename, setPreviewFilename] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<any | null>(null);
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const { addToast } = useWorkbench();
 
@@ -54,6 +61,34 @@ export const ArtifactViewer: React.FC = () => {
       addToast('error', `Failed to load artifacts: ${err.message}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const togglePreview = async (filename: string) => {
+    if (previewFilename === filename) {
+      setPreviewFilename(null);
+      setPreviewData(null);
+      setPreviewError(null);
+      return;
+    }
+
+    setPreviewFilename(filename);
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPreviewData(null);
+
+    try {
+      const res = await fetch(`/api/artifacts/${encodeURIComponent(filename)}/preview`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${res.status}: Failed to load preview`);
+      }
+      const data = await res.json();
+      setPreviewData(data);
+    } catch (err: any) {
+      setPreviewError(err.message || 'Failed to preview artifact');
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -131,47 +166,180 @@ export const ArtifactViewer: React.FC = () => {
           {artifacts.map((art) => (
             <div
               key={art.filename}
-              className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-4 flex items-center justify-between hover:border-slate-700 transition"
+              className="bg-[#0d1424]/70 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-700 transition"
             >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div className="w-10 h-10 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
-                  {getFormatIcon(art.format)}
+              <div className="p-4 flex items-center justify-between">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="w-10 h-10 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
+                    {getFormatIcon(art.format)}
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-semibold text-sm text-slate-200 truncate">{art.filename}</h3>
+                      <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                        {art.format}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-4 text-[11px] font-mono text-slate-400 mt-1">
+                      <span>Size: {formatSize(art.size_bytes)}</span>
+                      <span>•</span>
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-slate-500" />
+                        {new Date(art.modified_at * 1000).toLocaleString()}
+                      </span>
+                      <span>•</span>
+                      <span className="flex items-center gap-1" title={art.sha256_hash}>
+                        <Shield className="w-3 h-3 text-emerald-400" />
+                        SHA: {art.sha256_hash.substring(0, 12)}...
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-sm text-slate-200 truncate">{art.filename}</h3>
-                    <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
-                      {art.format}
-                    </span>
-                  </div>
+                <div className="flex items-center gap-2 shrink-0 ml-4">
+                  <button
+                    onClick={() => togglePreview(art.filename)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors"
+                  >
+                    {previewFilename === art.filename ? (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Hide</span>
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="w-3.5 h-3.5 text-blue-400" />
+                        <span>View</span>
+                      </>
+                    )}
+                  </button>
 
-                  <div className="flex items-center gap-4 text-[11px] font-mono text-slate-400 mt-1">
-                    <span>Size: {formatSize(art.size_bytes)}</span>
-                    <span>•</span>
-                    <span className="flex items-center gap-1">
-                      <Clock className="w-3 h-3 text-slate-500" />
-                      {new Date(art.modified_at * 1000).toLocaleString()}
-                    </span>
-                    <span>•</span>
-                    <span className="flex items-center gap-1" title={art.sha256_hash}>
-                      <Shield className="w-3 h-3 text-emerald-400" />
-                      SHA: {art.sha256_hash.substring(0, 12)}...
-                    </span>
-                  </div>
+                  <a
+                    href={`/api/artifacts/${encodeURIComponent(art.filename)}`}
+                    download={art.filename}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download</span>
+                  </a>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0 ml-4">
-                <a
-                  href={`/api/artifacts/${encodeURIComponent(art.filename)}`}
-                  download={art.filename}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition-colors"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Download</span>
-                </a>
-              </div>
+              {/* Inline Preview Panel */}
+              {previewFilename === art.filename && (
+                <div className="border-t border-slate-800 bg-[#070b12] p-4 text-xs font-mono">
+                  {previewLoading ? (
+                    <div className="flex items-center gap-2 text-slate-400 py-6 justify-center">
+                      <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
+                      <span>Loading artifact preview...</span>
+                    </div>
+                  ) : previewError ? (
+                    <div className="flex items-center gap-2 text-rose-400 py-4 px-3 bg-rose-950/30 border border-rose-800 rounded-lg">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{previewError}</span>
+                    </div>
+                  ) : previewData ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-[11px] text-slate-400">
+                        <span className="font-semibold text-slate-300">
+                          Format: <span className="uppercase text-emerald-400">{previewData.type}</span>
+                          {previewData.metadata?.size_bytes !== undefined && ` (${formatSize(previewData.metadata.size_bytes)})`}
+                        </span>
+                        <div className="flex items-center gap-3">
+                          {previewData.truncated && (
+                            <span className="text-amber-400 bg-amber-950/40 border border-amber-800/60 px-2 py-0.5 rounded text-[10px]">
+                              Truncated for preview
+                            </span>
+                          )}
+                          <button
+                            onClick={() => setPreviewFilename(null)}
+                            className="text-slate-400 hover:text-slate-200 flex items-center gap-1 text-[10px]"
+                          >
+                            <X className="w-3 h-3" />
+                            <span>Close</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Render content based on previewData.type */}
+                      {previewData.type === 'xlsx' || previewData.type === 'xls' ? (
+                        <div className="overflow-x-auto max-h-96 rounded border border-slate-800">
+                          <table className="w-full text-left text-xs border-collapse">
+                            {previewData.content?.headers && (
+                              <thead>
+                                <tr className="bg-slate-800/80 text-slate-200 border-b border-slate-700">
+                                  {previewData.content.headers.map((h: string, idx: number) => (
+                                    <th key={idx} className="px-3 py-2 font-semibold border-r border-slate-700/50 last:border-0 whitespace-nowrap">
+                                      {h}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                            )}
+                            <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
+                              {previewData.content?.rows?.map((row: any[], rIdx: number) => (
+                                <tr key={rIdx} className="hover:bg-slate-800/40 transition">
+                                  {row.map((cell: any, cIdx: number) => (
+                                    <td key={cIdx} className="px-3 py-1.5 text-slate-300 border-r border-slate-800/40 last:border-0 whitespace-nowrap">
+                                      {String(cell)}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : previewData.type === 'docx' ? (
+                        <div className="space-y-4 max-h-96 overflow-y-auto pr-2">
+                          {previewData.content?.paragraphs?.map((p: string, pIdx: number) => (
+                            <p key={pIdx} className="text-slate-300 leading-relaxed font-sans text-xs">
+                              {p}
+                            </p>
+                          ))}
+                          {previewData.content?.tables?.map((tbl: any, tIdx: number) => (
+                            <div key={tIdx} className="overflow-x-auto rounded border border-slate-800 mt-2">
+                              <table className="w-full text-left text-xs border-collapse font-sans">
+                                {tbl.headers && (
+                                  <thead>
+                                    <tr className="bg-slate-800/80 text-slate-200 border-b border-slate-700">
+                                      {tbl.headers.map((h: string, hIdx: number) => (
+                                        <th key={hIdx} className="px-3 py-1.5 font-semibold border-r border-slate-700/50 last:border-0">
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                )}
+                                <tbody className="divide-y divide-slate-800 bg-slate-900/30">
+                                  {tbl.rows?.map((row: any[], rIdx: number) => (
+                                    <tr key={rIdx} className="hover:bg-slate-800/30">
+                                      {row.map((cell: any, cIdx: number) => (
+                                        <td key={cIdx} className="px-3 py-1.5 text-slate-300 border-r border-slate-800 last:border-0">
+                                          {String(cell)}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ))}
+                        </div>
+                      ) : previewData.type === 'unsupported' ? (
+                        <div className="text-slate-400 py-4 text-center">
+                          {previewData.metadata?.message || 'Preview not available for this file type.'}
+                        </div>
+                      ) : (
+                        <pre className="p-3 bg-slate-950/70 rounded border border-slate-800/80 text-slate-300 overflow-x-auto max-h-96 whitespace-pre-wrap leading-relaxed">
+                          {previewData.content}
+                        </pre>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
           ))}
         </div>

@@ -21,12 +21,6 @@ import {
 import {
   Clock,
   Plus,
-  RotateCcw,
-  Sparkles,
-  MessageSquare,
-  ChevronRight,
-  HelpCircle,
-  FileText,
 } from 'lucide-react';
 
 export const ChatView: React.FC = () => {
@@ -40,7 +34,7 @@ export const ChatView: React.FC = () => {
   const [sessionCount, setSessionCount] = useState<number>(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
-  const { sessionId: contextSessionId, selectedModel, addToast } = useWorkbench();
+  const { selectedModel, addToast } = useWorkbench();
 
   // Load last active session on initial mount if available
   useEffect(() => {
@@ -78,12 +72,51 @@ export const ChatView: React.FC = () => {
     [activeSessionId, sessionTitle, selectedModel, updateSessionCount]
   );
 
+  const handleApproveRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+  const handleRejectRef = useRef<(taskId: string) => Promise<void>>(async () => {});
+
   /**
    * Core message sender — handles text-only, multimodal, and agent planning paths.
    */
   const handleSendMessage = useCallback(
     async (text: string, image?: File) => {
       if (!text.trim() || isStreaming) return;
+
+      // Natural language approval / rejection interception when an approval is pending
+      const activePendingMsg = messages.slice().reverse().find(
+        (m) => m.pendingApproval && m.pendingApproval.status === 'pending'
+      );
+      const pendingApproval = activePendingMsg?.pendingApproval;
+
+      if (pendingApproval) {
+        const cleanText = text.trim().toLowerCase().replace(/^[^\w]+|[^\w]+$/g, '');
+        const isApproval = /^(yes(\s+approve)?|approve[d]?|proceed|continue|confirm)$/i.test(cleanText);
+        const isRejection = /^(no|reject(ed)?|deny|denied|cancel(led)?)$/i.test(cleanText);
+
+        if (isApproval) {
+          const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const userMsg: ChatMessage = {
+            id: 'msg_' + Math.random().toString(36).substring(2, 9),
+            role: 'user',
+            content: text,
+            timestamp: userTimestamp,
+          };
+          setMessages((prev) => [...prev, userMsg]);
+          handleApproveRef.current(pendingApproval.task_id);
+          return;
+        } else if (isRejection) {
+          const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const userMsg: ChatMessage = {
+            id: 'msg_' + Math.random().toString(36).substring(2, 9),
+            role: 'user',
+            content: text,
+            timestamp: userTimestamp,
+          };
+          setMessages((prev) => [...prev, userMsg]);
+          handleRejectRef.current(pendingApproval.task_id);
+          return;
+        }
+      }
 
       const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -361,12 +394,15 @@ export const ChatView: React.FC = () => {
   const handleApprove = async (taskId: string) => {
     try {
       addToast('info', 'Submitting approval...');
+      let targetMessageId: string | null = null;
       setMessages((prev) =>
-        prev.map((m) =>
-          m.pendingApproval?.task_id === taskId
-            ? { ...m, pendingApproval: undefined, isStreaming: true }
-            : m
-        )
+        prev.map((m) => {
+          if (m.pendingApproval?.task_id === taskId || m.plan?.taskId === taskId) {
+            targetMessageId = m.id;
+            return { ...m, pendingApproval: undefined, isStreaming: true };
+          }
+          return m;
+        })
       );
       setIsStreaming(true);
 
@@ -380,6 +416,9 @@ export const ChatView: React.FC = () => {
 
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+
+      const isTarget = (m: ChatMessage) =>
+        (targetMessageId !== null && m.id === targetMessageId) || m.plan?.taskId === taskId;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -397,20 +436,65 @@ export const ChatView: React.FC = () => {
             if (data.type === 'delta' && data.content) {
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.plan?.taskId === taskId
-                    ? { ...m, content: m.content + data.content }
+                  isTarget(m)
+                    ? { ...m, content: (m.content || '') + data.content, isStreaming: true }
                     : m
                 )
               );
             } else if (data.type === 'plan_step') {
               setMessages((prev) =>
                 prev.map((m) => {
-                  if (m.plan?.taskId !== taskId) return m;
+                  if (!isTarget(m) || !m.plan) return m;
                   const updatedSteps = m.plan.steps.map((s) =>
                     s.id === data.step_id ? { ...s, status: data.status } : s
                   );
                   return { ...m, plan: { ...m.plan, steps: updatedSteps } };
                 })
+              );
+            } else if (data.type === 'tool_start') {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  isTarget(m)
+                    ? {
+                        ...m,
+                        toolEvents: [
+                          ...(m.toolEvents || []),
+                          {
+                            type: 'tool_start',
+                            tool: data.tool,
+                            arguments: data.arguments,
+                          },
+                        ],
+                      }
+                    : m
+                )
+              );
+            } else if (data.type === 'tool_result') {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  isTarget(m)
+                    ? {
+                        ...m,
+                        toolEvents: [
+                          ...(m.toolEvents || []),
+                          {
+                            type: 'tool_result',
+                            tool: data.tool,
+                            success: data.success,
+                            summary: data.summary,
+                          },
+                        ],
+                      }
+                    : m
+                )
+              );
+            } else if (data.type === 'task_completed' || data.type === 'done') {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  isTarget(m)
+                    ? { ...m, isStreaming: false }
+                    : m
+                )
               );
             }
           } catch {}
@@ -418,13 +502,31 @@ export const ChatView: React.FC = () => {
       }
       setIsStreaming(false);
       setMessages((prev) => {
-        persistSession(prev);
-        return prev;
+        const next = prev.map((m) =>
+          isTarget(m)
+            ? {
+                ...m,
+                isStreaming: false,
+                content: m.content || 'Task completed successfully.',
+              }
+            : m
+        );
+        persistSession(next);
+        return next;
       });
       addToast('success', 'Step approved and executed.');
     } catch (err: any) {
       addToast('error', `Approval execution failed: ${err.message}`);
       setIsStreaming(false);
+      setMessages((prev) => {
+        const next = prev.map((m) =>
+          m.plan?.taskId === taskId
+            ? { ...m, isStreaming: false, error: true }
+            : m
+        );
+        persistSession(next);
+        return next;
+      });
     }
   };
 
@@ -436,8 +538,13 @@ export const ChatView: React.FC = () => {
       addToast('info', 'Rejecting step...');
       setMessages((prev) =>
         prev.map((m) =>
-          m.pendingApproval?.task_id === taskId
-            ? { ...m, pendingApproval: undefined }
+          m.pendingApproval?.task_id === taskId || m.plan?.taskId === taskId
+            ? {
+                ...m,
+                pendingApproval: undefined,
+                isStreaming: false,
+                content: m.content || 'Task step rejected by operator. Execution halted.',
+              }
             : m
         )
       );
@@ -451,6 +558,9 @@ export const ChatView: React.FC = () => {
       addToast('error', `Rejection failed: ${err.message}`);
     }
   };
+
+  handleApproveRef.current = handleApprove;
+  handleRejectRef.current = handleReject;
 
   const handleStopStream = () => {
     if (abortControllerRef.current) {
@@ -525,7 +635,7 @@ export const ChatView: React.FC = () => {
   }, [handleSendMessage]);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#090d16] relative font-sans">
+    <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-[#090d16] relative font-sans">
       {/* 1. Main Workspace Top Header */}
       <div className="h-13 border-b border-slate-800/90 px-5 flex items-center justify-between shrink-0 bg-[#0c1322]/95 backdrop-blur-md z-20 shadow-md">
         <div className="flex items-center gap-3">

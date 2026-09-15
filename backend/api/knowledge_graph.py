@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Query, Request
 
-logger = logging.getLogger(__name__)
+from backend.auth.dependencies import require_permission
+from backend.auth.models import Permission, User
+from backend.config import settings
 
 router = APIRouter(prefix="/api/knowledge-graph", tags=["knowledge-graph"])
 
@@ -353,25 +355,25 @@ RAW_EDGES = [
 async def get_knowledge_graph(
     request: Request,
     clearance: Optional[str] = Query(None, description="Requested clearance level override: viewer, operator, admin"),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """
     Returns nodes and edges filtered according to user role authorization.
     Dynamically attaches indexed documents from the local ChromaDB / doc store into the graph!
     """
-    # Detect current user role from session
-    current_role = "viewer"
-    try:
-        if hasattr(request.app.state, "session_manager"):
-            token = request.cookies.get("session_token")
-            if token:
-                session = request.app.state.session_manager.get_session(token)
-                if session and not session.is_expired():
-                    current_role = session.role
-    except Exception:
-        pass
+    current_role = current_user.role
 
-    # Allow query parameter override for demo role testing
-    effective_role = clearance if clearance in ROLE_LEVELS else current_role
+    active_settings = getattr(request.app.state, "settings", settings)
+    auth_enabled = getattr(active_settings, "auth_enabled", False)
+
+    if auth_enabled:
+        # In production: query parameter clearance must NEVER influence authorization.
+        # Identity and clearance derive exclusively from current_user.
+        effective_role = current_role
+    else:
+        # In development / demo: allow simulation override if valid, otherwise fallback to current_user.role
+        effective_role = clearance if (clearance and clearance in ROLE_LEVELS) else current_role
+
     effective_level = ROLE_LEVELS.get(effective_role, 1)
 
     # 1. Base Nodes filtering

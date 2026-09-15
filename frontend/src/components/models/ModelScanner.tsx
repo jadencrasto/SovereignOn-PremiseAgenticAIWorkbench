@@ -12,14 +12,6 @@ import {
   RefreshCw,
   CheckCircle2,
   AlertCircle,
-  HardDrive,
-  Eye,
-  Layers,
-  Zap,
-  Activity,
-  ArrowRight,
-  ShieldCheck,
-  Download,
 } from 'lucide-react';
 
 interface DiscoveredModel {

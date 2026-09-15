@@ -25,9 +25,31 @@ export const MessageList: React.FC<MessageListProps> = ({
   onReject,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef<boolean>(true);
 
+  // Track whether user is near bottom of scroll
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const threshold = 150;
+    isNearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  };
+
+  // Auto-scroll: instant during streaming for reliable tracking, smooth otherwise
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!isNearBottomRef.current || !scrollContainerRef.current) return;
+    const el = scrollContainerRef.current;
+    const isStreaming = messages.some((m) => m.isStreaming);
+    if (isStreaming) {
+      // Instant scroll keeps up with rapid streaming deltas
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   if (messages.length === 0) {
@@ -142,7 +164,11 @@ export const MessageList: React.FC<MessageListProps> = ({
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4 font-mono bg-[#f0f7ff]">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="flex-1 min-h-0 overflow-y-auto px-4 py-6 pb-8 space-y-4 font-mono bg-[#f0f7ff]"
+    >
       {messages.map((message) => (
         <MessageItem
           key={message.id}

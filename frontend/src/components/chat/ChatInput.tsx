@@ -5,8 +5,7 @@
  */
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { Square, Trash2, Paperclip, X, ImageIcon, AlertTriangle, ArrowRight } from 'lucide-react';
-import { useWorkbench } from '../../context/WorkbenchContext';
+import { Square, Trash2, Paperclip, X, AlertTriangle, ArrowRight } from 'lucide-react';
 import {
   ALLOWED_IMAGE_TYPES,
   MAX_IMAGE_SIZE_BYTES,
@@ -28,7 +27,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { selectedModel } = useWorkbench();
 
   const [attachedImage, setAttachedImage] = useState<File | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);

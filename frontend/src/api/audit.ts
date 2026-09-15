@@ -27,6 +27,7 @@ export async function fetchAuditEventsApi(params: {
   if (params.success !== undefined) query.set('success', String(params.success));
 
   const resp = await fetch(`${BASE_URL}/events?${query.toString()}`, {
+    credentials: 'include',
     headers: { 'X-Requested-With': 'XMLHttpRequest' },
   });
 
@@ -39,6 +40,7 @@ export async function fetchAuditEventsApi(params: {
 
 export async function fetchAuditSummaryApi(): Promise<AuditSummary> {
   const resp = await fetch(`${BASE_URL}/summary`, {
+    credentials: 'include',
     headers: { 'X-Requested-With': 'XMLHttpRequest' },
   });
 
@@ -52,6 +54,7 @@ export async function fetchAuditSummaryApi(): Promise<AuditSummary> {
 export async function pruneAuditLogApi(): Promise<{ message: string; deleted_rows: number }> {
   const resp = await fetch(`${BASE_URL}/prune`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'X-Requested-With': 'XMLHttpRequest' },
   });
 

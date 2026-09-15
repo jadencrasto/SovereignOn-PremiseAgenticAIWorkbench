@@ -84,6 +84,22 @@ class ToolRegistry:
             tool.name, tool.category, tool.read_only, tool.enabled,
         )
 
+    def disable(self, name: str) -> bool:
+        """Disable a tool by name. Returns True if found."""
+        t = self._tools.get(name)
+        if t:
+            t.enabled = False
+            return True
+        return False
+
+    def enable(self, name: str) -> bool:
+        """Enable a tool by name. Returns True if found."""
+        t = self._tools.get(name)
+        if t:
+            t.enabled = True
+            return True
+        return False
+
     def unregister(self, name: str) -> bool:
         """Remove a tool. Returns True if it existed."""
         existed = name in self._tools
@@ -151,27 +167,61 @@ class ToolRegistry:
                 error=f"Tool '{name}' is currently disabled.",
             )
 
-        # --- Enforce RBAC (Phase 7) ---
+        # --- Enforce RBAC (Phase 7 & Phase B) ---
         if user_role is not None:
             from backend.auth.models import UserRole, Permission, has_permission
-            # Viewer cannot execute any tool
-            if user_role == UserRole.VIEWER.value:
-                return ToolResult(
-                    tool=name, success=False,
-                    error=f"Permission denied: role '{user_role}' cannot execute tools.",
+            try:
+                role_enum = UserRole(user_role)
+            except (ValueError, KeyError):
+                err_msg = f"Permission denied: unknown role '{user_role}'."
+                self._audit_log(
+                    session_id=session_id,
+                    tool_name=name,
+                    arguments=arguments,
+                    success=False,
+                    duration_ms=(time.monotonic() - t0) * 1000,
+                    result_summary=f"RBAC_DENIAL: {err_msg}",
                 )
+                return ToolResult(tool=name, success=False, error=err_msg)
+
+            # Viewer cannot execute any tool
+            if role_enum == UserRole.VIEWER:
+                err_msg = f"Permission denied: role '{user_role}' cannot execute tools."
+                self._audit_log(
+                    session_id=session_id,
+                    tool_name=name,
+                    arguments=arguments,
+                    success=False,
+                    duration_ms=(time.monotonic() - t0) * 1000,
+                    result_summary=f"RBAC_DENIAL: {err_msg}",
+                )
+                return ToolResult(tool=name, success=False, error=err_msg)
+
             # Mutating tool requires EXECUTE_WRITE_TOOLS
             if not tool.read_only and not has_permission(user_role, Permission.EXECUTE_WRITE_TOOLS):
-                return ToolResult(
-                    tool=name, success=False,
-                    error=f"Permission denied: role '{user_role}' cannot execute mutating tool '{name}'.",
+                err_msg = f"Permission denied: role '{user_role}' cannot execute mutating tool '{name}'."
+                self._audit_log(
+                    session_id=session_id,
+                    tool_name=name,
+                    arguments=arguments,
+                    success=False,
+                    duration_ms=(time.monotonic() - t0) * 1000,
+                    result_summary=f"RBAC_DENIAL: {err_msg}",
                 )
+                return ToolResult(tool=name, success=False, error=err_msg)
+
             # Non-mutating tool requires EXECUTE_READ_TOOLS
             if tool.read_only and not has_permission(user_role, Permission.EXECUTE_READ_TOOLS):
-                return ToolResult(
-                    tool=name, success=False,
-                    error=f"Permission denied: role '{user_role}' cannot execute tool '{name}'.",
+                err_msg = f"Permission denied: role '{user_role}' cannot execute tool '{name}'."
+                self._audit_log(
+                    session_id=session_id,
+                    tool_name=name,
+                    arguments=arguments,
+                    success=False,
+                    duration_ms=(time.monotonic() - t0) * 1000,
+                    result_summary=f"RBAC_DENIAL: {err_msg}",
                 )
+                return ToolResult(tool=name, success=False, error=err_msg)
 
         # --- Validate arguments ---
         try:

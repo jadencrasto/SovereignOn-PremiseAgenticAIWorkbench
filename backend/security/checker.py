@@ -59,12 +59,26 @@ class SecurityChecker:
             self._check_sandbox_containment(),
             self._check_cors_policy(),
             self._check_database_hardening(),
+            self._check_code_execution_isolation(),
+            self._check_cookie_security(),
+            self._check_documentation_exposure(),
         ]
         return [d.to_dict() for d in diagnostics]
 
     def _check_authentication_mode(self) -> SecurityDiagnostic:
         auth_enabled = getattr(self._cfg, "auth_enabled", True)
         is_prod = self._cfg.app_env.lower() == "production"
+        dev_mode_flag = getattr(self._cfg, "dev_mode", None)
+
+        if is_prod and dev_mode_flag is True:
+            return SecurityDiagnostic(
+                id="SEC-001",
+                category="Authentication",
+                title="Production Configuration Conflict",
+                status="FAIL",
+                details="Contradictory security configuration: app_env is production but dev_mode is True. Production mode fails closed.",
+                remediation="Disable DEV_MODE when running in production.",
+            )
 
         if is_prod and not auth_enabled:
             return SecurityDiagnostic(
@@ -252,3 +266,109 @@ class SecurityChecker:
                 status="WARN",
                 details=f"Could not inspect database PRAGMAs: {exc}",
             )
+
+    def _check_code_execution_isolation(self) -> SecurityDiagnostic:
+        isolation = getattr(self._cfg, "code_exec_isolation", "subprocess").lower()
+        if isolation == "docker":
+            from backend.tools.code_execution import check_docker_daemon_available, check_docker_image_available
+            daemon_ok = check_docker_daemon_available()
+            image_name = getattr(self._cfg, "code_exec_docker_image", "sovereign-code-sandbox:latest")
+            image_ok = check_docker_image_available(image_name) if daemon_ok else False
+
+            if not daemon_ok:
+                return SecurityDiagnostic(
+                    id="SEC-007",
+                    category="Code Execution",
+                    title="Code Execution Isolation",
+                    status="FAIL",
+                    details="Docker container isolation configured, but Docker daemon is unreachable or stopped. Code execution refused.",
+                    remediation="Start Docker daemon or set CODE_EXEC_ISOLATION=subprocess for hardened local subprocess execution.",
+                )
+            if not image_ok:
+                return SecurityDiagnostic(
+                    id="SEC-007",
+                    category="Code Execution",
+                    title="Code Execution Isolation",
+                    status="FAIL",
+                    details=f"Docker container isolation configured, but sovereign image '{image_name}' is not found locally. Automatic pulling is prohibited in air-gap mode.",
+                    remediation=f"Load or build the local image '{image_name}' into Docker.",
+                )
+            return SecurityDiagnostic(
+                id="SEC-007",
+                category="Code Execution",
+                title="Code Execution Isolation",
+                status="PASS",
+                details=f"Container isolation active (Docker, image '{image_name}', --network none, read-only root, unprivileged user).",
+            )
+        else:
+            return SecurityDiagnostic(
+                id="SEC-007",
+                category="Code Execution",
+                title="Code Execution Isolation",
+                status="WARN",
+                details="Hardened local subprocess execution active (process group isolation, env sanitization, AST checks; process-level boundary only, not container isolation).",
+                remediation="Configure Docker container isolation (CODE_EXEC_ISOLATION=docker) for true container boundary.",
+            )
+
+    def _check_cookie_security(self) -> SecurityDiagnostic:
+        is_prod = self._cfg.app_env.lower() == "production"
+        cookie_secure = getattr(self._cfg, "auth_cookie_secure", False)
+
+        if is_prod:
+            if cookie_secure:
+                return SecurityDiagnostic(
+                    id="SEC-008",
+                    category="Cookie Security",
+                    title="Session Cookie Security Policy",
+                    status="PASS",
+                    details="Production session cookies are configured with Secure=True, HttpOnly=True, and SameSite=Lax.",
+                )
+            else:
+                return SecurityDiagnostic(
+                    id="SEC-008",
+                    category="Cookie Security",
+                    title="Session Cookie Security Policy",
+                    status="WARN",
+                    details="Production session cookies are configured with Secure=False. The application cookie itself is not Secure; deployment must guarantee HTTPS/TLS protection externally if TLS is terminated by a trusted reverse proxy.",
+                    remediation="Set AUTH_COOKIE_SECURE=true or ensure your reverse proxy enforces TLS and injects appropriate transport security.",
+                )
+        else:
+            return SecurityDiagnostic(
+                id="SEC-008",
+                category="Cookie Security",
+                title="Session Cookie Security Policy",
+                status="PASS",
+                details="Development environment: session cookies configured with HttpOnly=True and SameSite=Lax (Secure flag optional on local loopback).",
+            )
+
+    def _check_documentation_exposure(self) -> SecurityDiagnostic:
+        is_prod = self._cfg.app_env.lower() == "production"
+        docs_enabled = getattr(self._cfg, "enable_docs_in_prod", False)
+
+        if is_prod:
+            if docs_enabled:
+                return SecurityDiagnostic(
+                    id="SEC-009",
+                    category="API Security",
+                    title="Interactive API Documentation Exposure",
+                    status="WARN",
+                    details="Interactive documentation routes (/docs, /redoc, /openapi.json) are enabled in production environment via ENABLE_DOCS_IN_PROD=true.",
+                    remediation="Set ENABLE_DOCS_IN_PROD=false in production to prevent schema and endpoint enumeration.",
+                )
+            else:
+                return SecurityDiagnostic(
+                    id="SEC-009",
+                    category="API Security",
+                    title="Interactive API Documentation Exposure",
+                    status="PASS",
+                    details="Interactive documentation endpoints (/docs, /redoc, /openapi.json) are disabled in production.",
+                )
+        else:
+            return SecurityDiagnostic(
+                id="SEC-009",
+                category="API Security",
+                title="Interactive API Documentation Exposure",
+                status="PASS",
+                details="Interactive documentation endpoints (/docs, /redoc, /openapi.json) are enabled for local development.",
+            )
+

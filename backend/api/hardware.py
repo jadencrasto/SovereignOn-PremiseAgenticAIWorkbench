@@ -11,8 +11,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
+
+from backend.auth.dependencies import require_permission
+from backend.auth.models import Permission, User
 
 router = APIRouter(prefix="/api/hardware", tags=["hardware"])
 
@@ -40,7 +43,10 @@ class HardwareStatusResponse(BaseModel):
 
 
 @router.get("/status", response_model=HardwareStatusResponse, summary="Get live hardware & model manager status")
-async def get_hardware_status(request: Request):
+async def get_hardware_status(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
     """
     Returns live hardware telemetry and the adaptive model manager's
     current VRAM state and recent eviction decisions.

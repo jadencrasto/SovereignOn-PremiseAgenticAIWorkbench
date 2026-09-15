@@ -437,15 +437,14 @@ class TestRelevanceGate:
         assert retriever.is_chunk_relevant(0.35) is True
         assert retriever.is_chunk_relevant(0.385) is True
 
-        # Unrelated / weak distances (> 0.385 and < 0.615)
+        # Irrelevant distances (cosine distance > 0.385)
+        assert retriever.is_chunk_relevant(0.386) is False
         assert retriever.is_chunk_relevant(0.392) is False
         assert retriever.is_chunk_relevant(0.403) is False
         assert retriever.is_chunk_relevant(0.500) is False
         assert retriever.is_chunk_relevant(0.580) is False
-
-        # High similarity scores in mock setups (>= 0.615)
-        assert retriever.is_chunk_relevant(0.85) is True
-        assert retriever.is_chunk_relevant(0.95) is True
+        assert retriever.is_chunk_relevant(0.85) is False
+        assert retriever.is_chunk_relevant(0.95) is False
 
     @pytest.mark.asyncio
     async def test_document_search_filters_unrelated_results(self):
@@ -453,7 +452,7 @@ class TestRelevanceGate:
         from backend.rag.retriever import RetrievedChunk
 
         mock_retriever = MagicMock()
-        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385 or s >= 0.615
+        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385
 
         # Unrelated chunks (e.g. distance 0.403 for aircraft query on refinery docs)
         weak_chunk = RetrievedChunk(
@@ -480,7 +479,7 @@ class TestRelevanceGate:
         from backend.rag.retriever import RetrievedChunk
 
         mock_retriever = MagicMock()
-        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385 or s >= 0.615
+        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385
 
         strong_chunk = RetrievedChunk(
             text="Compressor K-101 vibration overhaul report",
@@ -511,7 +510,7 @@ class TestRelevanceGate:
         mock_doc_service = MagicMock()
         mock_doc_service.has_documents.return_value = True
         mock_retriever = MagicMock()
-        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385 or s >= 0.615
+        mock_retriever.is_chunk_relevant = lambda s: s <= 0.385
         mock_doc_service._retriever = mock_retriever
 
         unrelated_chunk = RetrievedChunk(

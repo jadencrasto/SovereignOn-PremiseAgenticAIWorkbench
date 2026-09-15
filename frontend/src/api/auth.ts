@@ -11,6 +11,7 @@ const BASE_URL = '/api/auth';
 export async function loginApi(username: string, password: string): Promise<{ token: string; user: User }> {
   const resp = await fetch(`${BASE_URL}/login`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'X-Requested-With': 'XMLHttpRequest',
@@ -29,6 +30,7 @@ export async function loginApi(username: string, password: string): Promise<{ to
 export async function logoutApi(): Promise<void> {
   await fetch(`${BASE_URL}/logout`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'X-Requested-With': 'XMLHttpRequest',
     },
@@ -37,6 +39,7 @@ export async function logoutApi(): Promise<void> {
 
 export async function getMeApi(): Promise<User> {
   const resp = await fetch(`${BASE_URL}/me`, {
+    credentials: 'include',
     headers: {
       'X-Requested-With': 'XMLHttpRequest',
     },
@@ -52,6 +55,7 @@ export async function getMeApi(): Promise<User> {
 export async function changePasswordApi(currentPassword: string, newPassword: string): Promise<{ message: string }> {
   const resp = await fetch(`${BASE_URL}/change-password`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'X-Requested-With': 'XMLHttpRequest',
@@ -72,6 +76,7 @@ export async function changePasswordApi(currentPassword: string, newPassword: st
 
 export async function listUsersApi(): Promise<User[]> {
   const resp = await fetch(`${BASE_URL}/users`, {
+    credentials: 'include',
     headers: { 'X-Requested-With': 'XMLHttpRequest' },
   });
   if (!resp.ok) {

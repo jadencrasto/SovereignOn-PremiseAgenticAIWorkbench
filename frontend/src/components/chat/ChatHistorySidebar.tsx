@@ -20,8 +20,6 @@ import {
   Download,
   ChevronLeft,
   Calendar,
-  Sparkles,
-  Layers,
 } from 'lucide-react';
 
 export interface ChatSession {

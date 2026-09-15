@@ -75,15 +75,15 @@ class Retriever:
 
     def is_chunk_relevant(self, score: float) -> bool:
         """
-        Deterministic relevance check:
-        - In cosine distance space (0.0 to 2.0): score <= self._max_distance is relevant.
-        - For mock/similarity scores: score >= (1.0 - self._max_distance) is relevant.
+        Deterministic relevance check using ChromaDB cosine distance.
+
+        ChromaDB with hnsw:space=cosine returns distance = 1 - cosine_similarity.
+        Range: [0.0, 2.0]. Lower distance = more similar.
+
+        A chunk is relevant if its cosine distance <= self._max_distance
+        (default 0.385, meaning cosine_similarity >= 0.615).
         """
-        if score <= self._max_distance:
-            return True
-        if score >= (1.0 - self._max_distance):
-            return True
-        return False
+        return score <= self._max_distance
 
     async def retrieve(
         self,

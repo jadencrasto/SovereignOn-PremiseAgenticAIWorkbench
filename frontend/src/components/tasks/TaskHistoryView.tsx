@@ -219,40 +219,61 @@ export const TaskHistoryView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Deterministic Lifecycle Stepper */}
+              {/* Dynamic Lifecycle Stepper */}
               <div className="p-3.5 rounded-xl bg-[#0d1424]/80 border border-slate-800 space-y-1.5 shadow-sm">
                 <div className="text-[10px] font-mono uppercase text-slate-400 font-semibold tracking-wider">
-                  Deterministic Task Lifecycle
+                  Task Lifecycle
                 </div>
-                <div className="flex items-center gap-1.5 text-[11px] font-mono overflow-x-auto py-1">
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    1. Request
-                  </span>
-                  <span className="text-slate-600">→</span>
-                  <span className={`px-2 py-0.5 rounded ${selectedTask.plan ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                    2. Plan
-                  </span>
-                  <span className="text-slate-600">→</span>
-                  <span className={`px-2 py-0.5 rounded ${selectedTask.plan ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                    3. Validation
-                  </span>
-                  <span className="text-slate-600">→</span>
-                  <span className={`px-2 py-0.5 rounded ${selectedTask.plan?.steps?.some((s: any) => s.risk_level === 'high') ? (selectedTask.status === 'awaiting_approval' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30') : 'bg-slate-800 text-slate-500'}`}>
-                    4. Approval
-                  </span>
-                  <span className="text-slate-600">→</span>
-                  <span className={`px-2 py-0.5 rounded ${selectedTask.status === 'executing' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 animate-pulse' : selectedTask.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : selectedTask.status === 'failed' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                    5. Execution
-                  </span>
-                  <span className="text-slate-600">→</span>
-                  <span className={`px-2 py-0.5 rounded ${selectedTask.result ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                    6. Result
-                  </span>
-                  <span className="text-slate-600">→</span>
-                  <span className={`px-2 py-0.5 rounded ${selectedTask.status === 'completed' || selectedTask.status === 'failed' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                    7. Audit
-                  </span>
-                </div>
+                {(() => {
+                  const hasApproval = selectedTask.plan?.steps?.some((s: any) => s.requires_approval);
+                  const isTerminal = ['completed', 'failed', 'cancelled'].includes(selectedTask.status);
+                  const hasResult = !!selectedTask.result;
+                  const hasPlan = !!selectedTask.plan;
+
+                  // Build lifecycle stages dynamically from actual task state
+                  const stages: Array<{ label: string; active: boolean; pulsing?: boolean }> = [
+                    { label: 'Request', active: true },
+                    { label: 'Plan', active: hasPlan },
+                    ...(hasApproval
+                      ? [{
+                          label: 'Approval',
+                          active: selectedTask.status !== 'awaiting_approval' && isTerminal,
+                          pulsing: selectedTask.status === 'awaiting_approval',
+                        }]
+                      : [{ label: 'Approval (N/A)', active: false }]
+                    ),
+                    {
+                      label: 'Execution',
+                      active: selectedTask.status === 'executing' || isTerminal,
+                      pulsing: selectedTask.status === 'executing',
+                    },
+                    { label: 'Result', active: hasResult || isTerminal },
+                    { label: 'Audit', active: isTerminal },
+                  ];
+
+                  return (
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono overflow-x-auto py-1">
+                      {stages.map((stage, idx) => (
+                        <React.Fragment key={stage.label}>
+                          {idx > 0 && <span className="text-slate-600">→</span>}
+                          <span className={`px-2 py-0.5 rounded whitespace-nowrap ${
+                            stage.pulsing
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
+                              : stage.active
+                                ? selectedTask.status === 'failed' && stage.label === 'Execution'
+                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                  : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : stage.label.includes('N/A')
+                                  ? 'bg-slate-800/50 text-slate-600 border border-slate-700/30 italic'
+                                  : 'bg-slate-800 text-slate-500'
+                          }`}>
+                            {stage.label}
+                          </span>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
 
               {selectedTask.plan && selectedTask.plan.steps && (

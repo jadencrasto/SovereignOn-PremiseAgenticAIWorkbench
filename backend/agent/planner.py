@@ -119,6 +119,71 @@ _WRITE_KEYWORDS = [
 ]
 
 
+def is_general_knowledge_query(query: str) -> bool:
+    """
+    Detect general-knowledge questions that should remain a normal conversational response.
+
+    A general-knowledge query:
+    - Asks an informational/conceptual question (what is, define, explain, how does, describe, etc.)
+    - Does NOT reference any specific equipment tag (e.g. P-204, K-101)
+    - Does NOT request any artifact or file creation (e.g. create, xlsx, docx, file, report)
+    - Does NOT reference uploaded, indexed, or local documents.
+    """
+    if not query:
+        return False
+    q = query.strip().lower()
+
+    # Strip conversational polite prefixes (e.g. "please", "can you", "could you")
+    q = re.sub(r"^(please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|kindly\s+)", "", q).strip()
+
+    # 1. If it requests any file or artifact operation, NEVER general knowledge
+    artifact_action_keywords = [
+        "create", "generate", "write", "export", "save", "download",
+        "xlsx", "excel", "docx", "word", "csv", "artifact", "runbook",
+        "code_execution", "python code", "script", "execute code", "sandbox",
+    ]
+    if any(re.search(r"\b" + re.escape(kw) + r"\b", q) for kw in artifact_action_keywords):
+        return False
+
+    # 2. If it contains an equipment tag (e.g. P-204, P204, K-101, E-302, V-401), NEVER general knowledge
+    equipment_tag_pattern = r"\b[A-Za-z]{1,4}-?\d{2,5}\b"
+    for match in re.finditer(equipment_tag_pattern, query):
+        tag = match.group().upper()
+        if any(tag.startswith(p) for p in ("P-", "P", "K-", "K", "E-", "E", "V-", "V", "TK-", "TK", "S-", "S", "C-", "C", "T-", "T")):
+            return False
+
+    # 3. If it references uploaded, local, or organizational documents/policies, NEVER general knowledge
+    doc_keywords = [
+        "uploaded", "document", "documents", "file", "files", "report", "reports",
+        "indexed", "pdf", "knowledgebase", "knowledge base", "runbook",
+        "maintenance log", "inspection report", "local evidence", "supporting document",
+        "according to", "internal records", "our plant", "facility records",
+        "policy", "policies", "procedure", "procedures", "protocol", "protocols",
+        "sop", "manual", "manuals", "specification", "specifications",
+        "datasheet", "handbook", "guideline", "guidelines", "standard operating procedure",
+    ]
+    if any(re.search(r"\b" + re.escape(kw) + r"\b", q) for kw in doc_keywords):
+        return False
+
+    # 4. Check for general knowledge phrasing
+    general_question_starters = [
+        r"^what\s+(is|are|was|were)\b",
+        r"^define\b",
+        r"^explain\b",
+        r"^how\s+(does|do|did|can)\b",
+        r"^who\s+(is|are|was|were)\b",
+        r"^describe\b",
+        r"^tell\s+me\s+about\b",
+        r"^give\s+(me\s+)?an\s+overview\s+of\b",
+        r"^what\s+does\s+[a-z\s]+\s+mean\b",
+    ]
+    is_general_starter = any(re.search(p, q) for p in general_question_starters)
+    concept_pattern = r"\b(working principle|purpose|components|definition|types of|advantages of|disadvantages of|mechanism of)\b"
+    has_concept_query = bool(re.search(concept_pattern, q))
+
+    return is_general_starter or has_concept_query
+
+
 def should_use_planning(
     message: str,
     planning_enabled: bool = True,
@@ -135,6 +200,10 @@ def should_use_planning(
         return False
 
     msg_lower = message.lower().strip()
+
+    # General knowledge questions never need planning
+    if is_general_knowledge_query(message):
+        return False
 
     # Simple greetings / trivial questions — never plan
     for pattern in _SIMPLE_PATTERNS:
@@ -195,10 +264,10 @@ RULES:
    - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2").
    - code_execution: Executes Python code inside the local sandbox (e.g. for computation or data processing). Captures stdout/stderr.
    - docx_create: Generates a genuine Microsoft Word (.docx) document in the sandbox with title, paragraphs, and tables. Always set requires_approval to true.
-   - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Always set requires_approval to true.
+   - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Headers and rows will be dynamically populated from prior step observations at runtime. If the user specifies particular column headers (e.g. Equipment ID, Maintenance Findings, Operating Observations, Recommended Actions), preserve those exact semantic columns. Always set requires_approval to true.
    - file_write: Creates a text output file or incident log in the sandbox. Always set requires_approval to true.
-   - artifact_verifier: Verifies a generated report or artifact on disk (checks rows/paragraphs, columns, and SHA-256 hash). Follow docx_create, xlsx_report, or file_write with artifact_verifier whenever creating reports or documents.
-   - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the final grounded decision-support response.
+   - artifact_verifier: Verifies a generated report or artifact on disk (checks rows/paragraphs, columns, and SHA-256 hash). Follow docx_create, xlsx_report, or file_write with artifact_verifier whenever creating reports or documents. NEVER specify placeholder strings like "Findings text", "Observations text", "Actions text", "text", or generic column labels + "text" in expected_content. Only pass actual known keywords (e.g. equipment tag like "P-204") or leave expected_content omitted.
+   - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the grounded decision-support response. Spreadsheets and documents are generated natively by xlsx_report and docx_create; NEVER output Python code (e.g. openpyxl) or claim manual code execution. NEVER ask 'Would you like me to proceed with any further steps?' when steps or tasks are completing.
 
 5. Approval-gated summary workflow:
    When the user asks to prepare a summary, show it first, and create a document/file after approval (e.g. DOCX or Word document or report):

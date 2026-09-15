@@ -221,6 +221,9 @@ async def approve_task_step(
                 # Sources sentinel — skip in approval response
                 pass
 
+        # Final done event on approval resume stream
+        yield f"data: {json.dumps({'type': 'done', 'task_id': task_id})}\n\n"
+
     return StreamingResponse(
         _resume_stream(),
         media_type="text/event-stream",

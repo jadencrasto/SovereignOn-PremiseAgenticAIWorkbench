@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     error            TEXT,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
-    completed_at     TEXT
+    completed_at     TEXT,
+    user_id          TEXT,
+    user_role        TEXT,
+    clearance        TEXT
 )
 """
 
@@ -98,6 +101,11 @@ class TaskStore:
                 conn.execute(_CREATE_TASKS_TABLE)
                 conn.execute(_CREATE_APPROVALS_TABLE)
                 conn.execute(_CREATE_TASK_EVENTS_TABLE)
+                for col in ("user_id", "user_role", "clearance"):
+                    try:
+                        conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+                    except sqlite3.OperationalError:
+                        pass
                 conn.commit()
                 logger.info("TaskStore initialised | db=%s", self._db_path)
             finally:
@@ -123,8 +131,9 @@ class TaskStore:
                     """INSERT OR REPLACE INTO tasks
                        (task_id, session_id, user_request, plan_json,
                         current_step_idx, status, result, error,
-                        created_at, updated_at, completed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        created_at, updated_at, completed_at,
+                        user_id, user_role, clearance)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         task["task_id"],
                         task["session_id"],
@@ -137,6 +146,9 @@ class TaskStore:
                         task.get("created_at", now),
                         task.get("updated_at", now),
                         task.get("completed_at"),
+                        task.get("user_id"),
+                        task.get("user_role"),
+                        task.get("clearance"),
                     ),
                 )
                 conn.commit()

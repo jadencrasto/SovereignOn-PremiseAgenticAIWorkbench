@@ -36,7 +36,7 @@ const statusConfig: Record<string, {
   running: { icon: Loader2, color: 'text-sky-400', label: 'Running', animate: true },
   completed: { icon: CheckCircle2, color: 'text-emerald-400', label: 'Completed' },
   failed: { icon: XCircle, color: 'text-rose-400', label: 'Failed' },
-  skipped: { icon: SkipForward, color: 'text-slate-500', label: 'Skipped' },
+  skipped: { icon: SkipForward, color: 'text-slate-400', label: 'Not Required' },
 };
 
 export const PlanTimeline: React.FC<PlanTimelineProps> = ({

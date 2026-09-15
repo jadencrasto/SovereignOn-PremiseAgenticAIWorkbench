@@ -28,9 +28,13 @@ export const SourceCard: React.FC<SourceCardProps> = ({ source }) => {
           <div className="truncate">
             <div className="font-mono text-slate-200 truncate flex items-center gap-1.5 font-medium">
               <span>{source.filename}</span>
-              {source.page && (
+              {source.page ? (
                 <span className="text-[10px] text-slate-400 font-sans px-1 py-0.2 bg-slate-800 rounded">
                   p. {source.page}
+                </span>
+              ) : (
+                <span className="text-[10px] text-slate-400 font-sans px-1 py-0.2 bg-slate-800 rounded">
+                  sec. {(source.chunk_index ?? 0) + 1}
                 </span>
               )}
             </div>

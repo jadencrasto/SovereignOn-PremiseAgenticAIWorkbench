@@ -15,7 +15,6 @@ import {
   AlertTriangle,
   Lightbulb,
   AlertOctagon,
-  HelpCircle,
 } from 'lucide-react';
 import { MermaidRenderer } from './MermaidRenderer';
 
@@ -25,7 +24,7 @@ interface MarkdownContentProps {
 
 export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => {
   return (
-    <div className="prose-dark overflow-hidden leading-relaxed text-[13.5px] text-slate-200">
+    <div className="prose-dark overflow-visible leading-relaxed text-[13.5px] text-slate-200">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

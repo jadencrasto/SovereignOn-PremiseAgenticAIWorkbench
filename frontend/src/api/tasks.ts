@@ -27,7 +27,11 @@ export async function fetchTask(taskId: string): Promise<TaskDetail> {
 export async function approveTaskStep(taskId: string): Promise<Response> {
   return fetch(`/api/tasks/${encodeURIComponent(taskId)}/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
     body: JSON.stringify({ action: 'approve' }),
   });
 }
@@ -42,7 +46,11 @@ export async function rejectTaskStep(
 ): Promise<Response> {
   return fetch(`/api/tasks/${encodeURIComponent(taskId)}/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
     body: JSON.stringify({ action: 'reject', reason }),
   });
 }

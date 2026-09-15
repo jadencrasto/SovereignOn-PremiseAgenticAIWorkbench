@@ -254,7 +254,7 @@ export interface PlanStep {
   tool_name?: string | null;
   arguments?: Record<string, any>;
   requires_approval: boolean;
-  status: string; // 'pending' | 'awaiting_approval' | 'approved' | 'running' | 'completed' | 'failed' | 'skipped'
+  status: string; // 'pending' | 'awaiting_approval' | 'approved' | 'running' | 'completed' | 'failed' | 'skipped' (skipped = not required/N/A)
   result?: string | null;
   error?: string | null;
 }
