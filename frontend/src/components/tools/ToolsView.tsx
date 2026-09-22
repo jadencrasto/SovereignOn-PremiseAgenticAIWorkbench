@@ -1,5 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { Wrench, Search, FileCode, Calculator, FileText, FilePlus, Shield, Loader2 } from 'lucide-react';
+import {
+  Wrench,
+  Search,
+  FileCode,
+  Calculator,
+  FileText,
+  FilePlus,
+  Shield,
+  Loader2,
+  Terminal,
+  BookOpen,
+  FileSpreadsheet,
+  CheckCircle2,
+  Network,
+} from 'lucide-react';
 import { Badge } from '../common/Badge';
 import { fetchTools } from '../../api/tools';
 import type { ToolInfo } from '../../types';
@@ -10,6 +24,11 @@ const TOOL_ICONS: Record<string, React.FC<{ className?: string }>> = {
   file_read: FileCode,
   calculator: Calculator,
   file_write: FilePlus,
+  code_execution: Terminal,
+  docx_create: BookOpen,
+  xlsx_report: FileSpreadsheet,
+  artifact_verifier: CheckCircle2,
+  knowledge_graph_query: Network,
 };
 
 export const ToolsView: React.FC = () => {

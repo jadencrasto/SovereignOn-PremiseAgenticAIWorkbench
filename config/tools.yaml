@@ -40,3 +40,7 @@ tools:
     enabled: true
     risk_level: low
     requires_approval: false
+  knowledge_graph_query:
+    enabled: true
+    risk_level: low
+    requires_approval: false

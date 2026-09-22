@@ -101,6 +101,7 @@ class DocumentService:
         self,
         filename: str,
         content: bytes,
+        clearance: str = "viewer",
     ) -> DocumentUploadResult:
         """
         Full ingestion pipeline for one uploaded file.
@@ -112,8 +113,9 @@ class DocumentService:
           - No path traversal
 
         Args:
-            filename : original filename from the upload
-            content  : raw file bytes
+            filename  : original filename from the upload
+            content   : raw file bytes
+            clearance : verified server-side clearance ('viewer', 'operator', 'admin')
 
         Returns:
             DocumentUploadResult with document_id and chunk count.
@@ -121,6 +123,10 @@ class DocumentService:
         Raises:
             ValueError : invalid file type, too large, empty, etc.
         """
+        clean_clearance = str(clearance or "viewer").strip().lower()
+        if clean_clearance not in ("viewer", "operator", "admin"):
+            clean_clearance = "viewer"
+
         # ------ Security validation ------
         filename = self._sanitize_filename(filename)
         suffix = Path(filename).suffix.lower()
@@ -138,10 +144,11 @@ class DocumentService:
         if not content:
             raise ValueError("Uploaded file is empty.")
 
-        logger.info("Ingesting document: %s (%d bytes)", filename, len(content))
+        logger.info("Ingesting document: %s (%d bytes, clearance=%s)", filename, len(content), clean_clearance)
 
         # ------ Parse ------
         document = DocumentParser.parse(filename, content)
+        document.metadata["clearance"] = clean_clearance
         logger.info(
             "Parsed %s → doc_id=%s text_len=%d",
             filename, document.document_id, len(document.text),
@@ -167,6 +174,8 @@ class DocumentService:
         # ------ Store ------
         chunk_ids = [c.chunk_id for c in chunks]
         metadatas = [self._chunk_to_metadata(c) for c in chunks]
+        for m in metadatas:
+            m["clearance"] = clean_clearance
         self._store.add_chunks(
             chunk_ids=chunk_ids,
             embeddings=embeddings,
@@ -175,12 +184,30 @@ class DocumentService:
         )
         logger.info("Indexed %d chunks for document_id=%s", len(chunks), document.document_id)
 
+        # ------ Knowledge Graph Ingestion Hook (Non-fatal Isolation) ------
+        try:
+            if hasattr(self, "_graph_service") and self._graph_service:
+                self._graph_service.extract_and_index_document(
+                    document=document,
+                    chunks=chunks,
+                    clearance=clean_clearance,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Knowledge graph extraction failed for %s: %s (non-fatal, vector indexing preserved)",
+                filename, exc,
+            )
+
         return DocumentUploadResult(
             document_id=document.document_id,
             filename=filename,
             file_type=document.file_type,
             chunk_count=len(chunks),
         )
+
+    def set_graph_service(self, graph_service) -> None:
+        """Attach knowledge graph service for cross-modal ingestion & cleanup."""
+        self._graph_service = graph_service
 
     # ------------------------------------------------------------------
     # Retrieval
@@ -190,9 +217,10 @@ class DocumentService:
         self,
         query: str,
         top_k: Optional[int] = None,
+        user_clearance: str = "viewer",
     ) -> List[RetrievedChunk]:
-        """Semantic retrieval — delegates to the Retriever."""
-        return await self._retriever.retrieve(query, top_k=top_k)
+        """Semantic retrieval — delegates to the Retriever with clearance gating."""
+        return await self._retriever.retrieve(query, top_k=top_k, user_clearance=user_clearance)
 
     def has_documents(self) -> bool:
         """True if at least one document chunk has been indexed."""
@@ -202,27 +230,52 @@ class DocumentService:
     # Management
     # ------------------------------------------------------------------
 
-    def list_documents(self) -> List[DocumentInfo]:
-        """Return a list of all indexed documents with chunk counts."""
+    def list_documents(self, user_clearance: str = "admin") -> List[DocumentInfo]:
+        """
+        Return a list of indexed documents visible at user_clearance.
+        Restricted documents with 0 accessible chunks are excluded to prevent metadata leakage.
+        """
+        from backend.auth.models import is_clearance_sufficient, parse_clearance
+
         raw = self._store.list_documents()
         infos: List[DocumentInfo] = []
         for doc_meta in raw:
             doc_id = doc_meta["document_id"]
-            count = self._store.document_chunk_count(doc_id)
+            chunks_data = self._store.get_document_chunks(doc_id)
+            metas = chunks_data.get("metadatas", [])
+
+            # Count chunks accessible to this user
+            permitted_count = 0
+            for m in metas:
+                raw_clr = m.get("clearance") if isinstance(m, dict) else None
+                if not raw_clr or not parse_clearance(raw_clr):
+                    req_clr = "admin"
+                else:
+                    req_clr = str(raw_clr).strip().lower()
+                if is_clearance_sufficient(user_clearance, req_clr):
+                    permitted_count += 1
+
+            # Do not reveal restricted documents in listing
+            if permitted_count == 0:
+                continue
+
             infos.append(DocumentInfo(
                 document_id=doc_id,
                 filename=doc_meta.get("filename", "unknown"),
                 file_type=doc_meta.get("file_type", ""),
-                chunk_count=count,
+                chunk_count=permitted_count,
             ))
         return infos
 
-    def get_document_details(self, document_id: str) -> Optional[Dict]:
+    def get_document_details(self, document_id: str, user_clearance: str = "admin") -> Optional[Dict]:
         """
-        Retrieve full details and vector chunks for a specific indexed document.
+        Retrieve full details and vector chunks for a specific indexed document,
+        filtering out chunks exceeding user_clearance.
 
-        Returns None if the document does not exist.
+        Returns None if document does not exist or user has zero accessible chunks.
         """
+        from backend.auth.models import is_clearance_sufficient, parse_clearance
+
         if not self._store.document_exists(document_id):
             # Check if document_id was passed as a filename
             all_docs = self._store.list_documents()
@@ -243,10 +296,20 @@ class DocumentService:
         filename = metas[0].get("filename", "unknown") if metas else "unknown"
         file_type = metas[0].get("file_type", "") if metas else ""
 
-        # Construct chunk items and sort by chunk_index
+        # Construct chunk items and apply clearance filtering
         chunk_items = []
         for i, (cid, text, meta) in enumerate(zip(ids, docs, metas)):
             meta_dict = meta if isinstance(meta, dict) else {}
+            raw_clr = meta_dict.get("clearance")
+            if not raw_clr or not parse_clearance(raw_clr):
+                req_clr = "admin"
+            else:
+                req_clr = str(raw_clr).strip().lower()
+
+            # Skip chunk if user lacks sufficient clearance
+            if not is_clearance_sufficient(user_clearance, req_clr):
+                continue
+
             chunk_items.append({
                 "chunk_id": cid,
                 "chunk_index": meta_dict.get("chunk_index", i),
@@ -254,6 +317,10 @@ class DocumentService:
                 "text": text,
                 "metadata": meta_dict,
             })
+
+        if not chunk_items:
+            # Document exists but user has insufficient clearance to view any chunk
+            return None
 
         chunk_items.sort(key=lambda c: c["chunk_index"])
 
@@ -288,6 +355,13 @@ class DocumentService:
         # Remove uploaded file safely
         if filename:
             self._delete_upload_file(document_id, filename)
+
+        # Clean up knowledge graph records safely
+        try:
+            if hasattr(self, "_graph_service") and self._graph_service:
+                self._graph_service.delete_document_entities(document_id)
+        except Exception as exc:
+            logger.warning("Knowledge graph cleanup failed for doc_id=%s: %s", document_id, exc)
 
         logger.info("Deleted document %s (%d chunks)", document_id, deleted)
         return deleted

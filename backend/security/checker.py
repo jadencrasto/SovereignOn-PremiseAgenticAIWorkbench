@@ -80,7 +80,17 @@ class SecurityChecker:
                 remediation="Disable DEV_MODE when running in production.",
             )
 
+        dev_override = getattr(self._cfg, "auth_dev_override", False)
         if is_prod and not auth_enabled:
+            if dev_override:
+                return SecurityDiagnostic(
+                    id="SEC-001",
+                    category="Authentication",
+                    title="Production Authentication Enforcement",
+                    status="WARN",
+                    details="Authentication is disabled in production via explicit development override (auth_dev_override=true).",
+                    remediation="Disable auth_dev_override and enable authentication (.env: AUTH_ENABLED=true).",
+                )
             return SecurityDiagnostic(
                 id="SEC-001",
                 category="Authentication",

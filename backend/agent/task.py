@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +59,14 @@ _VALID_TASK_TRANSITIONS = {
     TaskStatus.CANCELLED: set(),           # terminal
 }
 
+TERMINAL_TASK_STATUSES = {
+    TaskStatus.COMPLETED,
+    TaskStatus.FAILED,
+    TaskStatus.FAILED_TIMEOUT,
+    TaskStatus.FAILED_INTERRUPTED,
+    TaskStatus.CANCELLED,
+}
+
 _VALID_STEP_TRANSITIONS = {
     StepStatus.pending.value: {StepStatus.awaiting_approval.value, StepStatus.running.value, StepStatus.skipped.value},
     StepStatus.awaiting_approval.value: {StepStatus.approved.value, StepStatus.skipped.value, StepStatus.failed.value},
@@ -80,7 +89,7 @@ class TaskStateError(Exception):
 
 class TaskState(BaseModel):
     """Complete state of an agent task."""
-    task_id: str = Field(default_factory=lambda: f"task_{uuid.uuid4().hex[:12]}")
+    task_id: str = Field(default_factory=lambda: f"task_{uuid.uuid4().hex}")
     session_id: str
     user_request: str
     plan: Optional[AgentPlan] = None
@@ -110,8 +119,55 @@ class TaskManager:
     and SQLite persistence.
     """
 
-    def __init__(self, store: TaskStore) -> None:
+    def __init__(self, store: TaskStore, approval_manager: Any = None) -> None:
         self._store = store
+        self._approval_manager = approval_manager
+        self._lock = threading.RLock()
+        self._audit_logger: Any = None
+        self._emitted_lifecycle_events: Set[Tuple[str, str]] = set()
+
+    def set_approval_manager(self, approval_manager: Any) -> None:
+        """Inject ApprovalManager reference to synchronize on approval invalidation/cancellation."""
+        self._approval_manager = approval_manager
+
+    def set_audit_logger(self, audit_logger: Any) -> None:
+        """Inject central AuditLogger (Step 16)."""
+        self._audit_logger = audit_logger
+
+    def _emit_task_audit(
+        self,
+        event_type: str,
+        task: TaskState,
+        action: str,
+        success: bool = True,
+        failure_reason: Optional[str] = None,
+    ) -> None:
+        """Emit central audit log event for task lifecycle, deduplicated per task."""
+        if not self._audit_logger:
+            return
+        key = (task.task_id, event_type)
+        if key in self._emitted_lifecycle_events:
+            return
+        self._emitted_lifecycle_events.add(key)
+        try:
+            self._audit_logger.log(
+                event_type=event_type,
+                action=action,
+                resource=f"task:{task.task_id}",
+                task_id=task.task_id,
+                user_id=task.user_id,
+                role=task.user_role,
+                session_id=task.session_id,
+                success=success,
+                failure_reason=failure_reason,
+                metadata={
+                    "status": task.status,
+                    "clearance": task.clearance,
+                    "current_step_idx": task.current_step_idx,
+                },
+            )
+        except Exception as exc:
+            logger.error("Failed to emit task lifecycle audit event '%s': %s", event_type, exc)
 
     def create_task(
         self,
@@ -134,6 +190,7 @@ class TaskManager:
             "task_created | task=%s session=%s user_role=%s request_len=%d",
             task.task_id, session_id, user_role, len(user_request),
         )
+        self._emit_task_audit("task.created", task, action="create_task", success=True)
         return task
 
     def get_task(self, task_id: str) -> Optional[TaskState]:
@@ -147,9 +204,10 @@ class TaskManager:
         self,
         limit: int = 50,
         status: Optional[str] = None,
+        user_id: Optional[Union[str, List[str]]] = None,
     ) -> List[TaskState]:
-        """List tasks with optional status filter."""
-        rows = self._store.list_tasks(limit=limit, status=status)
+        """List tasks with optional status and user_id filter."""
+        rows = self._store.list_tasks(limit=limit, status=status, user_id=user_id)
         return [self._from_row(r) for r in rows]
 
     def update_status(
@@ -164,39 +222,56 @@ class TaskManager:
 
         Raises TaskStateError if the transition is invalid.
         """
-        task = self.get_task(task_id)
-        if task is None:
-            raise TaskStateError(f"Task not found: {task_id}")
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                raise TaskStateError(f"Task not found: {task_id}")
 
-        self._validate_transition(task.status, new_status)
+            self._validate_transition(task.status, new_status)
 
-        task.status = new_status
-        task.updated_at = datetime.now(timezone.utc).isoformat()
-        if result is not None:
-            task.result = result
-        if error is not None:
-            task.error = error
-        if new_status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-            task.completed_at = task.updated_at
+            task.status = new_status
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            if result is not None:
+                task.result = result
+            if error is not None:
+                task.error = error
+            if new_status in TERMINAL_TASK_STATUSES:
+                task.completed_at = task.updated_at
 
-        self._persist(task)
+            self._persist(task)
 
-        logger.info(
-            "task_status_changed | task=%s status=%s",
-            task_id, new_status,
-        )
-        return task
+            logger.info(
+                "task_status_changed | task=%s status=%s",
+                task_id, new_status,
+            )
+
+            # Central audit logging for terminal states (Step 16)
+            if new_status == TaskStatus.COMPLETED:
+                self._emit_task_audit("task.completed", task, action="task_completed", success=True)
+            elif new_status in (TaskStatus.FAILED, TaskStatus.FAILED_TIMEOUT, TaskStatus.FAILED_INTERRUPTED):
+                self._emit_task_audit(
+                    "task.failed",
+                    task,
+                    action=f"task_{new_status}",
+                    success=False,
+                    failure_reason=error or task.error or f"Task transitioned to {new_status}",
+                )
+            elif new_status == TaskStatus.CANCELLED:
+                self._emit_task_audit("task.cancelled", task, action="cancel_task", success=True)
+
+            return task
 
     def set_plan(self, task_id: str, plan: AgentPlan) -> TaskState:
         """Attach a validated plan to a task."""
-        task = self.get_task(task_id)
-        if task is None:
-            raise TaskStateError(f"Task not found: {task_id}")
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                raise TaskStateError(f"Task not found: {task_id}")
 
-        task.plan = plan
-        task.updated_at = datetime.now(timezone.utc).isoformat()
-        self._persist(task)
-        return task
+            task.plan = plan
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist(task)
+            return task
 
     def update_step_status(
         self,
@@ -211,73 +286,96 @@ class TaskManager:
 
         Raises TaskStateError if the step transition is invalid.
         """
-        task = self.get_task(task_id)
-        if task is None:
-            raise TaskStateError(f"Task not found: {task_id}")
-        if task.plan is None:
-            raise TaskStateError(f"Task {task_id} has no plan")
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                raise TaskStateError(f"Task not found: {task_id}")
+            if task.plan is None:
+                raise TaskStateError(f"Task {task_id} has no plan")
 
-        step = None
-        for s in task.plan.steps:
-            if s.id == step_id:
-                step = s
-                break
+            step = None
+            for s in task.plan.steps:
+                if s.id == step_id:
+                    step = s
+                    break
 
-        if step is None:
-            raise TaskStateError(f"Step not found: {step_id} in task {task_id}")
+            if step is None:
+                raise TaskStateError(f"Step not found: {step_id} in task {task_id}")
 
-        self._validate_step_transition(step.status, new_status)
+            self._validate_step_transition(step.status, new_status)
 
-        step.status = new_status
-        if result is not None:
-            step.result = result
-        if error is not None:
-            step.error = error
+            step.status = new_status
+            if result is not None:
+                step.result = result
+            if error is not None:
+                step.error = error
 
-        task.updated_at = datetime.now(timezone.utc).isoformat()
-        self._persist(task)
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist(task)
 
-        logger.info(
-            "step_status_changed | task=%s step=%s status=%s",
-            task_id, step_id, new_status,
-        )
-        return task
+            logger.info(
+                "step_status_changed | task=%s step=%s status=%s",
+                task_id, step_id, new_status,
+            )
+            return task
 
     def advance_step(self, task_id: str) -> TaskState:
         """Move to the next step index."""
-        task = self.get_task(task_id)
-        if task is None:
-            raise TaskStateError(f"Task not found: {task_id}")
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                raise TaskStateError(f"Task not found: {task_id}")
 
-        task.current_step_idx += 1
-        task.updated_at = datetime.now(timezone.utc).isoformat()
-        self._persist(task)
-        return task
+            task.current_step_idx += 1
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist(task)
+            return task
 
     def cancel_task(self, task_id: str) -> TaskState:
-        """Cancel a task, skipping all pending steps."""
-        task = self.get_task(task_id)
-        if task is None:
-            raise TaskStateError(f"Task not found: {task_id}")
+        """Cancel a task, skipping all pending steps and invalidating pending approvals."""
+        with self._lock:
+            task = self.get_task(task_id)
+            if task is None:
+                raise TaskStateError(f"Task not found: {task_id}")
 
-        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-            raise TaskStateError(
-                f"Cannot cancel task {task_id} in terminal state: {task.status}"
-            )
+            if task.status in TERMINAL_TASK_STATUSES:
+                raise TaskStateError(
+                    f"Cannot cancel task {task_id} in terminal state: {task.status}"
+                )
 
-        # Skip all non-terminal steps
-        if task.plan:
-            for step in task.plan.steps:
-                if step.status in (StepStatus.pending.value, StepStatus.awaiting_approval.value, StepStatus.approved.value):
-                    step.status = StepStatus.skipped.value
+            self._validate_transition(task.status, TaskStatus.CANCELLED)
 
-        task.status = TaskStatus.CANCELLED
-        task.completed_at = datetime.now(timezone.utc).isoformat()
-        task.updated_at = task.completed_at
-        self._persist(task)
+            # Invalidate / reject pending approval in ApprovalManager or store
+            if self._approval_manager:
+                try:
+                    pending = self._approval_manager.get_pending_for_task(task_id)
+                    if pending:
+                        self._approval_manager.reject(pending.approval_id, reason="Task cancelled by user")
+                except Exception as exc:
+                    logger.warning("Failed to reject approval for cancelled task %s: %s", task_id, exc)
+            else:
+                try:
+                    pending_row = self._store.get_pending_approval_for_task(task_id)
+                    if pending_row:
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        self._store.update_approval_status(pending_row["approval_id"], "rejected", resolved_at=now_iso)
+                except Exception as exc:
+                    logger.warning("Failed to reject pending approval row for cancelled task %s: %s", task_id, exc)
 
-        logger.info("task_cancelled | task=%s", task_id)
-        return task
+            # Skip all non-terminal steps
+            if task.plan:
+                for step in task.plan.steps:
+                    if step.status in (StepStatus.pending.value, StepStatus.awaiting_approval.value, StepStatus.approved.value):
+                        step.status = StepStatus.skipped.value
+
+            task.status = TaskStatus.CANCELLED
+            task.completed_at = datetime.now(timezone.utc).isoformat()
+            task.updated_at = task.completed_at
+            self._persist(task)
+
+            logger.info("task_cancelled | task=%s", task_id)
+            self._emit_task_audit("task.cancelled", task, action="cancel_task", success=True)
+            return task
 
     # ------------------------------------------------------------------
     # Helpers
@@ -356,27 +454,72 @@ class TaskManager:
                 logger.warning("Task %s recovered: Marked FAILED_INTERRUPTED due to restart.", task_id)
 
             elif status == TaskStatus.AWAITING_APPROVAL:
-                # Re-verify approval against current ToolRegistry state
-                if tool_registry and approval_manager:
-                    pending = approval_manager.get_pending_for_task(task_id)
+                effective_approval_mgr = approval_manager or getattr(self, "_approval_manager", None)
+                recovered_as_interrupted = False
+                if effective_approval_mgr:
+                    pending = effective_approval_mgr.get_pending_for_task(task_id)
                     if pending:
-                        tool = tool_registry.get(pending.tool_name) if hasattr(tool_registry, "get") else (
-                            tool_registry.get_tool(pending.tool_name) if hasattr(tool_registry, "get_tool") else None
-                        )
-                        if not tool or not tool.enabled:
-                            # Tool disabled or missing — invalidate pending approval
-                            approval_manager.reject(
-                                pending.approval_id,
-                                reason="Tool configuration changed or tool disabled during server restart. Re-approval required.",
+                        if tool_registry:
+                            tool = tool_registry.get(pending.tool_name) if hasattr(tool_registry, "get") else (
+                                tool_registry.get_tool(pending.tool_name) if hasattr(tool_registry, "get_tool") else None
                             )
-                            counts["re_approval_required"] += 1
-                            logger.warning(
-                                "Task %s approval invalidated: Tool '%s' disabled or missing on restart.",
-                                task_id, pending.tool_name,
-                            )
-                counts["active"] += 1
+                            if not tool or not tool.enabled:
+                                # Tool disabled or missing — invalidate pending approval
+                                effective_approval_mgr.reject(
+                                    pending.approval_id,
+                                    reason="Tool configuration changed or tool disabled during server restart. Re-approval required.",
+                                )
+                                counts["re_approval_required"] += 1
+                                logger.warning(
+                                    "Task %s approval invalidated: Tool '%s' disabled or missing on restart.",
+                                    task_id, pending.tool_name,
+                                )
+                    else:
+                        # No pending approval found for a task in AWAITING_APPROVAL.
+                        # Check for approved approvals that were never executed before restart/crash.
+                        approved_list = []
+                        if hasattr(effective_approval_mgr, "get_approved_for_task"):
+                            approved_list = effective_approval_mgr.get_approved_for_task(task_id)
+                        elif hasattr(self._store, "get_approved_approvals_for_task"):
+                            approved_list = self._store.get_approved_approvals_for_task(task_id)
 
-            elif status in (TaskStatus.PENDING, TaskStatus.PLANNING):
+                        if approved_list:
+                            # Reconcile divergence: approval was marked approved, but task remained awaiting_approval.
+                            # Invalidate stale approved approval(s) so they cannot be replayed or reused.
+                            for appr in approved_list:
+                                appr_id = appr.approval_id if hasattr(appr, "approval_id") else appr.get("approval_id")
+                                if appr_id and hasattr(self._store, "update_approval_status"):
+                                    self._store.update_approval_status(
+                                        appr_id,
+                                        status="rejected",
+                                        resolved_at=datetime.now(timezone.utc).isoformat(),
+                                    )
+
+                            self.update_status(
+                                task_id,
+                                TaskStatus.FAILED_INTERRUPTED,
+                                error="Task approval was processed but execution was interrupted before starting. Please resubmit your request.",
+                            )
+                            counts["interrupted"] += 1
+                            recovered_as_interrupted = True
+                            logger.warning(
+                                "Task %s recovered: Found approved-but-unapplied approval divergence across restart; marked FAILED_INTERRUPTED.",
+                                task_id,
+                            )
+                if not recovered_as_interrupted:
+                    counts["active"] += 1
+
+            elif status == TaskStatus.PLANNING:
+                # Interrupted during plan generation — cannot safely assume plan was completed
+                self.update_status(
+                    task_id,
+                    TaskStatus.FAILED_INTERRUPTED,
+                    error="Task planning was interrupted by a server restart. Please re-submit your request.",
+                )
+                counts["interrupted"] += 1
+                logger.warning("Task %s recovered: Marked FAILED_INTERRUPTED during planning restart.", task_id)
+
+            elif status in (TaskStatus.PENDING,):
                 counts["active"] += 1
 
         return counts

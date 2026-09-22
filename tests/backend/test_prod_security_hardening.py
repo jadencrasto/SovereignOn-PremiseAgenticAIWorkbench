@@ -17,6 +17,7 @@ Covers:
 """
 
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
@@ -122,20 +123,26 @@ class TestDocumentationExposure:
     def test_docs_disabled_in_production(self, base_test_settings: Settings):
         base_test_settings.app_env = "production"
         base_test_settings.enable_docs_in_prod = False
-        app = create_app(base_test_settings)
-        with TestClient(app) as client:
-            assert client.get("/docs").status_code == 404
-            assert client.get("/redoc").status_code == 404
-            assert client.get("/openapi.json").status_code == 404
+        base_test_settings.code_exec_isolation = "docker"
+        with patch("backend.tools.code_execution.check_docker_daemon_available", return_value=True), \
+             patch("backend.tools.code_execution.check_docker_image_available", return_value=True):
+            app = create_app(base_test_settings)
+            with TestClient(app) as client:
+                assert client.get("/docs").status_code == 404
+                assert client.get("/redoc").status_code == 404
+                assert client.get("/openapi.json").status_code == 404
 
     def test_docs_enabled_in_production_with_explicit_flag(self, base_test_settings: Settings):
         base_test_settings.app_env = "production"
         base_test_settings.enable_docs_in_prod = True
-        app = create_app(base_test_settings)
-        with TestClient(app) as client:
-            assert client.get("/docs").status_code == 200
-            assert client.get("/redoc").status_code == 200
-            assert client.get("/openapi.json").status_code == 200
+        base_test_settings.code_exec_isolation = "docker"
+        with patch("backend.tools.code_execution.check_docker_daemon_available", return_value=True), \
+             patch("backend.tools.code_execution.check_docker_image_available", return_value=True):
+            app = create_app(base_test_settings)
+            with TestClient(app) as client:
+                assert client.get("/docs").status_code == 200
+                assert client.get("/redoc").status_code == 200
+                assert client.get("/openapi.json").status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -164,26 +171,29 @@ class TestErrorDisclosureProtection:
 
     def test_unhandled_exception_sanitized_in_production(self, base_test_settings: Settings):
         base_test_settings.app_env = "production"
-        app = create_app(base_test_settings)
+        base_test_settings.code_exec_isolation = "docker"
+        with patch("backend.tools.code_execution.check_docker_daemon_available", return_value=True), \
+             patch("backend.tools.code_execution.check_docker_image_available", return_value=True):
+            app = create_app(base_test_settings)
 
-        # Inject a test route that raises an unhandled exception
-        test_router = APIRouter()
-        @test_router.get("/test-internal-bug")
-        def bug_route():
-            raise RuntimeError("Database password leaked in raw exception: secret123!")
+            # Inject a test route that raises an unhandled exception
+            test_router = APIRouter()
+            @test_router.get("/test-internal-bug")
+            def bug_route():
+                raise RuntimeError("Database password leaked in raw exception: secret123!")
 
-        app.include_router(test_router)
+            app.include_router(test_router)
 
-        with TestClient(app, raise_server_exceptions=False) as client:
-            resp = client.get("/test-internal-bug")
-            assert resp.status_code == 500
-            data = resp.json()
-            # Must hide internal exception details and password
-            assert "secret123!" not in resp.text
-            assert data["detail"] == "An internal server error occurred."
-            assert data["error_code"] == "INTERNAL_SERVER_ERROR"
-            assert "request_id" in data
-            assert resp.headers.get("X-Request-ID") == data["request_id"]
+            with TestClient(app, raise_server_exceptions=False) as client:
+                resp = client.get("/test-internal-bug")
+                assert resp.status_code == 500
+                data = resp.json()
+                # Must hide internal exception details and password
+                assert "secret123!" not in resp.text
+                assert data["detail"] == "An internal server error occurred."
+                assert data["error_code"] == "INTERNAL_SERVER_ERROR"
+                assert "request_id" in data
+                assert resp.headers.get("X-Request-ID") == data["request_id"]
 
     def test_unhandled_exception_diagnostic_in_development(self, base_test_settings: Settings):
         base_test_settings.app_env = "development"

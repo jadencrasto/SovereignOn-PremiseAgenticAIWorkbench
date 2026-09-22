@@ -57,6 +57,37 @@ def get_engine(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Authorization helpers
+# ---------------------------------------------------------------------------
+
+def _is_task_accessible(task, current_user: User, is_cancel: bool = False) -> bool:
+    """
+    Check if a task is accessible by the current user:
+    - Administrators (UserRole.ADMIN) can access and cancel all tasks.
+    - Privileged operators can cancel unowned/legacy tasks (user_id=NULL) as part of operational management.
+    - Regular users and operators can only access and cancel tasks matching their user id or username.
+    - Legacy tasks with user_id=NULL return 404 for read access by non-administrators.
+    """
+    from backend.auth.models import UserRole
+    is_admin = current_user.role == UserRole.ADMIN.value or current_user.role == UserRole.ADMIN
+    if is_admin:
+        return True
+
+    if not task.user_id:
+        if is_cancel:
+            is_operator = current_user.role == UserRole.OPERATOR.value or current_user.role == UserRole.OPERATOR
+            if is_operator:
+                return True
+        return False
+
+    user_identifiers = {
+        getattr(current_user, "id", None),
+        getattr(current_user, "username", None),
+    }
+    return task.user_id in user_identifiers
+
+
+# ---------------------------------------------------------------------------
 # GET /api/tasks/monitor — Operational Monitoring (Phase 7)
 # ---------------------------------------------------------------------------
 
@@ -88,8 +119,19 @@ async def list_tasks(
     task_manager=Depends(get_task_manager),
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
-    """List recent tasks, optionally filtered by status."""
-    tasks = task_manager.list_tasks(limit=limit, status=status)
+    """
+    List recent tasks.
+    Regular users only see their own tasks.
+    Administrators may view all tasks across the system.
+    """
+    from backend.auth.models import UserRole
+    is_admin = current_user.role == UserRole.ADMIN.value or current_user.role == UserRole.ADMIN
+
+    if is_admin:
+        tasks = task_manager.list_tasks(limit=limit, status=status)
+    else:
+        user_ids = [u for u in (getattr(current_user, "id", None), getattr(current_user, "username", None)) if u]
+        tasks = task_manager.list_tasks(limit=limit, status=status, user_id=user_ids)
 
     summaries = []
     for t in tasks:
@@ -132,7 +174,7 @@ async def get_task(
 ):
     """Retrieve the full task state including plan steps and current progress."""
     task = task_manager.get_task(task_id)
-    if task is None:
+    if task is None or not _is_task_accessible(task, current_user):
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
 
     plan_schema = None
@@ -195,6 +237,22 @@ async def approve_task_step(
     The approval must match the exact task/step/tool/arguments that were
     submitted.  If any mismatch is detected, execution is rejected.
     """
+    # Verify task exists and is accessible
+    task = task_manager.get_task(task_id)
+    if task is None or not _is_task_accessible(task, current_user):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {task_id}",
+        )
+
+    # Cannot approve tasks that are cancelled or in a terminal state
+    from backend.agent.task import TaskStatus, TERMINAL_TASK_STATUSES
+    if task.status in TERMINAL_TASK_STATUSES or task.status == TaskStatus.CANCELLED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve task in {task.status.value if hasattr(task.status, 'value') else task.status} state",
+        )
+
     # Find the pending approval
     pending = approval_manager.get_pending_for_task(task_id)
     if pending is None:
@@ -206,12 +264,15 @@ async def approve_task_step(
     approved = body.action == "approve"
 
     # Use the engine to resume the task (handles hash verification and RBAC role passing)
+    user_id = getattr(current_user, "id", None) or getattr(current_user, "username", None)
+
     async def _resume_stream():
         async for item in engine.resume_agent_task(
             task_id=task_id,
             approval_id=pending.approval_id,
             approved=approved,
             user_role=current_user.role,
+            user_id=user_id,
         ):
             if isinstance(item, str):
                 yield f"data: {json.dumps({'type': 'delta', 'content': item})}\n\n"
@@ -251,11 +312,15 @@ async def cancel_task(
     """Cancel a task that is in progress or awaiting approval."""
     from backend.agent.task import TaskStateError
 
+    task = task_manager.get_task(task_id)
+    if task is None or not _is_task_accessible(task, current_user, is_cancel=True):
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
     try:
-        task = task_manager.cancel_task(task_id)
+        cancelled_task = task_manager.cancel_task(task_id)
         return {
-            "task_id": task.task_id,
-            "status": task.status,
+            "task_id": cancelled_task.task_id,
+            "status": cancelled_task.status,
             "message": "Task cancelled",
         }
     except TaskStateError as exc:
@@ -273,10 +338,15 @@ async def cancel_task(
 )
 async def list_task_approvals(
     task_id: str,
+    task_manager=Depends(get_task_manager),
     approval_manager=Depends(get_approval_manager),
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """List all approval requests (including resolved) for a task."""
+    task = task_manager.get_task(task_id)
+    if task is None or not _is_task_accessible(task, current_user):
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
     approvals = approval_manager.get_approvals_for_task(task_id)
 
     schemas = [

@@ -40,13 +40,23 @@ class ConfigValidator:
         results: List[Dict[str, Any]] = []
 
         # 1. Environment & Auth consistency
-        is_prod = self._cfg.app_env.lower() == "production"
-        if is_prod and not getattr(self._cfg, "auth_enabled", True):
-            results.append({
-                "rule": "prod_auth_enabled",
-                "status": "FAIL",
-                "message": "Authentication cannot be disabled (auth_enabled=false) in production environment.",
-            })
+        is_prod = self._cfg.app_env.lower() in ("production", "prod")
+        auth_on = getattr(self._cfg, "auth_enabled", True)
+        dev_override = getattr(self._cfg, "auth_dev_override", False)
+
+        if is_prod and not auth_on:
+            if dev_override:
+                results.append({
+                    "rule": "prod_auth_enabled",
+                    "status": "WARN",
+                    "message": "Explicit development override active: authentication is disabled in production environment.",
+                })
+            else:
+                results.append({
+                    "rule": "prod_auth_enabled",
+                    "status": "FAIL",
+                    "message": "Authentication cannot be disabled (auth_enabled=false) in production environment without explicit development override (auth_dev_override=true).",
+                })
         else:
             results.append({
                 "rule": "prod_auth_enabled",
@@ -170,6 +180,44 @@ class ConfigValidator:
                 "rule": "runtime_directories",
                 "status": "FAIL",
                 "message": f"Failed to initialize runtime directories: {exc}",
+            })
+
+        # 6. Production code execution isolation
+        code_exec_isolation = getattr(self._cfg, "code_exec_isolation", "subprocess").lower()
+        if is_prod:
+            if code_exec_isolation != "docker":
+                results.append({
+                    "rule": "prod_code_exec_isolation",
+                    "status": "FAIL",
+                    "message": "Production environment requires Docker container isolation ('code_exec_isolation: docker'). Subprocess isolation is not permitted in production.",
+                })
+            else:
+                from backend.tools.code_execution import check_docker_daemon_available, check_docker_image_available
+                if not check_docker_daemon_available():
+                    results.append({
+                        "rule": "prod_code_exec_isolation",
+                        "status": "FAIL",
+                        "message": "Production environment has Docker code execution configured, but Docker daemon is unreachable or stopped. Failing closed.",
+                    })
+                else:
+                    image_name = getattr(self._cfg, "code_exec_docker_image", "sovereign-code-sandbox:latest")
+                    if not check_docker_image_available(image_name):
+                        results.append({
+                            "rule": "prod_code_exec_isolation",
+                            "status": "FAIL",
+                            "message": f"Production Docker image '{image_name}' is not found in local Docker storage. Execution refused.",
+                        })
+                    else:
+                        results.append({
+                            "rule": "prod_code_exec_isolation",
+                            "status": "PASS",
+                            "message": "Production code execution is securely isolated via Docker container.",
+                        })
+        else:
+            results.append({
+                "rule": "prod_code_exec_isolation",
+                "status": "PASS",
+                "message": f"Code execution isolation mode is '{code_exec_isolation}' (development/non-production).",
             })
 
         # Determine overall validity

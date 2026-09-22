@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -94,6 +95,7 @@ class ApprovalManager:
         self._store = store
         self._timeout_seconds = timeout_seconds
         self._audit_logger: Any = None
+        self._lock = threading.RLock()
 
     def set_audit_logger(self, audit_logger: Any) -> None:
         """Inject the centralized AuditLogger (Phase 7)."""
@@ -149,6 +151,13 @@ class ApprovalManager:
         })
 
         if self._audit_logger:
+            task_user_id = None
+            try:
+                task_row = self._store.get_task(task_id) if hasattr(self._store, "get_task") else None
+                if task_row:
+                    task_user_id = task_row["user_id"] if isinstance(task_row, dict) else getattr(task_row, "user_id", None)
+            except Exception:
+                pass
             self._audit_logger.log(
                 event_type="task.approval_requested",
                 action="approval_requested",
@@ -156,6 +165,7 @@ class ApprovalManager:
                 tool=tool_name,
                 task_id=task_id,
                 step_id=step_id,
+                user_id=task_user_id,
                 success=True,
                 metadata={"risk_level": risk_level, "reason": reason, "hash": args_hash[:16]},
             )
@@ -170,87 +180,101 @@ class ApprovalManager:
             - Approval not found
             - Approval is not in 'pending' state
             - Approval has expired
+            - Underlying task is in terminal/cancelled state
         """
-        approval = self._get_and_validate(approval_id)
+        with self._lock:
+            approval = self._get_and_validate(approval_id)
 
-        now = datetime.now(timezone.utc)
-        approval.status = "approved"
-        approval.resolved_at = now.isoformat()
+            now = datetime.now(timezone.utc)
+            approval.status = "approved"
+            approval.resolved_at = now.isoformat()
 
-        self._store.update_approval_status(
-            approval_id, "approved", resolved_at=approval.resolved_at
-        )
+            updated = self._store.update_approval_status_atomic(
+                approval_id=approval_id,
+                expected_status="pending",
+                new_status="approved",
+                resolved_at=approval.resolved_at,
+            )
+            if not updated:
+                raise ValueError(f"Approval {approval_id} is already resolved or no longer pending")
 
-        logger.info(
-            "approval_granted | approval=%s task=%s step=%s tool=%s",
-            approval_id, approval.task_id, approval.step_id, approval.tool_name,
-        )
-
-        self._store.save_event({
-            "task_id": approval.task_id,
-            "step_id": approval.step_id,
-            "event_type": "approval_granted",
-            "tool_name": approval.tool_name,
-            "risk_level": approval.risk_level,
-        })
-
-        if self._audit_logger:
-            self._audit_logger.log(
-                event_type="task.approval_granted",
-                action="approval_granted",
-                resource=f"task:{approval.task_id}/step:{approval.step_id}",
-                tool=approval.tool_name,
-                task_id=approval.task_id,
-                step_id=approval.step_id,
-                user_id=user_id,
-                success=True,
-                metadata={"approval_id": approval_id},
+            logger.info(
+                "approval_granted | approval=%s task=%s step=%s tool=%s",
+                approval_id, approval.task_id, approval.step_id, approval.tool_name,
             )
 
-        return approval
+            self._store.save_event({
+                "task_id": approval.task_id,
+                "step_id": approval.step_id,
+                "event_type": "approval_granted",
+                "tool_name": approval.tool_name,
+                "risk_level": approval.risk_level,
+            })
+
+            if self._audit_logger:
+                self._audit_logger.log(
+                    event_type="task.approval_granted",
+                    action="approval_granted",
+                    resource=f"task:{approval.task_id}/step:{approval.step_id}",
+                    tool=approval.tool_name,
+                    task_id=approval.task_id,
+                    step_id=approval.step_id,
+                    user_id=user_id,
+                    success=True,
+                    metadata={"approval_id": approval_id},
+                )
+
+            return approval
 
     def reject(self, approval_id: str, reason: str = "", user_id: Optional[str] = None) -> ApprovalRequest:
         """
         Reject a pending request.
         """
-        approval = self._get_and_validate(approval_id)
+        with self._lock:
+            approval = self._get_and_validate(approval_id)
 
-        now = datetime.now(timezone.utc)
-        approval.status = "rejected"
-        approval.resolved_at = now.isoformat()
+            now = datetime.now(timezone.utc)
+            approval.status = "rejected"
+            approval.resolved_at = now.isoformat()
 
-        self._store.update_approval_status(
-            approval_id, "rejected", resolved_at=approval.resolved_at
-        )
-
-        logger.info(
-            "approval_rejected | approval=%s task=%s step=%s tool=%s reason=%s",
-            approval_id, approval.task_id, approval.step_id,
-            approval.tool_name, reason[:100],
-        )
-
-        self._store.save_event({
-            "task_id": approval.task_id,
-            "step_id": approval.step_id,
-            "event_type": "approval_rejected",
-            "tool_name": approval.tool_name,
-            "risk_level": approval.risk_level,
-            "result_summary": reason[:200],
-        })
-
-        if self._audit_logger:
-            self._audit_logger.log(
-                event_type="task.approval_rejected",
-                action="approval_rejected",
-                resource=f"task:{approval.task_id}/step:{approval.step_id}",
-                tool=approval.tool_name,
-                task_id=approval.task_id,
-                step_id=approval.step_id,
-                user_id=user_id,
-                success=False,
-                failure_reason=reason or "Rejected by operator",
-                metadata={"approval_id": approval_id, "reason": reason[:200]},
+            updated = self._store.update_approval_status_atomic(
+                approval_id=approval_id,
+                expected_status="pending",
+                new_status="rejected",
+                resolved_at=approval.resolved_at,
             )
+            if not updated:
+                raise ValueError(f"Approval {approval_id} is already resolved or no longer pending")
+
+            logger.info(
+                "approval_rejected | approval=%s task=%s step=%s tool=%s reason=%s",
+                approval_id, approval.task_id, approval.step_id,
+                approval.tool_name, reason[:100],
+            )
+
+            self._store.save_event({
+                "task_id": approval.task_id,
+                "step_id": approval.step_id,
+                "event_type": "approval_rejected",
+                "tool_name": approval.tool_name,
+                "risk_level": approval.risk_level,
+                "result_summary": reason[:200],
+            })
+
+            if self._audit_logger:
+                self._audit_logger.log(
+                    event_type="task.approval_rejected",
+                    action="approval_rejected",
+                    resource=f"task:{approval.task_id}/step:{approval.step_id}",
+                    tool=approval.tool_name,
+                    task_id=approval.task_id,
+                    step_id=approval.step_id,
+                    user_id=user_id,
+                    success=False,
+                    failure_reason=reason or "Rejected by operator",
+                    metadata={"approval_id": approval_id, "reason": reason[:200]},
+                )
+
 
         return approval
 
@@ -272,6 +296,11 @@ class ApprovalManager:
     def get_approvals_for_task(self, task_id: str) -> List[ApprovalRequest]:
         """List all approvals (including resolved) for a task."""
         rows = self._store.list_approvals_for_task(task_id)
+        return [ApprovalRequest(**r) for r in rows]
+
+    def get_approved_for_task(self, task_id: str) -> List[ApprovalRequest]:
+        """List all approved approvals for a task."""
+        rows = self._store.get_approved_approvals_for_task(task_id)
         return [ApprovalRequest(**r) for r in rows]
 
     def verify_approval_for_execution(
@@ -391,6 +420,15 @@ class ApprovalManager:
         if self._is_expired(approval):
             self._expire(approval)
             raise ValueError(f"Approval {approval_id} has expired")
+
+        # Validate that the associated task is not in a terminal or cancelled state
+        task_row = self._store.get_task(approval.task_id)
+        if task_row:
+            task_status = task_row.get("status")
+            if task_status in ("cancelled", "failed", "failed_timeout", "failed_interrupted", "completed"):
+                raise ValueError(
+                    f"Cannot modify approval for task {approval.task_id} in {task_status} state"
+                )
 
         return approval
 

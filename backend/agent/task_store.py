@@ -19,7 +19,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +75,25 @@ CREATE TABLE IF NOT EXISTS task_events (
 )
 """
 
+_CREATE_ARTIFACTS_TABLE = """
+CREATE TABLE IF NOT EXISTS artifacts (
+    filename         TEXT PRIMARY KEY,
+    path             TEXT NOT NULL,
+    task_id          TEXT,
+    user_id          TEXT,
+    user_role        TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    size_bytes       INTEGER DEFAULT 0,
+    sha256_hash      TEXT,
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+)
+"""
+
 
 class TaskStore:
     """
-    Local SQLite persistence layer for agent tasks and approvals.
+    Local SQLite persistence layer for agent tasks, approvals, and artifacts.
 
     Thread-safe via a threading lock.  Database and directory are
     created automatically on first use.
@@ -101,6 +116,9 @@ class TaskStore:
                 conn.execute(_CREATE_TASKS_TABLE)
                 conn.execute(_CREATE_APPROVALS_TABLE)
                 conn.execute(_CREATE_TASK_EVENTS_TABLE)
+                conn.execute(_CREATE_ARTIFACTS_TABLE)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_user ON artifacts(user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id)")
                 for col in ("user_id", "user_role", "clearance"):
                     try:
                         conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
@@ -171,21 +189,36 @@ class TaskStore:
         self,
         limit: int = 50,
         status: Optional[str] = None,
+        user_id: Optional[Union[str, List[str]]] = None,
     ) -> List[Dict[str, Any]]:
-        """List tasks, optionally filtered by status."""
+        """List tasks, optionally filtered by status and/or user_id."""
         with self._lock:
             conn = self._connect()
             try:
+                clauses = []
+                params: list = []
                 if status:
-                    rows = conn.execute(
-                        "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                        (status, limit),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
-                        (limit,),
-                    ).fetchall()
+                    clauses.append("status = ?")
+                    params.append(status)
+                if user_id is not None:
+                    if isinstance(user_id, (list, tuple, set)):
+                        clean_ids = [str(u) for u in user_id if u]
+                        if clean_ids:
+                            placeholders = ", ".join("?" for _ in clean_ids)
+                            clauses.append(f"user_id IN ({placeholders})")
+                            params.extend(clean_ids)
+                        else:
+                            clauses.append("1=0")
+                    else:
+                        clauses.append("user_id = ?")
+                        params.append(str(user_id))
+
+                where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+                params.append(limit)
+                rows = conn.execute(
+                    f"SELECT * FROM tasks {where_sql} ORDER BY created_at DESC LIMIT ?",
+                    tuple(params),
+                ).fetchall()
                 return [dict(r) for r in rows]
             finally:
                 conn.close()
@@ -331,6 +364,22 @@ class TaskStore:
             finally:
                 conn.close()
 
+    def get_approved_approvals_for_task(
+        self, task_id: str
+    ) -> List[Dict[str, Any]]:
+        """Retrieve any approved approvals for a specific task."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM approvals WHERE task_id = ? AND status = 'approved' "
+                    "ORDER BY created_at DESC",
+                    (task_id,),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
     def update_approval_status(
         self,
         approval_id: str,
@@ -346,6 +395,26 @@ class TaskStore:
                     (status, resolved_at, approval_id),
                 )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def update_approval_status_atomic(
+        self,
+        approval_id: str,
+        expected_status: str,
+        new_status: str,
+        resolved_at: Optional[str] = None,
+    ) -> bool:
+        """Atomically update an approval's status only if current status matches expected_status."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cursor = conn.execute(
+                    "UPDATE approvals SET status = ?, resolved_at = ? WHERE approval_id = ? AND status = ?",
+                    (new_status, resolved_at, approval_id, expected_status),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
             finally:
                 conn.close()
 
@@ -389,6 +458,86 @@ class TaskStore:
                     "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at",
                     (task_id,),
                 ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    # ------------------------------------------------------------------
+    # Artifact persistence & ownership (Step 16)
+    # ------------------------------------------------------------------
+
+    def save_artifact(
+        self,
+        filename: str,
+        path: str,
+        task_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_role: Optional[str] = None,
+        size_bytes: int = 0,
+        sha256_hash: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record or update artifact ownership metadata atomically."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO artifacts (filename, path, task_id, user_id, user_role, created_at, updated_at, size_bytes, sha256_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(filename) DO UPDATE SET
+                        path=excluded.path,
+                        task_id=COALESCE(excluded.task_id, artifacts.task_id),
+                        user_id=COALESCE(excluded.user_id, artifacts.user_id),
+                        user_role=COALESCE(excluded.user_role, artifacts.user_role),
+                        updated_at=excluded.updated_at,
+                        size_bytes=excluded.size_bytes,
+                        sha256_hash=COALESCE(excluded.sha256_hash, artifacts.sha256_hash)
+                    """,
+                    (filename, path, task_id, user_id, user_role, now, now, size_bytes, sha256_hash),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        return {
+            "filename": filename,
+            "path": path,
+            "task_id": task_id,
+            "user_id": user_id,
+            "user_role": user_role,
+            "size_bytes": size_bytes,
+            "sha256_hash": sha256_hash,
+        }
+
+    def get_artifact(self, filename: str) -> Optional[Dict[str, Any]]:
+        """Retrieve artifact ownership record by filename."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM artifacts WHERE filename = ?", (filename,)
+                ).fetchone()
+                if row is None:
+                    return None
+                return dict(row)
+            finally:
+                conn.close()
+
+    def list_artifacts(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List all artifact records, optionally filtered by user_id."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                if user_id:
+                    rows = conn.execute(
+                        "SELECT * FROM artifacts WHERE user_id = ? ORDER BY created_at DESC",
+                        (user_id,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM artifacts ORDER BY created_at DESC"
+                    ).fetchall()
                 return [dict(r) for r in rows]
             finally:
                 conn.close()

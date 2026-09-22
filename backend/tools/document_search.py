@@ -10,7 +10,7 @@ No second RAG implementation is created.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -71,9 +71,25 @@ def create_document_search(retriever) -> callable:
         union = len(a_set | b_set)
         return (overlap / union) >= threshold if union > 0 else False
 
-    async def execute_document_search(args: DocumentSearchInput) -> List[dict]:
-        """Search the local vector store for relevant document chunks."""
-        chunks = await retriever.retrieve(args.query, top_k=args.top_k)
+    async def execute_document_search(
+        args: DocumentSearchInput,
+        _user: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[dict]:
+        """Search the local vector store for relevant document chunks with clearance gating."""
+        from backend.auth.models import resolve_user_clearance
+
+        # SEC-01: Authenticated clearance context MUST come only from server-injected
+        # parameters (_user or kwargs), NEVER from LLM-provided arguments.
+        caller_user = _user or kwargs.get("_user") or kwargs.get("authenticated_user")
+        if caller_user:
+            user_clearance = resolve_user_clearance(caller_user)
+        elif "user_role" in kwargs and kwargs["user_role"]:
+            user_clearance = resolve_user_clearance(kwargs["user_role"])
+        else:
+            user_clearance = "viewer"
+
+        chunks = await retriever.retrieve(args.query, top_k=args.top_k, user_clearance=user_clearance)
 
         # Apply deterministic relevance gate: only keep chunks passing relevance threshold
         is_relevant_fn = getattr(retriever, "is_chunk_relevant", None)

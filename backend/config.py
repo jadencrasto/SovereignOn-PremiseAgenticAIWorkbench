@@ -127,6 +127,18 @@ class Settings(BaseSettings):
     # Phase 7: Local Authentication & RBAC (default False for dev, enforced True in prod)
     # ------------------------------------------------------------------
     auth_enabled: bool = Field(default=False)
+    auth_dev_override: bool = Field(
+        default=False,
+        description="Explicit development override allowing authentication to be disabled in production.",
+    )
+    allow_legacy_kg_fallback: bool = Field(
+        default=True,
+        description="Allow fallback to legacy hardcoded Knowledge Graph data in development if SQLite service fails.",
+    )
+    allow_dev_clearance_simulation: bool = Field(
+        default=False,
+        description="Allow client-supplied ?clearance query parameter to simulate elevated role in development.",
+    )
     auth_idle_timeout_seconds: int = Field(default=28800)       # 8 hours
     auth_max_session_seconds: int = Field(default=86400)         # 24 hours
     auth_lockout_attempts: int = Field(default=5)

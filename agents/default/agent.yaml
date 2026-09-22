@@ -30,6 +30,11 @@ tools:
   - file_read
   - calculator
   - file_write
+  - code_execution
+  - docx_create
+  - xlsx_report
+  - artifact_verifier
+  - knowledge_graph_query
 
 # RAG settings
 rag:

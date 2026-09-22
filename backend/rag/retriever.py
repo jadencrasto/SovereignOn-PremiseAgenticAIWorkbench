@@ -46,6 +46,7 @@ class RetrievedChunk:
     score: float            # cosine distance (lower = more similar)
     file_type: str = ""
     is_relevant: bool = True
+    clearance: str = "viewer"
 
 
 # ---------------------------------------------------------------------------
@@ -89,22 +90,27 @@ class Retriever:
         self,
         query: str,
         top_k: Optional[int] = None,
+        user_clearance: str = "viewer",
     ) -> List[RetrievedChunk]:
         """
-        Retrieve the most relevant chunks for a query.
+        Retrieve the most relevant chunks for a query that satisfy caller clearance.
 
         Args:
-            query  : the user's question or search string
-            top_k  : override the default top_k for this call
+            query          : the user's question or search string
+            top_k          : override the default top_k for this call
+            user_clearance : verified server-side caller clearance ('viewer', 'operator', 'admin')
 
         Returns:
             List of RetrievedChunk, ordered by relevance (most relevant first).
             Returns [] if the collection is empty or embedding fails.
         """
+        from backend.auth.models import is_clearance_sufficient, parse_clearance
+
         k = top_k or self._top_k
 
         # Nothing indexed yet — return empty gracefully
-        if self._store.count() == 0:
+        store_count = self._store.count()
+        if store_count == 0:
             logger.debug("Retriever: collection is empty, skipping retrieval")
             return []
 
@@ -115,14 +121,17 @@ class Retriever:
             logger.error("Retriever: failed to embed query: %s", exc)
             return []
 
+        # Oversample candidate chunks so clearance filtering returns up to requested top_k permitted chunks
+        candidate_k = min(max(k * 4, 25), store_count)
+
         # Query the store
         try:
-            raw = self._store.query(query_embedding=query_embedding, top_k=k)
+            raw = self._store.query(query_embedding=query_embedding, top_k=candidate_k)
         except Exception as exc:
             logger.error("Retriever: ChromaDB query failed: %s", exc)
             return []
 
-        # Parse results
+        # Parse results and apply clearance filtering
         results: List[RetrievedChunk] = []
         ids = raw.get("ids", [[]])[0]
         documents = raw.get("documents", [[]])[0]
@@ -132,6 +141,17 @@ class Retriever:
         for chunk_id, text, meta, dist in zip(ids, documents, metadatas, distances):
             if not text or not meta:
                 continue
+
+            # Centralized clearance enforcement: missing or invalid metadata fails safe (requires admin)
+            raw_clr = meta.get("clearance")
+            if not raw_clr or not parse_clearance(raw_clr):
+                required_clr = "admin"
+            else:
+                required_clr = str(raw_clr).strip().lower()
+
+            if not is_clearance_sufficient(user_clearance, required_clr):
+                continue
+
             dist_val = float(dist)
             results.append(RetrievedChunk(
                 text=text,
@@ -143,10 +163,13 @@ class Retriever:
                 score=dist_val,
                 file_type=meta.get("file_type", ""),
                 is_relevant=self.is_chunk_relevant(dist_val),
+                clearance=required_clr,
             ))
+            if len(results) >= k:
+                break
 
         logger.info(
-            "Retrieved %d chunks for query (len=%d) top_k=%d",
-            len(results), len(query), k,
+            "Retrieved %d permitted chunks for query (len=%d) requested_k=%d candidate_k=%d clearance=%s",
+            len(results), len(query), k, candidate_k, user_clearance,
         )
         return results

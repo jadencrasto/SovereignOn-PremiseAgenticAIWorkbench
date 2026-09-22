@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from backend.config import settings
 
@@ -95,6 +95,8 @@ _SAFE_SUBPROCESS_ENV_KEYS: Set[str] = {
 
 class CodeExecutionInput(BaseModel):
     """Input schema for the code_execution tool."""
+    model_config = ConfigDict(extra="forbid")
+
     code: str = Field(
         ...,
         min_length=1,
@@ -509,6 +511,14 @@ def create_code_execution(sandbox_dir: Path, cfg: Optional[Any] = None) -> calla
 
         timeout = min(max(1, args.timeout_seconds or _DEFAULT_TIMEOUT_SECONDS), _MAX_TIMEOUT_SECONDS)
         isolation_mode = getattr(active_cfg, "code_exec_isolation", "subprocess").lower()
+
+        # Enforce production isolation policy: Subprocess is disallowed in production
+        is_prod = getattr(active_cfg, "is_prod", False) or (getattr(active_cfg, "app_env", "development").lower() in ("production", "prod"))
+        if is_prod and isolation_mode != "docker":
+            raise RuntimeError(
+                "Production security policy violation: Code execution in production requires "
+                "Docker container isolation ('code_exec_isolation: docker'). Subprocess execution is disallowed in production."
+            )
 
         if isolation_mode == "docker":
             # Air-gap safe Docker execution path

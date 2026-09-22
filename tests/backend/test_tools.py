@@ -594,13 +594,23 @@ class TestToolsAPI:
         data = resp.json()
         assert "tools" in data
         assert "total" in data
-        assert data["total"] >= 5
+        assert data["total"] == 10
         names = [t["name"] for t in data["tools"]]
-        assert "calculator" in names
-        assert "document_search" in names
-        assert "file_list" in names
-        assert "file_read" in names
-        assert "file_write" in names
+        expected_names = [
+            "document_search",
+            "file_list",
+            "file_read",
+            "calculator",
+            "file_write",
+            "xlsx_report",
+            "docx_create",
+            "code_execution",
+            "artifact_verifier",
+            "knowledge_graph_query",
+        ]
+        assert len(names) == 10
+        for name in expected_names:
+            assert name in names
 
     def test_tools_have_schema(self, client):
         resp = client.get("/api/tools")
@@ -612,6 +622,36 @@ class TestToolsAPI:
             assert "category" in tool
             assert "read_only" in tool
             assert "enabled" in tool
+
+    @pytest.mark.asyncio
+    async def test_knowledge_graph_execution_through_registry(self):
+        """Verify knowledge_graph_query tool executes through ToolRegistry.execute()."""
+        from backend.tools.knowledge_graph import KnowledgeGraphQueryInput, create_knowledge_graph_query
+        from backend.graph.store import KnowledgeGraphStore
+        from backend.graph.service import KnowledgeGraphService
+        import tempfile
+        from pathlib import Path
+
+        tmp_db = Path(tempfile.mkdtemp()) / "test_kg_exec.db"
+        store = KnowledgeGraphStore(db_path=tmp_db)
+        store.seed_static_topology()
+        service = KnowledgeGraphService(store=store)
+
+        registry = ToolRegistry()
+        registry.register(ToolDefinition(
+            name="knowledge_graph_query",
+            description="Knowledge Graph tool",
+            input_schema=KnowledgeGraphQueryInput,
+            execute_fn=create_knowledge_graph_query(service),
+        ))
+
+        res = await registry.execute("knowledge_graph_query", {"query": "UNIT_HC04", "max_depth": 1})
+        assert res.success is True
+        assert res.result["found"] is True
+        assert res.result["query"] == "UNIT_HC04"
+        assert res.result["target_entity"] == "UNIT_HC04"
+        assert res.result["node_count"] >= 1
+
 
 
 class TestChatAPIToolsEnabled:
@@ -655,3 +695,183 @@ class TestChatAPIToolsEnabled:
         assert resp.status_code == 200
 
 
+class TestToolsConfigRegistration:
+    """Test configuration application, overrides, and fail-closed defaults in _register_tools()."""
+
+    def test_register_tools_reads_config_and_applies_overrides(self):
+        from backend.main import _register_tools
+        from backend.config import settings
+
+        reg = ToolRegistry()
+        mock_retriever = MagicMock()
+        mock_graph = MagicMock()
+
+        custom_cfg = {
+            "document_search": {
+                "enabled": True,
+                "risk_level": "medium",
+                "requires_approval": True,
+            },
+            "file_read": {
+                "enabled": False,
+                "risk_level": "low",
+                "requires_approval": False,
+            },
+            "file_write": {
+                "enabled": True,
+                "risk_level": "high",
+                "requires_approval": True,
+            },
+        }
+
+        _register_tools(reg, mock_retriever, tools_config=custom_cfg, graph_service=mock_graph, cfg=settings)
+
+        doc_tool = reg.get("document_search")
+        assert doc_tool is not None
+        assert doc_tool.risk_level == "medium"
+        assert doc_tool.requires_approval is True
+        assert doc_tool.enabled is True
+
+        read_tool = reg.get("file_read")
+        assert read_tool is not None
+        assert read_tool.risk_level == "low"
+        assert read_tool.requires_approval is False
+        assert read_tool.enabled is False
+
+    def test_register_tools_uses_safe_defaults_on_invalid_or_missing_config(self):
+        from backend.main import _register_tools
+        from backend.config import settings
+
+        reg = ToolRegistry()
+        mock_retriever = MagicMock()
+        mock_graph = MagicMock()
+
+        invalid_cfg = {
+            "file_write": {
+                "enabled": "not_a_bool",
+                "risk_level": "UNKNOWN_RISK",
+                "requires_approval": "not_a_bool",
+            },
+            "calculator": {
+                "enabled": True,
+                "risk_level": 12345,
+                "requires_approval": None,
+            },
+        }
+
+        _register_tools(reg, mock_retriever, tools_config=invalid_cfg, graph_service=mock_graph, cfg=settings)
+
+        # file_write must fail-safe to high risk and requires_approval=True
+        fw_tool = reg.get("file_write")
+        assert fw_tool.risk_level == "high"
+        assert fw_tool.requires_approval is True
+        assert fw_tool.enabled is True
+
+        calc_tool = reg.get("calculator")
+        assert calc_tool.risk_level == "low"
+        assert calc_tool.requires_approval is False
+
+    def test_mandatory_approval_cannot_be_disabled_by_config(self):
+        """
+        SEC-02: Enforce that mutating tools (read_only=False with default=True)
+        cannot have requires_approval disabled via configuration.
+        """
+        from backend.main import _register_tools
+        from backend.config import settings
+
+        reg = ToolRegistry()
+        mock_retriever = MagicMock()
+        mock_graph = MagicMock()
+
+        bypass_cfg = {
+            "file_write": {"requires_approval": False},
+            "docx_create": {"requires_approval": False},
+            "xlsx_report": {"requires_approval": False},
+            # Read-only tool configured with false remains false
+            "document_search": {"requires_approval": False},
+            # Optional approval read-only tool configured with true becomes true
+            "file_read": {"requires_approval": True},
+            # Mutating tool configured with true stays true
+            "code_execution": {"requires_approval": True},
+        }
+
+        _register_tools(reg, mock_retriever, tools_config=bypass_cfg, graph_service=mock_graph, cfg=settings)
+
+        # Mutating tools must reject/override the false setting
+        assert reg.get("file_write").requires_approval is True
+        assert reg.get("docx_create").requires_approval is True
+        assert reg.get("xlsx_report").requires_approval is True
+
+        # Read-only tool with false remains false
+        assert reg.get("document_search").requires_approval is False
+
+        # Configured true on read-only and mutating tool works
+        assert reg.get("file_read").requires_approval is True
+        assert reg.get("code_execution").requires_approval is True
+
+    def test_malformed_scalar_and_null_config_entries_handled_safely(self):
+        """
+        DEF-01: Safely handle tool configuration entries that are scalars or null.
+        Must not raise AttributeError and must fall back to safe defaults.
+        """
+        from backend.main import _register_tools
+        from backend.config import settings
+
+        reg = ToolRegistry()
+        mock_retriever = MagicMock()
+        mock_graph = MagicMock()
+
+        malformed_cfg = {
+            "file_write": "disabled",
+            "docx_create": None,
+            "xlsx_report": 123,
+            "calculator": ["not", "a", "dict"],
+            "document_search": True,
+        }
+
+        # Must execute cleanly without AttributeError or uncaught exceptions
+        _register_tools(reg, mock_retriever, tools_config=malformed_cfg, graph_service=mock_graph, cfg=settings)
+
+        # Fail-closed defaults must be preserved
+        fw = reg.get("file_write")
+        assert fw is not None
+        assert fw.requires_approval is True
+        assert fw.risk_level == "high"
+        assert fw.enabled is True
+
+        docx = reg.get("docx_create")
+        assert docx.requires_approval is True
+        assert docx.risk_level == "high"
+
+        calc = reg.get("calculator")
+        assert calc.risk_level == "low"
+        assert calc.requires_approval is False
+
+    @pytest.mark.asyncio
+    async def test_consistent_registration_when_graph_service_is_none(self):
+        """
+        REG-01: Verify knowledge_graph_query remains represented in ToolRegistry (10 tools)
+        even when graph_service is None. Executing it returns a safe service-unavailable result.
+        """
+        from backend.main import _register_tools
+        from backend.config import settings
+
+        reg = ToolRegistry()
+        mock_retriever = MagicMock()
+
+        # Call with graph_service=None
+        _register_tools(reg, mock_retriever, tools_config={}, graph_service=None, cfg=settings)
+
+        assert len(reg.list_tools()) == 10
+        assert reg.has_tool("knowledge_graph_query")
+
+        kg_tool = reg.get("knowledge_graph_query")
+        assert kg_tool is not None
+        assert kg_tool.read_only is True
+        assert kg_tool.enabled is False
+
+        # Direct execution of unavailable executor returns controlled error without crashing
+        res = await kg_tool.execute_fn({"query": "UNIT_HC04"})
+        assert res["success"] is False
+        assert res["found"] is False
+        assert "unavailable" in res["error"].lower()

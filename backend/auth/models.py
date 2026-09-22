@@ -74,6 +74,38 @@ def is_clearance_sufficient(user_clearance: Any, min_clearance: Any) -> bool:
     return CLEARANCE_HIERARCHY.get(parsed_user, 0) >= CLEARANCE_HIERARCHY.get(parsed_min, 999)
 
 
+def resolve_user_clearance(user: Any) -> str:
+    """
+    Derive normalized clearance string ('viewer', 'operator', 'admin')
+    from an authenticated server-side user.
+    Client-provided parameters can never elevate this value.
+    """
+    if not user:
+        return "viewer"
+    raw_role = getattr(user, "role", "viewer")
+    role_val = raw_role.value if hasattr(raw_role, "value") else str(raw_role)
+    role_str = role_val.strip().lower()
+
+    raw_clearance = getattr(user, "clearance", None)
+    if hasattr(raw_clearance, "value"):
+        raw_clearance = raw_clearance.value
+
+    clr_enum = parse_clearance(raw_clearance) if raw_clearance else None
+    if clr_enum == ClearanceLevel.L3:
+        clr_str = "admin"
+    elif clr_enum == ClearanceLevel.L2:
+        clr_str = "operator"
+    elif clr_enum == ClearanceLevel.L1:
+        clr_str = "viewer"
+    else:
+        clr_str = role_str
+
+    hierarchy = {"viewer": 1, "operator": 2, "admin": 3}
+    user_level = min(hierarchy.get(clr_str, 1), hierarchy.get(role_str, 1))
+    return {1: "viewer", 2: "operator", 3: "admin"}.get(user_level, "viewer")
+
+
+
 class Permission(str, Enum):
     VIEW_DATA = "view_data"                     # View documents, tasks, health, audit
     EXECUTE_READ_TOOLS = "execute_read_tools"   # document_search, file_list, file_read, calculator
@@ -180,22 +212,38 @@ class User(BaseModel):
     username: str
     password_hash: str
     role: str = UserRole.VIEWER.value
-    clearance: str = ClearanceLevel.L1.value
+    clearance: Optional[str] = None
     is_active: bool = True
     must_change_password: bool = False
     created_at: str
     last_login_at: Optional[str] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.clearance is None:
+            try:
+                role_enum = UserRole(self.role)
+                self.clearance = DEFAULT_CLEARANCE_MAP.get(role_enum, ClearanceLevel.L1).value
+            except Exception:
+                self.clearance = ClearanceLevel.L1.value
 
 
 class UserPublic(BaseModel):
     id: str
     username: str
     role: str
-    clearance: str = ClearanceLevel.L1.value
+    clearance: Optional[str] = None
     is_active: bool
     must_change_password: bool
     created_at: str
     last_login_at: Optional[str] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.clearance is None:
+            try:
+                role_enum = UserRole(self.role)
+                self.clearance = DEFAULT_CLEARANCE_MAP.get(role_enum, ClearanceLevel.L1).value
+            except Exception:
+                self.clearance = ClearanceLevel.L1.value
 
 
 class SessionData(BaseModel):
@@ -265,10 +313,14 @@ class AuthStore:
                 conn.execute(_CREATE_USERS_TABLE)
                 conn.execute(_CREATE_SESSIONS_TABLE)
                 conn.execute(_CREATE_FAILED_LOGINS_TABLE)
-                try:
-                    conn.execute("ALTER TABLE users ADD COLUMN clearance TEXT NOT NULL DEFAULT 'L1'")
-                except sqlite3.OperationalError:
-                    pass
+                cursor = conn.execute("PRAGMA table_info(users)")
+                columns = {row[1] for row in cursor.fetchall()}
+                if "clearance" not in columns:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN clearance TEXT NOT NULL DEFAULT 'L1'")
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc).lower():
+                            raise
                 conn.commit()
             finally:
                 conn.close()

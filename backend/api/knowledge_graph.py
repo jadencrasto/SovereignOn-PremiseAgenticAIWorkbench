@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from backend.auth.dependencies import require_permission
 from backend.auth.models import Permission, User
 from backend.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/knowledge-graph", tags=["knowledge-graph"])
 
@@ -359,23 +361,84 @@ async def get_knowledge_graph(
 ):
     """
     Returns nodes and edges filtered according to user role authorization.
-    Dynamically attaches indexed documents from the local ChromaDB / doc store into the graph!
+    Delegates to KnowledgeGraphService (SQLite-backed) when available,
+    falling back to legacy hardcoded dataset.
+    Dynamically attaches indexed documents from the local ChromaDB / doc store.
     """
     current_role = current_user.role
+    user_level = ROLE_LEVELS.get(current_role, 1)
 
     active_settings = getattr(request.app.state, "settings", settings)
-    auth_enabled = getattr(active_settings, "auth_enabled", False)
+    auth_enabled = getattr(active_settings, "auth_enabled", True)
+    is_prod = getattr(active_settings, "app_env", "development").lower() in ("production", "prod")
+    allow_dev_override = getattr(active_settings, "auth_dev_override", False) or getattr(active_settings, "allow_dev_clearance_simulation", False)
 
-    if auth_enabled:
-        # In production: query parameter clearance must NEVER influence authorization.
-        # Identity and clearance derive exclusively from current_user.
-        effective_role = current_role
+    # Clearance MUST derive from authenticated identity.
+    # Client-supplied clearance parameter can NEVER grant elevated privileges.
+    if clearance and clearance in ROLE_LEVELS:
+        req_level = ROLE_LEVELS[clearance]
+        if req_level > user_level:
+            if not is_prod and not auth_enabled and allow_dev_override:
+                # Explicit development/testing override ONLY
+                effective_role = clearance
+            else:
+                # Escalation attempt prevented: clamp to authenticated role
+                effective_role = current_role
+        else:
+            # Client requested down-scoped view (e.g. admin viewing as viewer/operator)
+            effective_role = clearance
     else:
-        # In development / demo: allow simulation override if valid, otherwise fallback to current_user.role
-        effective_role = clearance if (clearance and clearance in ROLE_LEVELS) else current_role
+        effective_role = current_role
 
     effective_level = ROLE_LEVELS.get(effective_role, 1)
 
+    # --- Delegate to KnowledgeGraphService if available ---
+    graph_service = getattr(request.app.state, "graph_service", None)
+    service_error: Optional[Exception] = None
+    if graph_service is not None:
+        try:
+            result = graph_service.get_full_graph(user_clearance=effective_role)
+            # Overwrite role/clearance metadata to match exact API contract
+            result["user_role"] = current_role
+            result["effective_clearance"] = effective_role
+            result["clearance_level"] = effective_level
+            return result
+        except Exception as exc:
+            logger.warning("KnowledgeGraphService query failed: %s", exc)
+            service_error = exc
+    else:
+        service_error = RuntimeError("KnowledgeGraphService is not initialized on application state")
+
+    # In production: disable silent fallback; audit and fail with controlled 503 error
+    if is_prod:
+        audit_logger = getattr(request.app.state, "audit_logger", None)
+        if audit_logger:
+            audit_logger.log(
+                event_type="knowledge_graph.failure",
+                action="get_knowledge_graph",
+                resource="/api/knowledge-graph",
+                success=False,
+                failure_reason=f"Knowledge graph service unavailable: {service_error}",
+                user_id=getattr(current_user, "id", None),
+                role=current_role,
+                request_id=request.headers.get("X-Request-ID"),
+                metadata={
+                    "error": str(service_error),
+                    "service_present": graph_service is not None,
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Knowledge graph service is temporarily unavailable in production.",
+        )
+
+    # In development/testing: check if legacy fallback is explicitly allowed
+    allow_legacy = getattr(active_settings, "allow_legacy_kg_fallback", True)
+    if not allow_legacy:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Knowledge graph service unavailable: {service_error}",
+        )
     # 1. Base Nodes filtering
     filtered_nodes: List[Dict[str, Any]] = []
     hidden_node_count = 0
@@ -401,7 +464,7 @@ async def get_knowledge_graph(
     dynamic_doc_edges: List[Dict[str, Any]] = []
     try:
         if hasattr(request.app.state, "doc_service"):
-            indexed_docs = request.app.state.doc_service.list_documents()
+            indexed_docs = request.app.state.doc_service.list_documents(user_clearance=effective_role)
             for doc in indexed_docs:
                 doc_node_id = f"DOC_{doc.document_id[:8]}"
                 doc_node = {
@@ -473,6 +536,8 @@ async def get_knowledge_graph(
             "sensor": "Telemetry & Sensor Probes",
             "defect": "NDT Defects & Failure Modes (Level 2+)",
             "sop": "Standards & Compliance SOPs",
+            "component": "Subsystems & Assemblies",
+            "action": "Maintenance Remediations",
             "document": "Live Ingested Documents (ChromaDB)",
             "classified": "Sovereign Classified Formulas & Keys (Level 3)",
         },

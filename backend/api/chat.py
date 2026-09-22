@@ -137,14 +137,17 @@ async def chat(
 
                         logger.info(
                             "chat_approval_intercept | session=%s task=%s approval=%s action=%s",
-                            session_id, pending_task.task_id, pending.approval_id, "approve" if is_nlp_approval else "reject"
+                            session_id, pending_task.task_id, pending.approval_id, "approve" if is_nlp_approval else "reject",
                         )
+                        approval_uid = getattr(current_user, "id", None) or getattr(current_user, "username", None)
+
                         async def _stream_intercepted_approval():
                             async for item in engine.resume_agent_task(
                                 task_id=pending_task.task_id,
                                 approval_id=pending.approval_id,
                                 approved=is_nlp_approval,
                                 user_role=current_user.role,
+                                user_id=approval_uid,
                             ):
                                 if isinstance(item, str):
                                     yield f"data: {json.dumps({'type': 'delta', 'content': item})}\n\n"
@@ -176,8 +179,9 @@ async def chat(
                 tools_enabled=True,
             )
             if use_planning and hasattr(engine, '_task_manager') and engine._task_manager is not None:
+                user_id = getattr(current_user, "id", None) or getattr(current_user, "username", None)
                 return StreamingResponse(
-                    _stream_sse_with_planning(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
+                    _stream_sse_with_planning(engine, session_id, body.message, body.model, model_used, user_role=current_user.role, user_id=user_id),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -188,8 +192,9 @@ async def chat(
             # Phase 6 unified: route through tracked wrapper when TaskManager is wired
             has_task_manager = hasattr(engine, '_task_manager') and engine._task_manager is not None
             if has_task_manager:
+                user_id = getattr(current_user, "id", None) or getattr(current_user, "username", None)
                 return StreamingResponse(
-                    _stream_sse_with_tools_tracked(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
+                    _stream_sse_with_tools_tracked(engine, session_id, body.message, body.model, model_used, user_role=current_user.role, user_id=user_id),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -197,8 +202,9 @@ async def chat(
                         "Connection": "keep-alive",
                     },
                 )
+            user_id = getattr(current_user, "id", None) or getattr(current_user, "username", None)
             return StreamingResponse(
-                _stream_sse_with_tools(engine, session_id, body.message, body.model, model_used, user_role=current_user.role),
+                _stream_sse_with_tools(engine, session_id, body.message, body.model, model_used, user_role=current_user.role, user_id=user_id),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -321,6 +327,7 @@ async def chat_multimodal(
         )
 
     # ---- Route to appropriate stream path ----
+    user_id = getattr(current_user, "id", None) or getattr(current_user, "username", None)
     if image_b64 is not None:
         # Multimodal path — use two-step vision + tool loop
         use_tools = tools_enabled and hasattr(engine, '_tool_registry') and engine._tool_registry is not None
@@ -329,6 +336,7 @@ async def chat_multimodal(
                 engine, resolved_session_id, message, image_b64,
                 model, model_used, use_tools, attachment_meta,
                 user_role=current_user.role,
+                user_id=user_id,
             ),
             media_type="text/event-stream",
             headers={
@@ -342,7 +350,7 @@ async def chat_multimodal(
         use_tools = tools_enabled and hasattr(engine, '_tool_registry') and engine._tool_registry is not None
         if use_tools:
             return StreamingResponse(
-                _stream_sse_with_tools(engine, resolved_session_id, message, model, model_used, user_role=current_user.role),
+                _stream_sse_with_tools(engine, resolved_session_id, message, model, model_used, user_role=current_user.role, user_id=user_id),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -430,6 +438,7 @@ async def _stream_sse_with_tools(
     model_id,
     model_used: str,
     user_role: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the agent engine tool stream in SSE format.
@@ -442,7 +451,7 @@ async def _stream_sse_with_tools(
     try:
         sources = []
 
-        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
+        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role, user_id=user_id):
             if isinstance(item, str):
                 # Text delta
                 chunk = StreamChunk(type="delta", content=item)
@@ -522,6 +531,7 @@ async def _stream_sse_with_tools_tracked(
     model_id,
     model_used: str,
     user_role: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     SSE generator that wraps engine.chat_stream_with_tools() DIRECTLY
@@ -562,6 +572,7 @@ async def _stream_sse_with_tools_tracked(
         task = task_manager.create_task(
             session_id=session_id,
             user_request=user_message[:500],
+            user_id=user_id,
             user_role=user_role,
         )
         task_id = task.task_id
@@ -573,7 +584,7 @@ async def _stream_sse_with_tools_tracked(
         sources: list = []
 
         # Call engine.chat_stream_with_tools() DIRECTLY — no nested wrapper
-        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
+        async for item in engine.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role, user_id=user_id):
             if isinstance(item, str):
                 # Text delta — stream to client and buffer for task result
                 final_text_parts.append(item)
@@ -589,7 +600,7 @@ async def _stream_sse_with_tools_tracked(
                     if task_created and task_id:
                         # Emit task_started to frontend on first tool
                         if step_counter == 0:
-                            task_evt = StreamChunk(type="task_started", content=task_id, session_id=session_id)
+                            task_evt = StreamChunk(type="task_started", content=task_id, task_id=task_id, session_id=session_id)
                             yield f"data: {task_evt.model_dump_json()}\n\n"
 
                         # Create a plan step for this tool
@@ -686,7 +697,7 @@ async def _stream_sse_with_tools_tracked(
                 plan_steps.append(retrieval_step)
 
                 # Emit task_started for frontend
-                task_evt = StreamChunk(type="task_started", content=task_id, session_id=session_id)
+                task_evt = StreamChunk(type="task_started", content=task_id, task_id=task_id, session_id=session_id)
                 yield f"data: {task_evt.model_dump_json()}\n\n"
 
         # ---------------------------------------------------------------
@@ -704,36 +715,56 @@ async def _stream_sse_with_tools_tracked(
             )
             plan_steps.append(response_step)
 
-            # Persist the final plan
-            final_plan = AgentPlan(
-                task_id=task_id,
-                objective=user_message[:300],
-                steps=list(plan_steps),
-                status="completed" if not any_tool_failed else "failed",
-            )
-            task_manager.set_plan(task_id, final_plan)
-
-            # Finalize task status
-            full_result = "".join(final_text_parts)
-            if any_tool_failed:
-                task_manager.update_status(
-                    task_id, "failed",
-                    error="One or more tool executions failed",
-                )
-                task_fail = StreamChunk(type="task_failed", content=task_id)
-                yield f"data: {task_fail.model_dump_json()}\n\n"
+            # Re-fetch task state before finalization to avoid racing cancellation
+            from backend.agent.task import TaskStateError
+            fresh_task = task_manager.get_task(task_id)
+            if fresh_task and (fresh_task.status == "cancelled" or getattr(fresh_task.status, "value", None) == "cancelled"):
+                logger.info("tracked_task_cancelled | task=%s was cancelled before finalization", task_id)
             else:
-                task_manager.update_status(
-                    task_id, "completed",
-                    result=full_result[:1000] if full_result else "Completed",
+                # Persist the final plan
+                final_plan = AgentPlan(
+                    task_id=task_id,
+                    objective=user_message[:300],
+                    steps=list(plan_steps),
+                    status="completed" if not any_tool_failed else "failed",
                 )
-                task_done = StreamChunk(type="task_completed", content=task_id)
-                yield f"data: {task_done.model_dump_json()}\n\n"
+                task_manager.set_plan(task_id, final_plan)
 
-            logger.info(
-                "tracked_task_done | task=%s steps=%d failed=%s",
-                task_id, step_counter, any_tool_failed,
-            )
+                # Finalize task status
+                full_result = "".join(final_text_parts)
+                if any_tool_failed:
+                    try:
+                        task_manager.update_status(
+                            task_id, "failed",
+                            error="One or more tool executions failed",
+                        )
+                        task_fail = StreamChunk(type="task_failed", content=task_id, task_id=task_id, session_id=session_id)
+                        yield f"data: {task_fail.model_dump_json()}\n\n"
+                    except TaskStateError:
+                        fresh_after = task_manager.get_task(task_id)
+                        if fresh_after and (fresh_after.status == "cancelled" or getattr(fresh_after.status, "value", None) == "cancelled"):
+                            logger.info("tracked_task_cancelled_race | task=%s cancelled during finalization", task_id)
+                        else:
+                            raise
+                else:
+                    try:
+                        task_manager.update_status(
+                            task_id, "completed",
+                            result=full_result[:1000] if full_result else "Completed",
+                        )
+                        task_done = StreamChunk(type="task_completed", content=task_id, task_id=task_id, session_id=session_id)
+                        yield f"data: {task_done.model_dump_json()}\n\n"
+                    except TaskStateError:
+                        fresh_after = task_manager.get_task(task_id)
+                        if fresh_after and (fresh_after.status == "cancelled" or getattr(fresh_after.status, "value", None) == "cancelled"):
+                            logger.info("tracked_task_cancelled_race | task=%s cancelled during finalization", task_id)
+                        else:
+                            raise
+
+                logger.info(
+                    "tracked_task_done | task=%s steps=%d failed=%s",
+                    task_id, step_counter, any_tool_failed,
+                )
 
         # Emit sources event (if any) before done
         if sources:
@@ -779,6 +810,7 @@ async def _stream_sse_multimodal(
     use_tools: bool,
     attachment_meta: Optional[ImageAttachment],
     user_role: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the multimodal engine stream in SSE format.
@@ -789,9 +821,9 @@ async def _stream_sse_multimodal(
     try:
         sources = []
         engine_stream = engine.chat_stream_with_tools_multimodal(
-            session_id, user_message, image_b64, model_id, user_role=user_role,
+            session_id, user_message, image_b64, model_id, user_role=user_role, user_id=user_id,
         ) if use_tools else engine.chat_stream_with_tools_multimodal(
-            session_id, user_message, image_b64, model_id, user_role=user_role,
+            session_id, user_message, image_b64, model_id, user_role=user_role, user_id=user_id,
         )
 
         async for item in engine_stream:
@@ -872,6 +904,7 @@ async def _stream_sse_with_planning(
     model_id,
     model_used: str,
     user_role: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the agent engine planning stream in SSE format.
@@ -888,7 +921,7 @@ async def _stream_sse_with_planning(
     try:
         sources = []
 
-        async for item in engine.run_agent_task(session_id, user_message, model_id, user_role=user_role):
+        async for item in engine.run_agent_task(session_id, user_message, model_id, user_role=user_role, user_id=user_id):
             if isinstance(item, str):
                 # Text delta
                 chunk = StreamChunk(type="delta", content=item)

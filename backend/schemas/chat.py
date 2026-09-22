@@ -142,6 +142,8 @@ class StreamChunk(BaseModel):
     summary: Optional[str] = None
     # Phase 5: image attachment metadata (multimodal responses)
     attachment: Optional[ImageAttachment] = None
+    # Phase 6: task tracking
+    task_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

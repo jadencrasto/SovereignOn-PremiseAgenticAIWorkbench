@@ -173,7 +173,7 @@ export async function streamSSE(
           } else if (chunk.type === 'task_started' || chunk.type === 'task_completed' || chunk.type === 'task_failed' || chunk.type === 'task_cancelled') {
             // Phase 6: Task lifecycle event
             if (callbacks.onTaskStatus) {
-              callbacks.onTaskStatus(chunk.type, chunk.task_id || '');
+              callbacks.onTaskStatus(chunk.type, chunk.task_id || chunk.content || '');
             }
           }
         } catch (parseError) {
@@ -290,7 +290,7 @@ export async function streamSSEFromFormData(
           } else if (chunk.type === 'approval_granted' || chunk.type === 'approval_rejected') {
             if (callbacks.onApprovalResolved) callbacks.onApprovalResolved(chunk.type, chunk);
           } else if (chunk.type === 'task_started' || chunk.type === 'task_completed' || chunk.type === 'task_failed' || chunk.type === 'task_cancelled') {
-            if (callbacks.onTaskStatus) callbacks.onTaskStatus(chunk.type, chunk.task_id || '');
+            if (callbacks.onTaskStatus) callbacks.onTaskStatus(chunk.type, chunk.task_id || chunk.content || '');
           }
         } catch (parseError) {
           console.warn('Failed to parse SSE line:', jsonStr, parseError);

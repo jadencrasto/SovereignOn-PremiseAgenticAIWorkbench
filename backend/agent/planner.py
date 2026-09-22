@@ -228,6 +228,11 @@ def should_use_planning(
     return False
 
 
+# Alias for backward compatibility
+should_use_planner = should_use_planning
+
+
+
 # ---------------------------------------------------------------------------
 # Placeholder file path detection
 # ---------------------------------------------------------------------------
@@ -260,6 +265,7 @@ RULES:
 3. Keep plans concise — use the minimum steps needed to complete the user's request.
 4. Tool guidelines:
    - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this whenever the user asks to search, find, or summarize information from documents. document_search directly retrieves the full grounded text content. Do NOT follow document_search with file_read.
+   - file_list: Lists files available in the local workspace (data/uploads/ directory). Use this when the user asks what files are available, or you need to discover filenames before reading.
    - file_read: Reads an existing text file from the workspace (e.g. 'mrpl_lab_composition_test.csv'). ONLY use file_read when the user explicitly provides a specific known filename in their prompt. NEVER call file_read on indexed documents or RAG results. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
    - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2").
    - code_execution: Executes Python code inside the local sandbox (e.g. for computation or data processing). Captures stdout/stderr.
@@ -267,6 +273,7 @@ RULES:
    - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Headers and rows will be dynamically populated from prior step observations at runtime. If the user specifies particular column headers (e.g. Equipment ID, Maintenance Findings, Operating Observations, Recommended Actions), preserve those exact semantic columns. Always set requires_approval to true.
    - file_write: Creates a text output file or incident log in the sandbox. Always set requires_approval to true.
    - artifact_verifier: Verifies a generated report or artifact on disk (checks rows/paragraphs, columns, and SHA-256 hash). Follow docx_create, xlsx_report, or file_write with artifact_verifier whenever creating reports or documents. NEVER specify placeholder strings like "Findings text", "Observations text", "Actions text", "text", or generic column labels + "text" in expected_content. Only pass actual known keywords (e.g. equipment tag like "P-204") or leave expected_content omitted.
+   - knowledge_graph_query: Queries the sovereign Knowledge Graph for equipment topology, unit locations, interconnected components, or structured failure-mode/defect relationship traces (e.g. 'P-204', 'V-401', 'Hydrocracker Unit 04'). Use this ONLY when the user explicitly requests equipment topology, unit locations, interconnected components, or structured relationship traces. Do NOT call this tool for generic informational questions, calculations, or direct file reading.
    - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the grounded decision-support response. Spreadsheets and documents are generated natively by xlsx_report and docx_create; NEVER output Python code (e.g. openpyxl) or claim manual code execution. NEVER ask 'Would you like me to proceed with any further steps?' when steps or tasks are completing.
 
 5. Approval-gated summary workflow:

@@ -30,7 +30,7 @@ from backend.schemas.document import (
     DocumentUploadResponse,
 )
 from backend.auth.dependencies import get_current_user, require_permission
-from backend.auth.models import Permission, User
+from backend.auth.models import Permission, User, resolve_user_clearance
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +86,16 @@ async def upload_document(
     finally:
         await file.close()
 
+    # Derive verified clearance strictly from authenticated server-side user
+    user_clearance = resolve_user_clearance(current_user)
+
     # Delegate to service (handles all validation + pipeline)
     try:
-        result = await doc_service.ingest_document(file.filename, content)
+        result = await doc_service.ingest_document(
+            file.filename,
+            content,
+            clearance=user_clearance,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
@@ -117,8 +124,9 @@ async def list_documents(
     doc_service=Depends(get_doc_service),
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
-    """Return all documents currently indexed in the vector store."""
-    docs = doc_service.list_documents()
+    """Return all documents currently indexed in the vector store visible to caller clearance."""
+    user_clearance = resolve_user_clearance(current_user)
+    docs = doc_service.list_documents(user_clearance=user_clearance)
     return DocumentListResponse(
         documents=[
             DocumentResponse(
@@ -148,13 +156,15 @@ async def get_document(
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """
-    Retrieve metadata and all stored vector chunks for an indexed document.
+    Retrieve metadata and all stored vector chunks for an indexed document,
+    filtered by caller clearance.
     Read-only inspection endpoint.
     """
     if not document_id or len(document_id) > 100:
         raise HTTPException(status_code=400, detail="Invalid document_id.")
 
-    details = doc_service.get_document_details(document_id)
+    user_clearance = resolve_user_clearance(current_user)
+    details = doc_service.get_document_details(document_id, user_clearance=user_clearance)
     if details is None:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
 

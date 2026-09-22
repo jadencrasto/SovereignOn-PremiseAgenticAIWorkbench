@@ -96,7 +96,16 @@ async def get_current_user(
          - Enforces CSRF header on mutating requests.
     """
     active_settings = getattr(request.app.state, "settings", settings)
-    auth_enabled = getattr(active_settings, "auth_enabled", False)
+    auth_enabled = getattr(active_settings, "auth_enabled", True)
+    is_prod = getattr(active_settings, "app_env", "development").lower() in ("production", "prod")
+    dev_override = getattr(active_settings, "auth_dev_override", False)
+
+    if is_prod and not auth_enabled and not dev_override:
+        logger.critical("Security violation: Authentication disabled in production without auth_dev_override")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Insecure configuration: Authentication cannot be disabled in production.",
+        )
 
     # 1. Non-production / dev-mode resolution
     if not auth_enabled:

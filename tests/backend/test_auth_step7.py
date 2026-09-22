@@ -30,6 +30,7 @@ Covers all 20 required verification points:
 """
 
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
@@ -52,80 +53,83 @@ def prod_env(tmp_path: Path):
         chroma_persist_dir=tmp_path / "chromadb",
         auth_idle_timeout_seconds=3600,
         auth_max_session_seconds=7200,
+        code_exec_isolation="docker",
     )
 
-    app = create_app(settings)
-    store = AuthStore(db_path=db_path)
-    session_mgr = SessionManager(
-        store=store,
-        idle_timeout_seconds=3600,
-        absolute_timeout_seconds=7200,
-    )
+    with patch("backend.tools.code_execution.check_docker_daemon_available", return_value=True), \
+         patch("backend.tools.code_execution.check_docker_image_available", return_value=True):
+        app = create_app(settings)
+        store = AuthStore(db_path=db_path)
+        session_mgr = SessionManager(
+            store=store,
+            idle_timeout_seconds=3600,
+            absolute_timeout_seconds=7200,
+        )
 
-    # Seed admin, operator, viewer, and an inactive user
-    admin_u = User(
-        id="u_admin",
-        username="admin_test",
-        password_hash=hash_password("AdminPass123!"),
-        role=UserRole.ADMIN.value,
-        clearance=ClearanceLevel.L3.value,
-        is_active=True,
-        created_at="2026-01-01T00:00:00Z",
-    )
-    operator_u = User(
-        id="u_op",
-        username="op_test",
-        password_hash=hash_password("OpPass123!"),
-        role=UserRole.OPERATOR.value,
-        clearance=ClearanceLevel.L2.value,
-        is_active=True,
-        created_at="2026-01-01T00:00:00Z",
-    )
-    viewer_u = User(
-        id="u_view",
-        username="view_test",
-        password_hash=hash_password("ViewPass123!"),
-        role=UserRole.VIEWER.value,
-        clearance=ClearanceLevel.L1.value,
-        is_active=True,
-        created_at="2026-01-01T00:00:00Z",
-    )
-    inactive_u = User(
-        id="u_inactive",
-        username="inactive_test",
-        password_hash=hash_password("InactivePass123!"),
-        role=UserRole.OPERATOR.value,
-        clearance=ClearanceLevel.L2.value,
-        is_active=False,
-        created_at="2026-01-01T00:00:00Z",
-    )
+        # Seed admin, operator, viewer, and an inactive user
+        admin_u = User(
+            id="u_admin",
+            username="admin_test",
+            password_hash=hash_password("AdminPass123!"),
+            role=UserRole.ADMIN.value,
+            clearance=ClearanceLevel.L3.value,
+            is_active=True,
+            created_at="2026-01-01T00:00:00Z",
+        )
+        operator_u = User(
+            id="u_op",
+            username="op_test",
+            password_hash=hash_password("OpPass123!"),
+            role=UserRole.OPERATOR.value,
+            clearance=ClearanceLevel.L2.value,
+            is_active=True,
+            created_at="2026-01-01T00:00:00Z",
+        )
+        viewer_u = User(
+            id="u_view",
+            username="view_test",
+            password_hash=hash_password("ViewPass123!"),
+            role=UserRole.VIEWER.value,
+            clearance=ClearanceLevel.L1.value,
+            is_active=True,
+            created_at="2026-01-01T00:00:00Z",
+        )
+        inactive_u = User(
+            id="u_inactive",
+            username="inactive_test",
+            password_hash=hash_password("InactivePass123!"),
+            role=UserRole.OPERATOR.value,
+            clearance=ClearanceLevel.L2.value,
+            is_active=False,
+            created_at="2026-01-01T00:00:00Z",
+        )
 
-    store.create_user(admin_u)
-    store.create_user(operator_u)
-    store.create_user(viewer_u)
-    store.create_user(inactive_u)
+        store.create_user(admin_u)
+        store.create_user(operator_u)
+        store.create_user(viewer_u)
+        store.create_user(inactive_u)
 
-    admin_tok, _ = session_mgr.create_session(admin_u.id)
-    operator_tok, _ = session_mgr.create_session(operator_u.id)
-    viewer_tok, _ = session_mgr.create_session(viewer_u.id)
-    inactive_tok, _ = session_mgr.create_session(inactive_u.id)
+        admin_tok, _ = session_mgr.create_session(admin_u.id)
+        operator_tok, _ = session_mgr.create_session(operator_u.id)
+        viewer_tok, _ = session_mgr.create_session(viewer_u.id)
+        inactive_tok, _ = session_mgr.create_session(inactive_u.id)
 
-    app.state.auth_store = store
-    app.state.session_manager = session_mgr
+        app.state.auth_store = store
+        app.state.session_manager = session_mgr
 
-    with TestClient(app) as client:
-        yield {
-            "client": client,
-            "app": app,
-            "store": store,
-            "session_mgr": session_mgr,
-            "tokens": {
-                "admin": admin_tok,
-                "operator": operator_tok,
-                "viewer": viewer_tok,
-                "inactive": inactive_tok,
-            },
-        }
+        with TestClient(app) as client:
+            yield {
+                "client": client,
+                "app": app,
+                "store": store,
+                "session_mgr": session_mgr,
+                "tokens": {
+                    "admin": admin_tok,
+                    "operator": operator_tok,
+                    "viewer": viewer_tok,
+                    "inactive": inactive_tok,
+                },
+            }
 
 
 @pytest.fixture

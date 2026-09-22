@@ -49,7 +49,7 @@ Open [http://localhost:5173](http://localhost:5173)
 | 1 | FastAPI + Ollama (qwen2.5:7b) + SSE streaming + Conversation Memory | ✅ Complete |
 | 2 | PDF/DOCX/TXT/MD ingestion + nomic-embed-text + ChromaDB RAG | ✅ Complete |
 | 3 | Semantic retrieval + context injection + sources SSE events | ✅ Complete |
-| 4 | Tool registry (5 tools) + agent tool-loop + SSE tool events | ✅ Complete |
+| 4 | Tool registry (10 tools) + agent tool-loop + SSE tool events | ✅ Complete |
 | 5 | LLaVA vision pipeline + `/api/chat/multimodal` + image UI | ✅ Complete |
 | 6 | Enterprise Agent Planning + PlanValidator + Human Approval + SQLite Task Store | ✅ Complete |
 | 7 | Enterprise Hardening + Argon2id Auth + Dual-Boundary RBAC + CSRF + Audit Logging | ✅ Complete |
@@ -137,6 +137,6 @@ Outputs are automatically generated and saved in `eval/results/`:
 python -m pytest tests/ -v
 ```
 
-Expected: **325 passed, 1 skipped (100% pass rate)**.
+Expected: **647 passed, 1 skipped (100% pass rate)**.
 
 

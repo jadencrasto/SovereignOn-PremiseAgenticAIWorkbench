@@ -219,6 +219,7 @@ class AgentEngine:
         user_message: str,
         model_id: Optional[str] = None,
         user_role: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Streaming chat with agentic tool loop.
@@ -320,7 +321,7 @@ class AgentEngine:
                 # Execute the tool with user_role authorization check
                 if self._tool_registry:
                     result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id, user_role=user_role
+                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -411,6 +412,7 @@ class AgentEngine:
         image_b64: str,
         model_id: Optional[str] = None,
         user_role: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Two-step multimodal streaming with agentic tool loop.
@@ -568,10 +570,14 @@ class AgentEngine:
             tool_call = self._parse_tool_call(full_response)
 
             if tool_call is None:
-                # Final answer — stream it
-                for delta_text in accumulated:
-                    yield delta_text
-                final_text_parts.append(full_response)
+                # Final answer — verify visual grounding before streaming and storing
+                from backend.multimodal.grounding import VisualGroundingVerifier
+                verifier = VisualGroundingVerifier()
+                grounding_res = verifier.verify(full_response, visual_observation, sources)
+                verified_content = grounding_res.guarded_text
+
+                yield verified_content
+                final_text_parts.append(verified_content)
                 break
             else:
                 tool_name = tool_call.get("name", "")
@@ -590,7 +596,7 @@ class AgentEngine:
 
                 if self._tool_registry:
                     result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id, user_role=user_role
+                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -650,6 +656,7 @@ class AgentEngine:
         user_message: str,
         model_id: Optional[str] = None,
         user_role: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Phase 6: Execute a user request via the planning pipeline.
@@ -687,9 +694,9 @@ class AgentEngine:
         self._memory.add_user_message(session_id, user_message)
 
         # ---- 1. Create task ----
-        task = self._task_manager.create_task(session_id, user_message, user_role=user_role)
+        task = self._task_manager.create_task(session_id, user_message, user_id=user_id, user_role=user_role)
 
-        yield {"type": "task_started", "task_id": task.task_id, "status": "planning"}
+        yield {"type": "task_started", "task_id": task.task_id, "content": task.task_id, "status": "planning"}
 
         # ---- 2. Generate plan ----
         try:
@@ -720,10 +727,25 @@ class AgentEngine:
             # Enforce approval requirements
             self._plan_validator.enforce_approval_requirements(plan)
 
+            # Check if task was cancelled concurrently during planning
+            fresh_task = self._task_manager.get_task(task.task_id)
+            if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                yield {"type": "task_cancelled", "task_id": task.task_id}
+                yield []
+                return
+
             # Persist plan
             plan.status = PlanStatus.executing.value
             self._task_manager.set_plan(task.task_id, plan)
-            self._task_manager.update_status(task.task_id, TaskStatus.EXECUTING)
+            try:
+                self._task_manager.update_status(task.task_id, TaskStatus.EXECUTING)
+            except TaskStateError:
+                fresh_task = self._task_manager.get_task(task.task_id)
+                if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                    yield {"type": "task_cancelled", "task_id": task.task_id}
+                    yield []
+                    return
+                raise
 
             yield {
                 "type": "plan_created",
@@ -744,10 +766,18 @@ class AgentEngine:
             }
 
         except Exception as exc:
+            fresh_task = self._task_manager.get_task(task.task_id)
+            if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                yield {"type": "task_cancelled", "task_id": task.task_id}
+                yield []
+                return
             logger.error("Plan generation failed: %s", exc)
-            self._task_manager.update_status(
-                task.task_id, TaskStatus.FAILED, error=str(exc)[:500]
-            )
+            try:
+                self._task_manager.update_status(
+                    task.task_id, TaskStatus.FAILED, error=str(exc)[:500]
+                )
+            except TaskStateError:
+                pass
             yield {"type": "task_failed", "task_id": task.task_id, "error": str(exc)[:200]}
             yield f"Planning error: {str(exc)[:200]}"
             yield []  # sources sentinel
@@ -1158,8 +1188,11 @@ class AgentEngine:
             }
 
             if self._tool_registry:
+                effective_uid = user_id or getattr(task, "user_id", None)
                 result = await self._tool_registry.execute(
-                    step.tool_name, step.arguments, session_id=session_id, user_role=user_role
+                    step.tool_name, step.arguments, session_id=session_id, user_role=user_role,
+                    user_id=effective_uid,
+                    task_id=task.task_id, step_id=step.id,
                 )
             else:
                 from backend.tools.registry import ToolResult
@@ -1219,16 +1252,35 @@ class AgentEngine:
         if full_final:
             self._memory.add_assistant_message(session_id, full_final)
 
+        # Check if task was cancelled concurrently before transitioning
+        fresh_task = self._task_manager.get_task(task.task_id)
+        if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+            logger.info("agent_task_cancelled | task=%s aborted before final status", task.task_id)
+            yield {
+                "type": "task_cancelled",
+                "task_id": task.task_id,
+            }
+            yield sources
+            return
+
         # Evaluate if any required steps failed
         failed_steps = [s for s in plan.steps if s.status == StepStatus.failed.value]
         completed_steps = [s for s in plan.steps if s.status == StepStatus.completed.value]
 
         if failed_steps:
-            self._task_manager.update_status(
-                task.task_id, TaskStatus.FAILED,
-                result=full_final[:1000] if full_final else f"{len(failed_steps)} step(s) failed during execution.",
-                error=f"Step(s) failed: {', '.join((s.tool_name or s.description) for s in failed_steps)}",
-            )
+            try:
+                self._task_manager.update_status(
+                    task.task_id, TaskStatus.FAILED,
+                    result=full_final[:1000] if full_final else f"{len(failed_steps)} step(s) failed during execution.",
+                    error=f"Step(s) failed: {', '.join((s.tool_name or s.description) for s in failed_steps)}",
+                )
+            except TaskStateError:
+                fresh_task = self._task_manager.get_task(task.task_id)
+                if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                    yield {"type": "task_cancelled", "task_id": task.task_id}
+                    yield sources
+                    return
+                raise
             elapsed = time.monotonic() - t0
             logger.info("agent_task_failed | task=%s failed_steps=%d time=%.2fs", task.task_id, len(failed_steps), elapsed)
             yield {
@@ -1239,10 +1291,18 @@ class AgentEngine:
                 "error": f"{len(failed_steps)} step(s) failed during execution",
             }
         else:
-            self._task_manager.update_status(
-                task.task_id, TaskStatus.COMPLETED,
-                result=full_final[:1000] if full_final else "Task completed",
-            )
+            try:
+                self._task_manager.update_status(
+                    task.task_id, TaskStatus.COMPLETED,
+                    result=full_final[:1000] if full_final else "Task completed",
+                )
+            except TaskStateError:
+                fresh_task = self._task_manager.get_task(task.task_id)
+                if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                    yield {"type": "task_cancelled", "task_id": task.task_id}
+                    yield sources
+                    return
+                raise
             elapsed = time.monotonic() - t0
             logger.info("agent_task_done | task=%s steps=%d time=%.2fs", task.task_id, len(plan.steps), elapsed)
             yield {
@@ -1258,6 +1318,7 @@ class AgentEngine:
         approval_id: str,
         approved: bool,
         user_role: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncIterator:
         """
         Phase 6: Resume a paused task after human approval/rejection.
@@ -1292,8 +1353,12 @@ class AgentEngine:
             yield {"type": "error", "content": f"Task not found: {task_id}"}
             return
 
-        if task.status == TaskStatus.CANCELLED:
-            yield {"type": "task_cancelled", "task_id": task_id}
+        from backend.agent.task import TaskStatus, TaskStateError, TERMINAL_TASK_STATUSES
+        if task.status in TERMINAL_TASK_STATUSES or task.status == TaskStatus.CANCELLED:
+            if task.status == TaskStatus.CANCELLED:
+                yield {"type": "task_cancelled", "task_id": task_id}
+            else:
+                yield {"type": "error", "content": f"Cannot resume task in {task.status.value if hasattr(task.status, 'value') else task.status} state"}
             return
 
         if task.plan is None:
@@ -1370,6 +1435,12 @@ class AgentEngine:
             "approval_id": approval_id,
         }
 
+        # Check cancellation again before executing
+        fresh_task = self._task_manager.get_task(task_id)
+        if fresh_task and (fresh_task.status == TaskStatus.CANCELLED or fresh_task.status in TERMINAL_TASK_STATUSES):
+            yield {"type": "task_cancelled", "task_id": task_id}
+            return
+
         # 4. Execute the approved step
         self._task_manager.update_step_status(
             task_id, awaiting_step.id, StepStatus.approved.value
@@ -1377,7 +1448,14 @@ class AgentEngine:
         self._task_manager.update_step_status(
             task_id, awaiting_step.id, StepStatus.running.value
         )
-        self._task_manager.update_status(task_id, TaskStatus.EXECUTING)
+        try:
+            self._task_manager.update_status(task_id, TaskStatus.EXECUTING)
+        except TaskStateError:
+            fresh_task = self._task_manager.get_task(task_id)
+            if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                yield {"type": "task_cancelled", "task_id": task_id}
+                return
+            raise
 
         session_id = task.session_id
 
@@ -1388,11 +1466,15 @@ class AgentEngine:
         }
 
         effective_role = user_role if user_role is not None else getattr(task, "user_role", None)
+        effective_user_id = user_id if user_id is not None else getattr(task, "user_id", None)
         if self._tool_registry:
             result = await self._tool_registry.execute(
                 awaiting_step.tool_name, awaiting_step.arguments,
                 session_id=session_id,
                 user_role=effective_role,
+                user_id=effective_user_id,
+                task_id=task_id,
+                step_id=awaiting_step.id,
             )
         else:
             from backend.tools.registry import ToolResult
@@ -1841,8 +1923,12 @@ class AgentEngine:
             }
 
             if self._tool_registry:
+                effective_step_role = user_role if user_role is not None else getattr(task, "user_role", None)
+                effective_step_uid = user_id if user_id is not None else getattr(task, "user_id", None)
                 result = await self._tool_registry.execute(
-                    step.tool_name, step.arguments, session_id=session_id, user_role=user_role
+                    step.tool_name, step.arguments, session_id=session_id, user_role=effective_step_role,
+                    user_id=effective_step_uid,
+                    task_id=task_id, step_id=step.id,
                 )
             else:
                 from backend.tools.registry import ToolResult
@@ -1890,6 +1976,14 @@ class AgentEngine:
 
         # Check if any step in the whole plan failed
         fresh_task = self._task_manager.get_task(task_id)
+        if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+            logger.info("agent_task_resumed_cancelled | task=%s aborted before final status", task_id)
+            yield {
+                "type": "task_cancelled",
+                "task_id": task_id,
+            }
+            yield sources
+            return
 
         # ---- All remaining steps complete ----
         has_completion = any("### Execution Plan Completed" in p for p in final_text_parts)
@@ -1910,11 +2004,19 @@ class AgentEngine:
         completed_steps = [s for s in all_steps if s.status == StepStatus.completed.value]
 
         if failed_steps:
-            self._task_manager.update_status(
-                task_id, TaskStatus.FAILED,
-                result=full_final[:1000] if full_final else f"{len(failed_steps)} step(s) failed during execution.",
-                error=f"Step(s) failed: {', '.join((s.tool_name or s.description) for s in failed_steps)}",
-            )
+            try:
+                self._task_manager.update_status(
+                    task_id, TaskStatus.FAILED,
+                    result=full_final[:1000] if full_final else f"{len(failed_steps)} step(s) failed during execution.",
+                    error=f"Step(s) failed: {', '.join((s.tool_name or s.description) for s in failed_steps)}",
+                )
+            except TaskStateError:
+                fresh_task = self._task_manager.get_task(task_id)
+                if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                    yield {"type": "task_cancelled", "task_id": task_id}
+                    yield sources
+                    return
+                raise
             elapsed = time.monotonic() - t0
             logger.info(
                 "agent_task_resumed_failed | task=%s approval=%s failed_steps=%d time=%.2fs",
@@ -1928,10 +2030,18 @@ class AgentEngine:
                 "error": f"{len(failed_steps)} step(s) failed during execution",
             }
         else:
-            self._task_manager.update_status(
-                task_id, TaskStatus.COMPLETED,
-                result=full_final[:1000] if full_final else "Task completed",
-            )
+            try:
+                self._task_manager.update_status(
+                    task_id, TaskStatus.COMPLETED,
+                    result=full_final[:1000] if full_final else "Task completed",
+                )
+            except TaskStateError:
+                fresh_task = self._task_manager.get_task(task_id)
+                if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
+                    yield {"type": "task_cancelled", "task_id": task_id}
+                    yield sources
+                    return
+                raise
             elapsed = time.monotonic() - t0
             logger.info(
                 "agent_task_resumed_done | task=%s approval=%s time=%.2fs",
@@ -3149,6 +3259,8 @@ class AgentEngine:
     def set_approval_manager(self, manager) -> None:
         """Wire in the ApprovalManager for Phase 6."""
         self._approval_manager = manager
+        if hasattr(self, "_task_manager") and hasattr(self._task_manager, "set_approval_manager"):
+            self._task_manager.set_approval_manager(manager)
         logger.info("AgentEngine: ApprovalManager wired — Phase 6 approvals enabled")
 
     # ------------------------------------------------------------------

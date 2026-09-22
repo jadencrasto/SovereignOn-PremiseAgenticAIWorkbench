@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -37,17 +37,51 @@ _MIME_TYPES = {
 }
 
 
+def _is_artifact_accessible(filename: str, user: User, task_store: Optional[Any]) -> bool:
+    """
+    Evaluate whether user is authorized to access the artifact:
+    - Admins have access to all artifacts.
+    - Operators with MANAGE_TASKS have access to legacy/unowned artifacts and their own.
+    - Non-operators can only access artifacts matching their own user.id.
+    - Legacy unowned artifacts (no DB record or user_id is None) are hidden from ordinary viewers.
+    """
+    from backend.auth.models import UserRole, has_permission, Permission
+    if user.role == UserRole.ADMIN:
+        return True
+    if has_permission(user.role, Permission.MANAGE_TASKS):
+        return True
+
+    if not task_store:
+        # Without task store, fail safe for non-operators
+        return False
+
+    record = task_store.get_artifact(filename)
+    if not record:
+        # Legacy artifact: not accessible to ordinary users
+        return False
+
+    art_user_id = record.get("user_id")
+    if not art_user_id:
+        return False
+
+    return str(art_user_id) == str(user.id)
+
+
 @router.get("", summary="List generated artifacts")
 async def list_artifacts(
+    request: Request,
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
-    """Returns metadata for all files currently in the sandbox output directory."""
+    """Returns metadata for all files currently in the sandbox output directory visible to caller."""
     sb_dir = settings.sandbox_dir
     sb_dir.mkdir(parents=True, exist_ok=True)
 
+    task_store = getattr(request.app.state, "task_store", None)
     artifacts: List[Dict[str, Any]] = []
     for entry in sorted(sb_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if entry.is_file() and not entry.name.startswith("."):
+            if not _is_artifact_accessible(entry.name, current_user, task_store):
+                continue
             stat = entry.stat()
             file_bytes = entry.read_bytes()
             sha = hashlib.sha256(file_bytes).hexdigest()
@@ -71,10 +105,12 @@ MAX_PREVIEW_BYTES = 500 * 1024  # 500 KB limit for preview payload
 @router.get("/{filename}/preview", summary="Preview an artifact file content")
 async def preview_artifact(
     filename: str,
+    request: Request,
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """
     Read-only preview endpoint with security hardening:
+    - Multi-user isolation
     - Path traversal prevention
     - Sandbox isolation
     - Content-size limits (500KB cap)
@@ -83,6 +119,10 @@ async def preview_artifact(
     """
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename format.")
+
+    task_store = getattr(request.app.state, "task_store", None)
+    if not _is_artifact_accessible(filename, current_user, task_store):
+        raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
 
     sb_dir = settings.sandbox_dir
     try:
@@ -243,9 +283,17 @@ async def preview_artifact(
 @router.get("/{filename}", summary="Download an artifact file")
 async def download_artifact(
     filename: str,
+    request: Request,
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
-    """Download a generated artifact from data/sandbox/."""
+    """Download a generated artifact from data/sandbox/ with authorization check."""
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename format.")
+
+    task_store = getattr(request.app.state, "task_store", None)
+    if not _is_artifact_accessible(filename, current_user, task_store):
+        raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
+
     sb_dir = settings.sandbox_dir
     try:
         target_path = validate_path_within(filename, sb_dir)

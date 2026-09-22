@@ -299,8 +299,8 @@ class TestRetriever:
             "ids": [["c1", "c2"]],
             "documents": [["Text chunk one", "Text chunk two"]],
             "metadatas": [[
-                {"document_id": "doc1", "filename": "report.pdf", "file_type": "pdf", "chunk_index": 0},
-                {"document_id": "doc1", "filename": "report.pdf", "file_type": "pdf", "chunk_index": 1, "page": 3},
+                {"document_id": "doc1", "filename": "report.pdf", "file_type": "pdf", "chunk_index": 0, "clearance": "viewer"},
+                {"document_id": "doc1", "filename": "report.pdf", "file_type": "pdf", "chunk_index": 1, "page": 3, "clearance": "viewer"},
             ]],
             "distances": [[0.12, 0.34]],
         }
@@ -317,7 +317,7 @@ class TestRetriever:
     async def test_retrieves_chunks(self, mock_embedder, mock_store_with_results):
         from backend.rag.retriever import Retriever
         r = Retriever(mock_embedder, mock_store_with_results, top_k=5)
-        results = await r.retrieve("AI question")
+        results = await r.retrieve("AI question", user_clearance="admin")
         assert len(results) == 2
         assert results[0].filename == "report.pdf"
         assert results[1].page == 3

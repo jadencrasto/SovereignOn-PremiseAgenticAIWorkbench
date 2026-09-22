@@ -12,7 +12,7 @@ Startup:
   - VectorStore initialised (ChromaDB persistent local)
   - Retriever initialised
   - DocumentService wired together
-  - ToolRegistry instantiated with 5 local tools
+  - ToolRegistry instantiated with 10 local tools
   - AgentEngine initialised and wired to DocumentService + ToolRegistry
   - All resources stored on app.state
 
@@ -72,6 +72,9 @@ from backend.tools.xlsx_report import XlsxReportInput, create_xlsx_report
 from backend.tools.artifact_verifier import ArtifactVerifierInput, create_artifact_verifier
 from backend.tools.code_execution import CodeExecutionInput, create_code_execution
 from backend.tools.docx_create import DocxCreateInput, create_docx_create
+from backend.tools.knowledge_graph import KnowledgeGraphQueryInput, create_knowledge_graph_query
+from backend.graph.store import KnowledgeGraphStore
+from backend.graph.service import KnowledgeGraphService
 
 
 # Phase 6 & 7 imports
@@ -100,9 +103,10 @@ logger = logging.getLogger(__name__)
 # Tool configuration loader
 # ---------------------------------------------------------------------------
 
-def _load_tools_config() -> dict:
+def _load_tools_config(cfg: Optional[Settings] = None) -> dict:
     """Load config/tools.yaml, returning {} on error."""
-    path = settings.config_dir / "tools.yaml"
+    active_cfg = cfg or settings
+    path = active_cfg.config_dir / "tools.yaml"
     try:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -119,12 +123,53 @@ def _load_tools_config() -> dict:
 # Tool registration
 # ---------------------------------------------------------------------------
 
-def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: dict = None) -> None:
-    """Register all Phase 4 tools with the registry."""
+def _register_tools(
+    registry: ToolRegistry,
+    retriever: Retriever,
+    tools_config: dict = None,
+    graph_service: Optional[KnowledgeGraphService] = None,
+    cfg: Optional[Settings] = None,
+) -> None:
+    """Register all Phase 4 & Knowledge Graph tools with the registry."""
     tools_cfg = tools_config or {}
+    active_cfg = cfg or settings
+    sandbox_dir = active_cfg.sandbox_dir
+
+    _VALID_RISK_LEVELS = {"low", "medium", "high"}
+
+    def _get_tool_cfg(name: str) -> dict:
+        if not isinstance(tools_cfg, dict):
+            return {}
+        entry = tools_cfg.get(name)
+        return entry if isinstance(entry, dict) else {}
 
     def _is_enabled(name: str) -> bool:
-        return tools_cfg.get(name, {}).get("enabled", True)
+        entry = _get_tool_cfg(name)
+        val = entry.get("enabled")
+        return val if isinstance(val, bool) else True
+
+    def _get_risk_level(name: str, default: str) -> str:
+        entry = _get_tool_cfg(name)
+        cfg_val = entry.get("risk_level")
+        if isinstance(cfg_val, str) and cfg_val.strip().lower() in _VALID_RISK_LEVELS:
+            return cfg_val.strip().lower()
+        return default
+
+    def _get_requires_approval(name: str, default: bool, read_only: bool = True) -> bool:
+        entry = _get_tool_cfg(name)
+        cfg_val = entry.get("requires_approval")
+        if isinstance(cfg_val, bool):
+            # Mandatory security control: mutating tools with default=True (e.g. file_write, docx_create, xlsx_report)
+            # cannot have approval disabled via configuration. Enforce requires_approval=True and log a warning.
+            if not read_only and default and not cfg_val:
+                logger.warning(
+                    "Security policy violation: configuration attempted to disable mandatory approval for mutating tool '%s'. Enforcing requires_approval=True.",
+                    name,
+                )
+                return True
+            return cfg_val
+        # Fail-closed safe default: never let missing or invalid config disable approval on mutating tools
+        return default
 
     # 1. document_search
     registry.register(ToolDefinition(
@@ -138,8 +183,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         execute_fn=create_document_search(retriever),
         category="Information Retrieval",
         read_only=True,
-        risk_level="low",
-        requires_approval=False,
+        risk_level=_get_risk_level("document_search", "low"),
+        requires_approval=_get_requires_approval("document_search", False, read_only=True),
         enabled=_is_enabled("document_search"),
     ))
 
@@ -152,11 +197,11 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "Returns filenames, sizes, and extensions."
         ),
         input_schema=FileListInput,
-        execute_fn=create_file_list(settings.upload_dir),
+        execute_fn=create_file_list(active_cfg.upload_dir),
         category="File Operations",
         read_only=True,
-        risk_level="low",
-        requires_approval=False,
+        risk_level=_get_risk_level("file_list", "low"),
+        requires_approval=_get_requires_approval("file_list", False, read_only=True),
         enabled=_is_enabled("file_list"),
     ))
 
@@ -170,11 +215,11 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "For PDF/DOCX analysis, use document_search instead."
         ),
         input_schema=FileReadInput,
-        execute_fn=create_file_read(settings.upload_dir),
+        execute_fn=create_file_read(active_cfg.upload_dir),
         category="File Operations",
         read_only=True,
-        risk_level="medium",
-        requires_approval=False,
+        risk_level=_get_risk_level("file_read", "medium"),
+        requires_approval=_get_requires_approval("file_read", False, read_only=True),
         enabled=_is_enabled("file_read"),
     ))
 
@@ -191,8 +236,8 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
         execute_fn=execute_calculator,
         category="Computation",
         read_only=True,
-        risk_level="low",
-        requires_approval=False,
+        risk_level=_get_risk_level("calculator", "low"),
+        requires_approval=_get_requires_approval("calculator", False, read_only=True),
         enabled=_is_enabled("calculator"),
     ))
 
@@ -205,12 +250,12 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "Cannot overwrite existing files. Cannot write outside data/sandbox/."
         ),
         input_schema=FileWriteInput,
-        execute_fn=create_file_write(settings.sandbox_dir),
+        execute_fn=create_file_write(sandbox_dir),
         category="File Operations",
         read_only=False,
         requires_confirmation=True,
-        risk_level="high",
-        requires_approval=True,
+        risk_level=_get_risk_level("file_write", "high"),
+        requires_approval=_get_requires_approval("file_write", True, read_only=False),
         enabled=_is_enabled("file_write"),
     ))
 
@@ -223,12 +268,12 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "Includes title block, styled headers, and automated compliance status highlighting."
         ),
         input_schema=XlsxReportInput,
-        execute_fn=create_xlsx_report(settings.sandbox_dir),
+        execute_fn=create_xlsx_report(sandbox_dir),
         category="File Operations",
         read_only=False,
         requires_confirmation=True,
-        risk_level="high",
-        requires_approval=True,
+        risk_level=_get_risk_level("xlsx_report", "high"),
+        requires_approval=_get_requires_approval("xlsx_report", True, read_only=False),
         enabled=_is_enabled("xlsx_report"),
     ))
 
@@ -241,12 +286,12 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "Creates genuine OOXML format and computes cryptographic SHA-256 hash."
         ),
         input_schema=DocxCreateInput,
-        execute_fn=create_docx_create(settings.sandbox_dir),
+        execute_fn=create_docx_create(sandbox_dir),
         category="File Operations",
         read_only=False,
         requires_confirmation=True,
-        risk_level="high",
-        requires_approval=True,
+        risk_level=_get_risk_level("docx_create", "high"),
+        requires_approval=_get_requires_approval("docx_create", True, read_only=False),
         enabled=_is_enabled("docx_create"),
     ))
 
@@ -260,11 +305,11 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "Air-gapped; never accesses external networks."
         ),
         input_schema=CodeExecutionInput,
-        execute_fn=create_code_execution(settings.sandbox_dir),
+        execute_fn=create_code_execution(sandbox_dir),
         category="Computation",
         read_only=False,
-        risk_level="medium",
-        requires_approval=False,
+        risk_level=_get_risk_level("code_execution", "medium"),
+        requires_approval=_get_requires_approval("code_execution", False, read_only=False),
         enabled=_is_enabled("code_execution"),
     ))
 
@@ -277,12 +322,46 @@ def _register_tools(registry: ToolRegistry, retriever: Retriever, tools_config: 
             "Use this as a mandatory verification step after generating reports or files."
         ),
         input_schema=ArtifactVerifierInput,
-        execute_fn=create_artifact_verifier(settings.sandbox_dir),
+        execute_fn=create_artifact_verifier(sandbox_dir),
         category="Verification",
         read_only=True,
-        risk_level="low",
-        requires_approval=False,
+        risk_level=_get_risk_level("artifact_verifier", "low"),
+        requires_approval=_get_requires_approval("artifact_verifier", False, read_only=True),
         enabled=_is_enabled("artifact_verifier"),
+    ))
+
+    # 10. knowledge_graph_query
+    if graph_service:
+        kg_execute_fn = create_knowledge_graph_query(graph_service)
+        kg_enabled = _is_enabled("knowledge_graph_query")
+    else:
+        async def _unavailable_kg_query(args: Any = None, **kwargs: Any) -> Dict[str, Any]:
+            return {
+                "success": False,
+                "found": False,
+                "error": "Knowledge Graph service is unavailable.",
+                "message": "Knowledge Graph service is not initialized or unavailable.",
+                "relationships": [],
+            }
+        kg_execute_fn = _unavailable_kg_query
+        kg_enabled = False
+
+    registry.register(ToolDefinition(
+        name="knowledge_graph_query",
+        description=(
+            "Query the sovereign Knowledge Graph for connected entities, equipment topology, "
+            "unit locations, subsystems, or maintenance findings. "
+            "Use this ONLY when the user asks about equipment relationships, asset topology, "
+            "connected components, or failure mode traces. "
+            "Returns strictly grounded markdown with provenance citations."
+        ),
+        input_schema=KnowledgeGraphQueryInput,
+        execute_fn=kg_execute_fn,
+        category="Information Retrieval",
+        read_only=True,
+        risk_level=_get_risk_level("knowledge_graph_query", "low"),
+        requires_approval=_get_requires_approval("knowledge_graph_query", False, read_only=True),
+        enabled=kg_enabled,
     ))
 
     logger.info("Registered %d tools (%d enabled)",
@@ -346,7 +425,7 @@ async def lifespan(app: FastAPI):
         print("!" * 70 + "\n")
 
     # ---- Model router ----
-    model_router = ModelRouter(settings)
+    model_router = ModelRouter(active_settings)
     logger.info("ModelRouter ready | default=%s", model_router.default_model_id)
 
     # ---- Conversation memory ----
@@ -354,21 +433,21 @@ async def lifespan(app: FastAPI):
 
     # ---- RAG: Embedding service ----
     embedding_service = EmbeddingService(
-        base_url=settings.ollama_base_url,
-        model=settings.embedding_model,
+        base_url=active_settings.ollama_base_url,
+        model=active_settings.embedding_model,
     )
     embed_ok = await embedding_service.health_check()
     if embed_ok:
-        logger.info("EmbeddingService ready | model=%s", settings.embedding_model)
+        logger.info("EmbeddingService ready | model=%s", active_settings.embedding_model)
     else:
         logger.warning(
             "Ollama not reachable for embeddings at %s. "
             "Document upload will fail until Ollama is running.",
-            settings.ollama_base_url,
+            active_settings.ollama_base_url,
         )
 
     # ---- RAG: Vector store ----
-    vector_store = VectorStore(persist_dir=settings.chroma_persist_dir)
+    vector_store = VectorStore(persist_dir=active_settings.chroma_persist_dir)
     logger.info("VectorStore ready | chunks=%d", vector_store.count())
 
     # ---- RAG: Retriever ----
@@ -381,7 +460,7 @@ async def lifespan(app: FastAPI):
 
     # ---- RAG: Document service ----
     doc_service = DocumentService(
-        settings=settings,
+        settings=active_settings,
         embedding_service=embedding_service,
         vector_store=vector_store,
         retriever=retriever,
@@ -391,18 +470,25 @@ async def lifespan(app: FastAPI):
         len(doc_service.list_documents()),
     )
 
-    # ---- Tool registry (Phase 4 & 7) ----
+    # ---- Phase C Step 11: Knowledge Graph ----
+    kg_db_path = active_settings.tasks_dir / "knowledge_graph.db"
+    kg_store = KnowledgeGraphStore(db_path=kg_db_path)
+    kg_service = KnowledgeGraphService(store=kg_store)
+    doc_service.set_graph_service(kg_service)
+    logger.info("KnowledgeGraphService ready | SQLite path=%s", kg_db_path)
+
+    # ---- Tool registry (Phase 4 & 7 & Step 11) ----
     tool_registry = ToolRegistry()
     tool_registry.set_audit_logger(audit_logger)
-    tools_config = _load_tools_config()
-    _register_tools(tool_registry, retriever, tools_config)
+    tools_config = _load_tools_config(active_settings)
+    _register_tools(tool_registry, retriever, tools_config, graph_service=kg_service, cfg=active_settings)
 
     # ---- Code Execution Isolation Startup Diagnostics ----
-    isolation_mode = getattr(settings, "code_exec_isolation", "subprocess").lower()
+    isolation_mode = getattr(active_settings, "code_exec_isolation", "subprocess").lower()
     if isolation_mode == "docker":
         from backend.tools.code_execution import check_docker_daemon_available, check_docker_image_available
         daemon_ok = check_docker_daemon_available()
-        image_name = getattr(settings, "code_exec_docker_image", "sovereign-code-sandbox:latest")
+        image_name = getattr(active_settings, "code_exec_docker_image", "sovereign-code-sandbox:latest")
         image_ok = check_docker_image_available(image_name) if daemon_ok else False
 
         if not daemon_ok:
@@ -431,7 +517,7 @@ async def lifespan(app: FastAPI):
 
     # ---- Agent engine ----
     engine = AgentEngine(
-        settings=settings,
+        settings=active_settings,
         router=model_router,
         memory=memory,
         doc_service=doc_service,
@@ -445,27 +531,30 @@ async def lifespan(app: FastAPI):
         models = await chat_provider.list_models()
         logger.info("Ollama reachable | models: %s", models)
     else:
-        logger.warning("Ollama chat provider not reachable at %s.", settings.ollama_base_url)
+        logger.warning("Ollama chat provider not reachable at %s.", active_settings.ollama_base_url)
 
     # ---- Phase 6: Task persistence + planning ----
-    task_store = TaskStore(db_path=settings.tasks_db_path)
+    task_store = TaskStore(db_path=active_settings.tasks_db_path)
     task_manager = TaskManager(store=task_store)
-    planner = AgentPlanner(max_plan_steps=settings.max_plan_steps)
+    planner = AgentPlanner(max_plan_steps=active_settings.max_plan_steps)
     plan_validator = PlanValidator(
         tool_registry=tool_registry,
-        max_plan_steps=settings.max_plan_steps,
+        max_plan_steps=active_settings.max_plan_steps,
     )
     approval_manager = ApprovalManager(
         store=task_store,
-        timeout_seconds=settings.approval_timeout_seconds,
+        timeout_seconds=active_settings.approval_timeout_seconds,
     )
     approval_manager.set_audit_logger(audit_logger)
+    task_manager.set_audit_logger(audit_logger)
+    tool_registry.set_task_store(task_store)
 
-    # Wire Phase 6 components into the engine
+    # Wire Phase 6 components into the engine & task manager
     engine.set_task_manager(task_manager)
     engine.set_planner(planner)
     engine.set_plan_validator(plan_validator)
     engine.set_approval_manager(approval_manager)
+    task_manager.set_approval_manager(approval_manager)
 
     # Phase 7: Task restart crash recovery
     recovery_counts = task_manager.recover_tasks_on_startup(
@@ -486,10 +575,14 @@ async def lifespan(app: FastAPI):
     app.state.vector_store = vector_store
     app.state.ollama_ok = ollama_ok
     app.state.embed_ok = embed_ok
-    app.state.upload_dir = settings.upload_dir
+    app.state.upload_dir = active_settings.upload_dir
     app.state.task_manager = task_manager
     app.state.task_store = task_store
     app.state.approval_manager = approval_manager
+    app.state.planner = planner
+    app.state.plan_validator = plan_validator
+    app.state.graph_service = kg_service
+    app.state.graph_store = kg_store
 
     # Phase 7 state
     app.state.auth_store = auth_store
@@ -497,7 +590,7 @@ async def lifespan(app: FastAPI):
     app.state.brute_force_protector = brute_force_protector
     app.state.audit_logger = audit_logger
 
-    logger.info("Startup complete — listening on %s:%d", settings.backend_host, settings.backend_port)
+    logger.info("Startup complete — listening on %s:%d", active_settings.backend_host, active_settings.backend_port)
 
     yield  # ← application runs
 
@@ -509,7 +602,7 @@ async def lifespan(app: FastAPI):
         logger.info("HTTP clients closed")
     except Exception as exc:
         logger.warning("Shutdown cleanup error: %s", exc)
-    logger.info("=== %s shutdown complete ===", settings.app_name)
+    logger.info("=== %s shutdown complete ===", active_settings.app_name)
 
 
 # ---------------------------------------------------------------------------
