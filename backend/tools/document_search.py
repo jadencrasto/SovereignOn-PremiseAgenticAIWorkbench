@@ -9,6 +9,7 @@ No second RAG implementation is created.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -89,7 +90,21 @@ def create_document_search(retriever) -> callable:
         else:
             user_clearance = "viewer"
 
-        chunks = await retriever.retrieve(args.query, top_k=args.top_k, user_clearance=user_clearance)
+        # Enforce explicit hard RAG timeout (Test B)
+        from backend.config import settings
+        timeout_s = getattr(retriever, "timeout", None) or getattr(settings, "rag_retrieval_timeout", 25)
+
+        try:
+            chunks = await asyncio.wait_for(
+                retriever.retrieve(args.query, top_k=args.top_k, user_clearance=user_clearance),
+                timeout=float(timeout_s),
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "document_search | retrieval timed out after %ss for query='%s'",
+                timeout_s, args.query[:60],
+            )
+            raise TimeoutError(f"document_search retrieval timed out after {timeout_s}s")
 
         # Apply deterministic relevance gate: only keep chunks passing relevance threshold
         is_relevant_fn = getattr(retriever, "is_chunk_relevant", None)

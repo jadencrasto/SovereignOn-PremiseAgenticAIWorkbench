@@ -194,30 +194,29 @@ class PlanValidator:
         risk_level = getattr(tool, "risk_level", "low")
         tool_requires_approval = getattr(tool, "requires_approval", False)
 
-        if tool_requires_approval and not step.requires_approval:
-            # Force approval for high-risk tools even if LLM didn't set it
+        if tool_requires_approval:
             step.requires_approval = True
-            logger.info(
-                "plan_validator_forced_approval | step=%s tool=%s risk=%s",
-                step.id, step.tool_name, risk_level,
-            )
+        else:
+            # Read-only or safe tools (e.g. artifact_verifier, file_read, file_list, document_search)
+            # must NEVER require approval, even if LLM hallucinated requires_approval: true
+            step.requires_approval = False
 
         return errors
 
     def enforce_approval_requirements(self, plan: AgentPlan) -> None:
         """
-        Post-validation pass to ensure all steps that use approval-required
-        tools have requires_approval=True.
+        Post-validation pass to ensure approval requirements strictly mirror tool definitions:
+        high-risk / mutating tools require approval; safe / read-only tools never require approval.
 
         Mutates the plan in-place.
         """
         for step in plan.steps:
             if step.tool_name is None:
+                step.requires_approval = False
                 continue
 
             tool = self._tool_registry.get(step.tool_name)
             if tool is None:
                 continue
 
-            if getattr(tool, "requires_approval", False):
-                step.requires_approval = True
+            step.requires_approval = bool(getattr(tool, "requires_approval", False))

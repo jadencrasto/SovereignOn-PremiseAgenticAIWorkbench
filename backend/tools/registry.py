@@ -274,20 +274,37 @@ class ToolRegistry:
                         )
                         return ToolResult(tool=name, success=False, error=err_msg)
                     if existing_task and task_id and str(existing_task) != str(task_id):
-                        err_msg = f"Conflict: Artifact '{clean_target}' belongs to another task ({existing_task}). Overwrite prevented."
-                        self._audit_log(
-                            session_id=session_id,
-                            tool_name=name,
-                            arguments=arguments,
-                            success=False,
-                            duration_ms=(time.monotonic() - t0) * 1000,
-                            result_summary=f"CROSS_TASK_DENIAL: {err_msg}",
-                            task_id=task_id,
-                            step_id=step_id,
-                            user_id=user_id,
-                            user_role=user_role,
-                        )
-                        return ToolResult(tool=name, success=False, error=err_msg)
+                        from backend.agent.task import TaskStatus
+                        prev_task_row = self._task_store.get_task(existing_task) if hasattr(self._task_store, "get_task") else None
+                        prev_status = prev_task_row.get("status") if prev_task_row else None
+                        # Only block overwrite if the previous task is still active (in-progress).
+                        # Terminal states (completed, failed, cancelled, etc.) should allow reuse.
+                        _ACTIVE_TASK_STATES = {
+                            TaskStatus.PENDING,
+                            TaskStatus.PLANNING,
+                            TaskStatus.AWAITING_APPROVAL,
+                            TaskStatus.EXECUTING,
+                        }
+                        if prev_task_row is not None and prev_status in _ACTIVE_TASK_STATES:
+                            err_msg = f"Conflict: Artifact '{clean_target}' belongs to another task ({existing_task}). Overwrite prevented."
+                            self._audit_log(
+                                session_id=session_id,
+                                tool_name=name,
+                                arguments=arguments,
+                                success=False,
+                                duration_ms=(time.monotonic() - t0) * 1000,
+                                result_summary=f"CROSS_TASK_DENIAL: {err_msg}",
+                                task_id=task_id,
+                                step_id=step_id,
+                                user_id=user_id,
+                                user_role=user_role,
+                            )
+                            return ToolResult(tool=name, success=False, error=err_msg)
+                        else:
+                            logger.info(
+                                "releasing_stale_artifact_reservation | artifact=%s prev_task=%s prev_status=%s new_task=%s",
+                                clean_target, existing_task, prev_status, task_id,
+                            )
 
         # --- Validate arguments ---
         try:

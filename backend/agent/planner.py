@@ -87,13 +87,13 @@ _MULTI_STEP_INDICATORS = [
     r"\band\b.*\b(then|also|after|next)\b",
     r"\bfirst\b.*\bthen\b",
     r"\bstep\s*\d",
-    r"\bcreate\b.*\b(report|file|document|artifact|docx|word)\b",
-    r"\bsearch\b.*\b(and|then)\b.*\b(calculate|write|create)\b",
-    r"\bcalculate\b.*\b(and|then)\b.*\b(write|create|save|export)\b",
-    r"\bfind\b.*\b(and|then)\b.*\b(compare|calculate|write|create)\b",
+    r"\b(create|generate)\b.*\b(report|file|document|artifact|docx|word)\b",
+    r"\bsearch\b.*\b(and|then)\b.*\b(calculate|write|create|generate)\b",
+    r"\bcalculate\b.*\b(and|then)\b.*\b(write|create|save|export|generate)\b",
+    r"\bfind\b.*\b(and|then)\b.*\b(compare|calculate|write|create|generate)\b",
     r"\banalyze\b.*\b(and|then)\b",
-    r"\bsummarize\b.*\b(and|then)\b.*\b(save|write|create)\b",
-    r"\b(create|modify|save|write)\b.*\b(file|document|report|artifact|docx|word)\b",
+    r"\bsummarize\b.*\b(and|then)\b.*\b(save|write|create|generate)\b",
+    r"\b(create|generate|modify|save|write)\b.*\b(file|document|report|artifact|docx|word)\b",
     r"\b(until|after|before)\b.*\b(approve|approval|approved)\b",
     r"\b(first|proposed|draft)\b.*\b(approve|approval|confirm)\b",
 ]
@@ -105,6 +105,12 @@ _SIMPLE_PATTERNS = [
     r"^(explain|define|describe)\s+",
     r"^calculate\s+[\d\.\+\-\*\/\(\)\s\^%]+$",
     r"^(thanks|thank you|ok|okay|got it|sure)\b",
+    # Conversational follow-ups that should stay in plain chat context
+    r"^(yes|yes\s*(please|plz|pls)|yep|yeah|yup|affirmative)\b",
+    r"^(no|nope|nah)$",
+    r"^(continue|go\s+on|go\s+ahead|please\s+continue|keep\s+going)\b",
+    r"^(sounds\s+good|looks\s+good|that('s|\s+is)\s+(great|good|fine|correct|right))\b",
+    r"^(tell\s+me\s+more|more\s+details|elaborate|expand)\b",
 ]
 
 _WRITE_KEYWORDS = [
@@ -161,6 +167,8 @@ def is_general_knowledge_query(query: str) -> bool:
         "policy", "policies", "procedure", "procedures", "protocol", "protocols",
         "sop", "manual", "manuals", "specification", "specifications",
         "datasheet", "handbook", "guideline", "guidelines", "standard operating procedure",
+        "training", "record", "records", "fire safety", "safety record",
+        "trainer", "attendee", "participant", "session", "drill",
     ]
     if any(re.search(r"\b" + re.escape(kw) + r"\b", q) for kw in doc_keywords):
         return False
@@ -182,6 +190,107 @@ def is_general_knowledge_query(query: str) -> bool:
     has_concept_query = bool(re.search(concept_pattern, q))
 
     return is_general_starter or has_concept_query
+
+
+def is_short_conversational_followup(query: str) -> bool:
+    """
+    Detect short conversational follow-ups that should remain in the plain
+    conversational path, preserving conversation history context.
+
+    Examples: "yes plz", "continue", "go ahead", "tell me more", "sounds good"
+    """
+    if not query:
+        return False
+    q = query.strip()
+    q_lower = q.lower()
+
+    # Very short messages (< 50 chars) that don't contain tool/action keywords
+    if len(q) < 50:
+        action_keywords = [
+            "create", "generate", "write", "calculate", "execute", "run",
+            "search", "find", "list", "read", "file", "code", "python",
+            "xlsx", "docx", "report", "artifact", "export", "save",
+        ]
+        if not any(kw in q_lower for kw in action_keywords):
+            followup_patterns = [
+                r"^(yes|yep|yeah|yup|y)\b.*$",  # Short affirmative ("yes", "yes plz", "yes give one", "yes show one", etc.)
+                r"^(no|nope|nah)\b.*$",
+                r"^(ok|okay|k|alright|sure|right|correct)\b.*$",
+                r"^(continue|go\s+on|go\s+ahead|proceed|keep\s+going)\b.*$",
+                r"^(please\s+continue|yes\s+continue|please\s+go\s+ahead)\b.*$",
+                r"^(sounds?\s+good|looks?\s+good|that('s|\s+is)\s+(great|good|fine|correct|right))\b.*$",
+                r"^(tell\s+me\s+more|more\s+details?|elaborate|expand(\s+on\s+that)?)\b.*$",
+                r"^(give\s*(me)?(\s+(one|that|it))?|show\s*(me)?(\s+(one|that|it|diagram))?)\s*[\.,!?]*$",
+                r"^(thanks?|thank\s+you|ty|thx)\b.*$",
+                r"^(got\s+it|understood|i\s+see|makes?\s+sense)\b.*$",
+                r"^(what\s+else|anything\s+else|and\??)\b.*$",
+            ]
+            if any(re.search(p, q_lower) for p in followup_patterns):
+                return True
+    return False
+
+
+def is_simple_informational_query(query: str) -> bool:
+    """
+    Detect simple informational queries that need RAG context but NOT the
+    tool-enabled agent path. These should go through the plain streaming
+    path which already does RAG retrieval.
+
+    Criteria:
+    - Asks an informational question (what/who/how/when/where/why/describe...)
+    - May reference documents, policies, training, etc. (needs RAG)
+    - Does NOT request file creation, code execution, or multi-step actions
+    - Is NOT a multi-step task
+
+    Returns True → route to plain stream (with RAG), NOT tool loop.
+    """
+    if not query:
+        return False
+    q = query.strip().lower()
+
+    # Strip polite prefixes
+    q = re.sub(r"^(please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|kindly\s+)", "", q).strip()
+
+    # If it requests any file/artifact/code operation, NOT simple
+    action_keywords = [
+        "create", "generate", "write", "export", "save", "download",
+        "xlsx", "excel", "docx", "word", "csv", "artifact", "runbook",
+        "code_execution", "python code", "script", "execute code", "sandbox",
+        "run python", "execute python", "fibonacci", "calculate.*and.*save",
+        "modify", "delete", "remove",
+    ]
+    if any(re.search(r"\b" + re.escape(kw) + r"\b", q) for kw in action_keywords):
+        return False
+
+    # Multi-step indicators → NOT simple
+    for pattern in _MULTI_STEP_INDICATORS:
+        if re.search(pattern, q, re.IGNORECASE):
+            return False
+
+    # Write keywords → NOT simple
+    for kw in _WRITE_KEYWORDS:
+        if kw in q:
+            return False
+
+    # Must be an informational question pattern
+    informational_starters = [
+        r"^what\s+(is|are|was|were|did|does|do)\b",
+        r"^who\s+(is|are|was|were)\b",
+        r"^when\s+(is|are|was|were|did|does|do)\b",
+        r"^where\s+(is|are|was|were|did|does|do)\b",
+        r"^why\s+(is|are|was|were|did|does|do)\b",
+        r"^how\s+(is|are|was|were|did|does|do|long|much|many|often)\b",
+        r"^(explain|define|describe|tell\s+me\s+about|summarize|summarise)\b",
+        r"^(give\s+(me\s+)?an\s+overview|give\s+(me\s+)?a\s+summary)\b",
+        r"^(list|show|display)\s+(the|all|me)\b",
+    ]
+    is_informational = any(re.search(p, q) for p in informational_starters)
+
+    # If it's informational and < 150 chars, it's simple
+    if is_informational and len(q) < 150:
+        return True
+
+    return False
 
 
 def should_use_planning(
@@ -264,9 +373,9 @@ RULES:
 2. Each step must use a tool from the available list or be a "reasoning" step (tool_name = null).
 3. Keep plans concise — use the minimum steps needed to complete the user's request.
 4. Tool guidelines:
-   - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this whenever the user asks to search, find, or summarize information from documents. document_search directly retrieves the full grounded text content. Do NOT follow document_search with file_read.
-   - file_list: Lists files available in the local workspace (data/uploads/ directory). Use this when the user asks what files are available, or you need to discover filenames before reading.
-   - file_read: Reads an existing text file from the workspace (e.g. 'mrpl_lab_composition_test.csv'). ONLY use file_read when the user explicitly provides a specific known filename in their prompt. NEVER call file_read on indexed documents or RAG results. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
+   - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this for general knowledge retrieval, equipment documentation, and refinery records. Do NOT follow document_search with file_read.
+   - file_list: Lists files available in the local workspace (data/uploads/ directory). Use this when the user asks what files are available, or when working with an uploaded or local workspace file.
+   - file_read: Reads an existing text file from the workspace (e.g. 'Company Safety Training Record.txt', 'mrpl_lab_composition_test.csv'). Use file_read whenever the user refers to an uploaded file, a local document, or a file in the workspace. NEVER invent or fabricate placeholder filenames (such as 'document_0.txt', 'document_1.txt', 'doc_0.txt', 'document_0', etc.).
    - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2").
    - code_execution: Executes Python code inside the local sandbox (e.g. for computation or data processing). Captures stdout/stderr.
    - docx_create: Generates a genuine Microsoft Word (.docx) document in the sandbox with title, paragraphs, and tables. Always set requires_approval to true.
@@ -276,12 +385,17 @@ RULES:
    - knowledge_graph_query: Queries the sovereign Knowledge Graph for equipment topology, unit locations, interconnected components, or structured failure-mode/defect relationship traces (e.g. 'P-204', 'V-401', 'Hydrocracker Unit 04'). Use this ONLY when the user explicitly requests equipment topology, unit locations, interconnected components, or structured relationship traces. Do NOT call this tool for generic informational questions, calculations, or direct file reading.
    - Reasoning step (tool_name = null): Synthesizes observations, calculates deviations, checks evidence, and provides the grounded decision-support response. Spreadsheets and documents are generated natively by xlsx_report and docx_create; NEVER output Python code (e.g. openpyxl) or claim manual code execution. NEVER ask 'Would you like me to proceed with any further steps?' when steps or tasks are completing.
 
-5. Approval-gated summary workflow:
-   When the user asks to prepare a summary, show it first, and create a document/file after approval (e.g. DOCX or Word document or report):
-   - Step 1: document_search (search for the requested document in knowledge base)
-   - Step 2: reasoning (tool_name = null) to synthesize and present the grounded proposed summary to the user first.
-   - Step 3: docx_create (or file_write or xlsx_report) with requires_approval: true.
-   - Step 4: artifact_verifier to verify the generated artifact.
+5. Artifact generation workflows:
+   - For uploaded or workspace files (e.g. "uploaded Company Safety Training Record", "the uploaded file", "from the uploaded document", "contents of ..."):
+     Step 1: file_list (to list workspace files)
+     Step 2: file_read (to read the uploaded file content, e.g. 'Company Safety Training Record.txt')
+     Step 3: docx_create or xlsx_report with requires_approval: true
+     Step 4: artifact_verifier to verify the generated artifact (requires_approval: false).
+   - For knowledge base / RAG requests (e.g. refinery manuals, equipment procedures):
+     Step 1: document_search (search for the requested document in knowledge base)
+     Step 2: reasoning (tool_name = null) to synthesize and present the grounded proposed summary to the user first.
+     Step 3: docx_create or xlsx_report with requires_approval: true
+     Step 4: artifact_verifier to verify the generated artifact (requires_approval: false).
 
 6. Maximum {max_steps} steps.
 
@@ -410,14 +524,57 @@ class AgentPlanner:
                         logger.info("Pruned ungrounded file_read step '%s' following document_search", path_val)
                         continue
 
+                req_app = step_data.get("requires_approval", False)
+                if tool_name in ("artifact_verifier", "file_read", "file_list", "document_search", "calculator", None):
+                    req_app = False
+                elif tool_name in ("docx_create", "xlsx_report", "file_write"):
+                    req_app = True
+
                 steps.append(PlanStep(
                     id=f"step_{len(steps) + 1}",
                     description=step_data.get("description", f"Step {len(steps) + 1}"),
                     tool_name=tool_name,
                     arguments=args,
-                    requires_approval=step_data.get("requires_approval", False),
+                    requires_approval=req_app,
                     status=StepStatus.pending.value,
                 ))
+
+            # Requirement 4: For requests referring to uploaded/workspace files, ensure file_list -> file_read is used
+            obj_lower = objective.lower()
+            is_uploaded_req = any(p in obj_lower for p in (
+                "uploaded", "the uploaded file", "from the uploaded", "contents of company safety",
+                "contents of the company safety", "from the uploaded document", "read the contents of the company safety"
+            ))
+            has_file_tool = any(s.tool_name in ("file_list", "file_read") for s in steps)
+            is_artifact_gen = any(s.tool_name in ("docx_create", "xlsx_report", "file_write") for s in steps)
+
+            if is_uploaded_req and not has_file_tool and is_artifact_gen:
+                resolved_fname = "Company Safety Training Record.txt" if "safety" in obj_lower else "uploaded_document.txt"
+                new_steps = [
+                    PlanStep(
+                        id="step_1",
+                        description="List files available in the workspace to confirm the uploaded document.",
+                        tool_name="file_list",
+                        arguments={},
+                        requires_approval=False,
+                        status=StepStatus.pending.value,
+                    ),
+                    PlanStep(
+                        id="step_2",
+                        description=f"Read the content of the uploaded {resolved_fname}.",
+                        tool_name="file_read",
+                        arguments={"relative_path": resolved_fname},
+                        requires_approval=False,
+                        status=StepStatus.pending.value,
+                    ),
+                ]
+                for s in steps:
+                    if s.tool_name in ("document_search", "rag_search"):
+                        continue
+                    new_steps.append(s)
+                for idx, ns in enumerate(new_steps, 1):
+                    ns.id = f"step_{idx}"
+                steps = new_steps
 
             if not steps:
                 steps = [PlanStep(

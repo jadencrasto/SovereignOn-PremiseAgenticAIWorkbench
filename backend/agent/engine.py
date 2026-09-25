@@ -27,12 +27,13 @@ New SSE events emitted during multimodal:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -43,13 +44,26 @@ from backend.models.router import ModelRouter
 
 logger = logging.getLogger(__name__)
 
+import ast
+
 # Sentinel — set when RAG is wired up (avoids circular imports at module level)
 _DocumentService = None
 
-# Tool call detection pattern
+# Known local tools
+_KNOWN_TOOL_NAMES = {
+    "file_read", "file_list", "file_write", "document_search",
+    "code_execution", "calculator", "docx_create", "xlsx_report",
+    "artifact_verifier", "knowledge_graph",
+}
+
+# Tool call detection patterns
 _TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+    r"<tool_call>\s*(.*?)\s*</tool_call>",
     re.DOTALL,
+)
+
+_FUNC_CALL_PATTERN = re.compile(
+    r"\b(" + "|".join(_KNOWN_TOOL_NAMES) + r")\s*\(([\s\S]*?)\)",
 )
 
 
@@ -245,6 +259,7 @@ class AgentEngine:
         base_messages = self._build_messages(session_id, user_message, sources)
 
         # Inject tool definitions into the system prompt only if NOT a general-knowledge question
+        tool_msg_injected = False
         if self._tool_registry and not self._is_general_knowledge_query(user_message):
             tool_prompt = self._tool_registry.format_tools_for_prompt()
             if tool_prompt:
@@ -254,6 +269,7 @@ class AgentEngine:
                     base_messages = [base_messages[0], tool_msg] + base_messages[1:]
                 else:
                     base_messages = [tool_msg] + base_messages
+                tool_msg_injected = True
 
         logger.info(
             "tool_stream_start | session=%s model=%s/%s sources=%d tools=%d",
@@ -265,6 +281,14 @@ class AgentEngine:
         working_messages = list(base_messages)
         iteration = 0
         final_text_parts = []
+        last_executed_tool = None  # (tool_name, result)
+
+        # Duplicate failed-tool protection: track (tool_name, normalized_args) that already failed
+        failed_tool_calls: Set[str] = set()
+
+        # One-shot tools that should trigger final-answer-only mode after execution
+        _ONE_SHOT_TOOLS = {"calculator", "file_list", "file_read", "document_search", "code_execution"}
+        _is_explicit_python = any(p in user_message.lower() for p in ("using python", "in python", "with python", "use python to", "run python", "execute python"))
 
         while iteration < self._max_tool_iterations:
             iteration += 1
@@ -282,8 +306,6 @@ class AgentEngine:
             async for chunk in provider.chat_stream(request):
                 if chunk.delta:
                     accumulated.append(chunk.delta)
-                    # Only stream deltas to the user on the final iteration
-                    # For intermediate iterations, we buffer
                 if chunk.done:
                     break
 
@@ -292,24 +314,71 @@ class AgentEngine:
             # Check for tool calls
             tool_call = self._parse_tool_call(full_response)
 
+            # Safety Net (Requirement 3): If user explicitly asked for Python execution,
+            # but model output raw Python code without <tool_call>, auto-wrap it into code_execution
+            if tool_call is None and iteration == 1 and _is_explicit_python and self._tool_registry:
+                py_match = re.search(r"```(?:python)?\s*([\s\S]*?)```", full_response)
+                if py_match and py_match.group(1).strip():
+                    tool_call = {
+                        "name": "code_execution",
+                        "arguments": {"code": py_match.group(1).strip()}
+                    }
+
             if tool_call is None:
                 # No tool call — this is the final answer
-                # Stream the accumulated text as deltas
-                for delta_text in accumulated:
-                    yield delta_text
+                # Sanitize: strip leaked tool markup, JSON, FSM state, unrequested Mermaid/Python
+                sanitized = self._clean_reasoning_response(full_response, user_message)
 
-                final_text_parts.append(full_response)
+                # If sanitized is empty or 'undefined' but we previously executed a tool, provide the deterministic direct answer
+                if (not sanitized or sanitized.strip().lower() in ("undefined", "null", "none")) and last_executed_tool:
+                    tname, tresult = last_executed_tool
+                    if tresult.success:
+                        sanitized = self._format_direct_tool_answer(tname, tresult, user_message)
+
+                if not sanitized or sanitized.strip().lower() in ("undefined", "null", "none"):
+                    sanitized = full_response
+
+                # Stream the sanitized text as deltas
+                yield sanitized
+                final_text_parts.append(sanitized)
                 break
             else:
                 # Tool call detected
                 tool_name = tool_call.get("name", "")
                 tool_args = tool_call.get("arguments", {})
 
-                # Stream any text before the tool call as deltas
-                pre_tool_text = self._extract_pre_tool_text(full_response)
-                if pre_tool_text.strip():
-                    yield pre_tool_text
-                    final_text_parts.append(pre_tool_text)
+                # If we ALREADY executed a one-shot tool on the previous iteration and it succeeded,
+                # do NOT loop again: format and emit the result directly (Requirement 1)
+                if last_executed_tool and last_executed_tool[1].success and (last_executed_tool[0] == tool_name or last_executed_tool[0] in _ONE_SHOT_TOOLS):
+                    tname, tresult = last_executed_tool
+                    direct_ans = self._format_direct_tool_answer(tname, tresult, user_message)
+                    yield direct_ans
+                    final_text_parts.append(direct_ans)
+                    break
+
+                # Duplicate failed-tool protection: build a deterministic key
+                try:
+                    normalized_args = json.dumps(tool_args, sort_keys=True, default=str)
+                except (TypeError, ValueError):
+                    normalized_args = str(tool_args)
+                call_key = f"{tool_name}::{normalized_args}"
+
+                if call_key in failed_tool_calls:
+                    logger.warning(
+                        "duplicate_failed_tool | session=%s tool=%s — skipping repeat failure",
+                        session_id, tool_name,
+                    )
+                    failure_msg = (
+                        f"The `{tool_name}` tool was already attempted with the same arguments "
+                        f"and failed. I cannot complete this request with the available tools."
+                    )
+                    yield failure_msg
+                    final_text_parts.append(failure_msg)
+                    break
+
+                # Note: Pre-tool text before tool call invocation is internal scratchpad/monologue
+                # (e.g. "Let's proceed with a document search..."). Do NOT yield it as answer text deltas
+                # to avoid confusing the user and preventing observation handoff.
 
                 # Yield tool_start event
                 yield {
@@ -330,6 +399,8 @@ class AgentEngine:
                         error="Tool system is not initialized.",
                     )
 
+                last_executed_tool = (tool_name, result)
+
                 # Yield tool_result event
                 result_summary = self._format_tool_result_summary(result)
                 yield {
@@ -339,18 +410,41 @@ class AgentEngine:
                     "summary": result_summary,
                 }
 
+                # Track failed calls for duplicate protection
+                if not result.success:
+                    failed_tool_calls.add(call_key)
+
                 # Build observation message for the model
                 observation = self._format_observation(tool_name, result)
 
                 # Append the assistant's response and observation to working messages
                 working_messages.append(Message(role="assistant", content=full_response))
-                working_messages.append(Message(role="user", content=observation))
+                working_messages.append(Message(role="user", content=f"{observation}\n\nProvide your final natural-language response now answering the user directly based on the tool result above. Do NOT output tool calls, JSON, or code."))
+
+                # Final-answer-only mode for one-shot tools:
+                # After a successful one-shot tool execution, strip tool definitions
+                # from working_messages so the next LLM call generates a final answer
+                # without the ability to invoke more tools.
+                if result.success and tool_name in _ONE_SHOT_TOOLS:
+                    working_messages = [
+                        m for m in working_messages
+                        if not (m.role == "system" and "## Available Tools" in (m.content or ""))
+                    ]
+                    tool_msg_injected = False  # mark as removed
 
                 logger.info(
                     "tool_iteration | session=%s iter=%d/%d tool=%s success=%s",
                     session_id, iteration, self._max_tool_iterations,
                     tool_name, result.success,
                 )
+
+        # If we hit max iterations or loop exited without text deltas, ensure result handoff reaches the user
+        valid_text = [p for p in final_text_parts if p.strip() and p.strip().lower() not in ("undefined", "null", "none")]
+        if not valid_text and last_executed_tool:
+            tname, tresult = last_executed_tool
+            fallback_text = self._format_direct_tool_answer(tname, tresult, user_message)
+            yield fallback_text
+            final_text_parts.append(fallback_text)
 
         # If we hit max iterations, yield a warning
         if iteration >= self._max_tool_iterations and tool_call is not None:
@@ -1133,6 +1227,62 @@ class AgentEngine:
                 }
                 continue
 
+            # ---- Requirement 4: Check if any prior required prerequisite step failed ----
+            failed_prereq = next((s for s in executed_step_results if not s.get("success") and s.get("tool") in ("file_read", "document_search", "rag_search", "file_list")), None)
+            if failed_prereq:
+                fail_msg = f"Cannot proceed with step '{step.description}': prerequisite {failed_prereq['tool']} failed ({failed_prereq.get('error', 'unknown error')})."
+                logger.warning("prereq_failed_abort | task=%s step=%s error=%s", task.task_id, step.id, fail_msg)
+                if step.status == StepStatus.pending.value:
+                    self._task_manager.update_step_status(task.task_id, step.id, StepStatus.running.value)
+                self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error=fail_msg)
+                try:
+                    self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error=fail_msg)
+                except TaskStateError:
+                    pass
+                yield {"type": "plan_step", "task_id": task.task_id, "step_id": step.id, "status": "failed"}
+                yield {"type": "task_failed", "task_id": task.task_id, "error": fail_msg}
+                yield f"\n\n**Task Failed:** {fail_msg}"
+                yield sources
+                return
+
+            # ---- Requirement 5: Artifact grounding must happen BEFORE artifact creation or approval ----
+            if step.tool_name in ("docx_create", "xlsx_report", "file_write"):
+                has_grounded_data = any(
+                    prev.get("success") and (
+                        (prev.get("tool") == "document_search" and prev.get("result") and len(prev.get("result", [])) > 0)
+                        or (prev.get("tool") == "file_read" and isinstance(prev.get("result"), dict) and str(prev.get("result", {}).get("content", "")).strip())
+                        or (prev.get("tool") == "file_read" and isinstance(prev.get("result"), str) and prev.get("result").strip())
+                    )
+                    for prev in executed_step_results
+                )
+                content_to_check = ""
+                if isinstance(step.arguments, dict):
+                    content_to_check = str(step.arguments.get("content", ""))
+                    if step.tool_name == "xlsx_report":
+                        content_to_check += " " + str(step.arguments.get("rows", []))
+                placeholder_pattern = re.compile(r"\{[a-z_]+\}", re.IGNORECASE)
+                real_placeholders = [
+                    p for p in placeholder_pattern.findall(content_to_check)
+                    if p.lower() not in ("{}", "{true}", "{false}", "{null}", "{none}")
+                ]
+                if not has_grounded_data or real_placeholders:
+                    grounding_error = (
+                        f"Artifact creation stopped: {'contains unresolved placeholders ' + str(real_placeholders[:5]) if real_placeholders else 'no successful grounded source evidence was retrieved prior to creating artifact'}."
+                    )
+                    logger.warning("artifact_grounding_precheck_failed | task=%s step=%s error=%s", task.task_id, step.id, grounding_error)
+                    if step.status == StepStatus.pending.value:
+                        self._task_manager.update_step_status(task.task_id, step.id, StepStatus.running.value)
+                    self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error=grounding_error)
+                    try:
+                        self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error=grounding_error)
+                    except TaskStateError:
+                        pass
+                    yield {"type": "plan_step", "task_id": task.task_id, "step_id": step.id, "status": "failed"}
+                    yield {"type": "task_failed", "task_id": task.task_id, "error": grounding_error}
+                    yield f"\n\n**Task Failed:** {grounding_error}"
+                    yield sources
+                    return
+
             # ---- Tool step (Approval gate check) ----
             if step.requires_approval:
                 self._task_manager.update_step_status(
@@ -1209,6 +1359,54 @@ class AgentEngine:
                 "summary": result_summary,
             }
 
+            # --- Artifact verifier failure propagation ---
+            if step.tool_name == "artifact_verifier":
+                verifier_passed = False
+                if result.success and isinstance(result.result, dict):
+                    verifier_passed = result.result.get("verified", False) is True
+                elif result.success and isinstance(result.result, str):
+                    verifier_passed = "verified" in result.result.lower() and "true" in result.result.lower()
+
+                if not verifier_passed:
+                    fail_reason = "Artifact verification failed: verified=false"
+                    if isinstance(result.result, dict):
+                        fail_reason = f"Artifact verification failed: {result.result.get('error', result.result.get('reason', 'verified=false'))}"
+                    self._task_manager.update_step_status(
+                        task.task_id, step.id, StepStatus.failed.value,
+                        error=fail_reason[:500]
+                    )
+                    executed_step_results.append({
+                        "step_id": step.id,
+                        "tool": step.tool_name,
+                        "description": step.description,
+                        "arguments": step.arguments,
+                        "success": False,
+                        "error": fail_reason,
+                        "result": result.result,
+                        "summary": result_summary,
+                    })
+                    yield {
+                        "type": "plan_step",
+                        "task_id": task.task_id,
+                        "step_id": step.id,
+                        "status": "failed",
+                    }
+                    try:
+                        self._task_manager.update_status(
+                            task.task_id, TaskStatus.FAILED,
+                            error=fail_reason,
+                        )
+                    except TaskStateError:
+                        pass
+                    yield {
+                        "type": "task_failed",
+                        "task_id": task.task_id,
+                        "error": fail_reason,
+                    }
+                    yield f"\n\n**Artifact verification failed.** {fail_reason}"
+                    yield sources
+                    return
+
             if result.success:
                 self._task_manager.update_step_status(
                     task.task_id, step.id, StepStatus.completed.value,
@@ -1219,6 +1417,26 @@ class AgentEngine:
                     task.task_id, step.id, StepStatus.failed.value,
                     error=str(result.error)[:500] if result.error else "Unknown error"
                 )
+                fail_reason = f"Step '{step.description or step.tool_name}' failed: {result.error}"
+                logger.warning("step_failure_abort | task=%s step=%s tool=%s error=%s", task.task_id, step.id, step.tool_name, fail_reason)
+                try:
+                    self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error=fail_reason)
+                except TaskStateError:
+                    pass
+                yield {
+                    "type": "plan_step",
+                    "task_id": task.task_id,
+                    "step_id": step.id,
+                    "status": "failed",
+                }
+                yield {
+                    "type": "task_failed",
+                    "task_id": task.task_id,
+                    "error": fail_reason,
+                }
+                yield f"\n\n**Task Failed:** {fail_reason}"
+                yield sources
+                return
 
             executed_step_results.append({
                 "step_id": step.id,
@@ -1239,14 +1457,16 @@ class AgentEngine:
             }
 
         # ---- All steps complete ----
-        has_completion = any("### Execution Plan Completed" in p for p in final_text_parts)
-        if not final_text_parts or not has_completion:
-            synthesized_completion = self._synthesize_task_completion_response(
-                user_request=task.user_request,
-                executed_step_results=executed_step_results,
-            )
-            final_text_parts.append(synthesized_completion)
-            yield synthesized_completion
+        failed_steps = [s for s in plan.steps if s.status == StepStatus.failed.value]
+        if not failed_steps:
+            has_completion = any("### Execution Plan Completed" in p for p in final_text_parts)
+            if not final_text_parts or not has_completion:
+                synthesized_completion = self._synthesize_task_completion_response(
+                    user_request=task.user_request,
+                    executed_step_results=executed_step_results,
+                )
+                final_text_parts.append(synthesized_completion)
+                yield synthesized_completion
 
         full_final = "\n".join(final_text_parts) if final_text_parts else ""
         if full_final:
@@ -1501,12 +1721,31 @@ class AgentEngine:
                 task_id, awaiting_step.id, StepStatus.failed.value,
                 error=str(result.error)[:500] if result.error else "Unknown error"
             )
+            fail_reason = f"Step '{awaiting_step.description or awaiting_step.tool_name}' failed: {result.error}"
+            try:
+                self._task_manager.update_status(task_id, TaskStatus.FAILED, error=fail_reason)
+            except TaskStateError:
+                pass
+            yield {
+                "type": "plan_step",
+                "task_id": task_id,
+                "step_id": awaiting_step.id,
+                "status": "failed",
+            }
+            yield {
+                "type": "task_failed",
+                "task_id": task_id,
+                "error": fail_reason,
+            }
+            yield f"\n\n**Task Failed:** {fail_reason}"
+            yield []
+            return
 
         yield {
             "type": "plan_step",
             "task_id": task_id,
             "step_id": awaiting_step.id,
-            "status": "completed" if result.success else "failed",
+            "status": "completed",
         }
 
         # 5. Continue with remaining steps
@@ -1945,6 +2184,41 @@ class AgentEngine:
                 "summary": result_summary,
             }
 
+            # --- Artifact verifier failure propagation ---
+            if step.tool_name == "artifact_verifier":
+                verifier_passed = False
+                if result.success and isinstance(result.result, dict):
+                    verifier_passed = result.result.get("verified", False) is True
+                elif result.success and isinstance(result.result, str):
+                    verifier_passed = "verified" in result.result.lower() and "true" in result.result.lower()
+
+                if not verifier_passed:
+                    fail_reason = "Artifact verification failed: verified=false"
+                    if isinstance(result.result, dict):
+                        fail_reason = f"Artifact verification failed: {result.result.get('error', result.result.get('reason', 'verified=false'))}"
+                    self._task_manager.update_step_status(
+                        task_id, step.id, StepStatus.failed.value,
+                        error=fail_reason[:500]
+                    )
+                    try:
+                        self._task_manager.update_status(task_id, TaskStatus.FAILED, error=fail_reason)
+                    except TaskStateError:
+                        pass
+                    yield {
+                        "type": "plan_step",
+                        "task_id": task_id,
+                        "step_id": step.id,
+                        "status": "failed",
+                    }
+                    yield {
+                        "type": "task_failed",
+                        "task_id": task_id,
+                        "error": fail_reason,
+                    }
+                    yield f"\n\n**Artifact verification failed.** {fail_reason}"
+                    yield sources
+                    return
+
             if result.success:
                 self._task_manager.update_step_status(
                     task_id, step.id, StepStatus.completed.value,
@@ -1955,6 +2229,25 @@ class AgentEngine:
                     task_id, step.id, StepStatus.failed.value,
                     error=str(result.error)[:500] if result.error else "Unknown error"
                 )
+                fail_reason = f"Step '{step.description or step.tool_name}' failed: {result.error}"
+                try:
+                    self._task_manager.update_status(task_id, TaskStatus.FAILED, error=fail_reason)
+                except TaskStateError:
+                    pass
+                yield {
+                    "type": "plan_step",
+                    "task_id": task_id,
+                    "step_id": step.id,
+                    "status": "failed",
+                }
+                yield {
+                    "type": "task_failed",
+                    "task_id": task_id,
+                    "error": fail_reason,
+                }
+                yield f"\n\n**Task Failed:** {fail_reason}"
+                yield sources
+                return
 
             executed_step_results.append({
                 "step_id": step.id,
@@ -1986,14 +2279,18 @@ class AgentEngine:
             return
 
         # ---- All remaining steps complete ----
-        has_completion = any("### Execution Plan Completed" in p for p in final_text_parts)
-        if not final_text_parts or not has_completion:
-            synthesized_completion = self._synthesize_task_completion_response(
-                user_request=fresh_task.user_request if fresh_task else "Agent Task",
-                executed_step_results=executed_step_results,
-            )
-            final_text_parts.append(synthesized_completion)
-            yield synthesized_completion
+        all_steps = fresh_task.plan.steps if fresh_task and fresh_task.plan else []
+        failed_steps = [s for s in all_steps if s.status == StepStatus.failed.value]
+
+        if not failed_steps:
+            has_completion = any("### Execution Plan Completed" in p for p in final_text_parts)
+            if not final_text_parts or not has_completion:
+                synthesized_completion = self._synthesize_task_completion_response(
+                    user_request=fresh_task.user_request if fresh_task else "Agent Task",
+                    executed_step_results=executed_step_results,
+                )
+                final_text_parts.append(synthesized_completion)
+                yield synthesized_completion
 
         full_final = "\n".join(final_text_parts) if final_text_parts else ""
         if full_final:
@@ -2312,7 +2609,7 @@ class AgentEngine:
             "8. If a calculation succeeded, cite the calculated total. If a calculation failed or was not performed, state that the calculation could not be completed.\n"
             "9. NEVER fabricate information, invent facts, or reinterpret/transfer facts from unrelated equipment into the requested topic.\n"
             "10. If preparing a summary for file creation, show the proposed summary clearly first and ask for approval before any file creation tool (docx_create) is called.\n"
-            "11. ARCHITECTURAL TOOL PIPELINE & NO FAKE CODE: Spreadsheet (.xlsx) and document (.docx) generation is performed natively by registered tools (xlsx_report, docx_create) and verified via artifact_verifier. NEVER output Python code (e.g. import openpyxl, openpyxl.Workbook(), pandas) or claim manual code execution. Describe the actual pipeline: searched indexed documents, synthesized grounded data, generated XLSX using xlsx_report, and verified workbook using artifact_verifier.\n"
+            "11. Spreadsheet (.xlsx) and document (.docx) generation is performed by the registered tools (xlsx_report, docx_create) and verified via artifact_verifier. NEVER output Python code (e.g. import openpyxl, openpyxl.Workbook(), pandas) or claim manual code execution.\n"
             "12. SCHEMA CONSISTENCY: If the user requested specific spreadsheet columns (e.g. Equipment ID, Maintenance Findings, Operating Observations, Recommended Actions), present findings using EXACTLY those semantic columns. Do NOT invent an arbitrary 5-column breakdown (such as ID, Description, Finding, Observation, Recommended Action).\n"
             "13. NO POST-COMPLETION PROCEED LANGUAGE: When a task or step has completed, state what was accomplished. NEVER ask 'Would you like me to proceed with any further steps?' or ask for redundant confirmation after operations have succeeded."
         )
@@ -2580,7 +2877,7 @@ class AgentEngine:
                 return "; ".join(unique[:5])
 
         # 4. Recommended Actions / Repairs / Parts Replaced / Preventative Recommendations
-        if any(k in col_lower for k in ("action", "recommend", "repair", "part", "prevent", "maintenance", "corrective", "solution", "work scope")):
+        if "participant" not in col_lower and any(k in col_lower for k in ("action", "recommend", "repair", "parts", "prevent", "maintenance", "corrective", "solution", "work scope")):
             action_bullets = []
             lines = context.splitlines()
             in_section = False
@@ -2632,45 +2929,117 @@ class AgentEngine:
                         unique.append(b)
                 return "; ".join(unique[:5])
 
+        # 5. Generic direct key-value matching from structured text (e.g. Training Program, Trainer, Date, etc.)
+        clean_col = re.escape(col_name.strip())
+        m_multi = re.search(r'(?im)^\s*\*{0,2}' + clean_col + r'\*{0,2}\s*:\s*\n((?:\s*[-*•]\s*[^\n\r]+\n?)+)', context)
+        if m_multi:
+            bullets = [re.sub(r'^\s*[-*•]\s*', '', b).strip() for b in m_multi.group(1).strip().splitlines() if b.strip()]
+            if bullets:
+                return "; ".join(bullets)
+        m_single = re.search(r'(?im)^\s*\*{0,2}' + clean_col + r'\*{0,2}\s*:\s*([^\n\r]+)', context)
+        if m_single and m_single.group(1).strip():
+            val = m_single.group(1).strip()
+            if not val.endswith(":"):
+                return val
+
         return None
 
     @staticmethod
-    def _clean_reasoning_response(text: str) -> str:
+    @staticmethod
+    def _clean_reasoning_response(text: str, user_request: str = "") -> str:
         """
-        Narrow sanitization for reasoning step output:
+        Sanitize agent response to ensure no tool, Python, or Mermaid internals
+        are exposed to the user in normal responses (Requirements 2 & 7):
         1. Strips accidental stray <tool_call>...</tool_call> markup.
-        2. Strips fake artifact-generation code blocks (e.g. openpyxl scripts) when presented as execution.
-        3. Strips contradictory trailing post-completion / proceed questions (e.g. 'Would you like me to proceed with any further steps?').
-        Does NOT rewrite legitimate technical content.
+        2. Strips raw tool JSON objects (e.g. {"name": "file_list", ...}).
+        3. Strips tool/function call signatures: file_read(...), file_list(...), document_search(...).
+        4. Strips raw query assignments like query = "..." or search_query = "...".
+        5. Strips FSM state indicators like State: Planning, FSMState.EXECUTING, etc.
+        6. Strips execute_result, internal schemas, and [TOOL RESULT...] markers.
+        7. Strips ```mermaid ... ``` code blocks UNLESS user explicitly requested a diagram/visualization.
+        8. Strips repeated Python code blocks UNLESS user explicitly requested code.
+        9. Strips fake artifact-generation code blocks (openpyxl).
+        10. Strips contradictory trailing post-completion / proceed questions.
         """
         if not text:
             return ""
-        # 1. Remove leaked tool_call markup
-        cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL).strip()
 
-        # 2. Remove fake artifact-generation python code blocks (openpyxl script generation)
+        cleaned = text
+
+        # 1. Remove leaked tool_call markup
+        cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL).strip()
+
+        # 2. Remove raw tool JSON blocks: {"name": "...", "arguments": ...}
         cleaned = re.sub(
-            r"```(?:python)?\s*(?:import\s+openpyxl|from\s+openpyxl|wb\s*=\s*openpyxl\.Workbook).*?```",
+            r'\{\s*"name"\s*:\s*"(?:file_list|file_read|document_search|calculator|code_execution|docx_create|xlsx_report|knowledge_graph_query)"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}',
             "",
             cleaned,
             flags=re.DOTALL
         ).strip()
 
-        # Remove fake execution introductory line if left dangling before the removed code block
+        # 3. Remove function-call signatures like file_read("..."), document_search(query="..."), file_list()
+        cleaned = re.sub(
+            r'(?m)^\s*(?:file_read|file_list|document_search|calculator|code_execution)\s*\([^\)]*\)\s*$',
+            "",
+            cleaned
+        ).strip()
+
+        # 4. Remove raw query assignments: query = "..."
+        cleaned = re.sub(
+            r'(?im)^\s*(?:query|search_query|tool_input)\s*=\s*["\'][^"\']+["\']\s*$',
+            "",
+            cleaned
+        ).strip()
+
+        # 5. Remove FSM state indicators
+        cleaned = re.sub(
+            r'(?im)^\s*(?:State|FSMState|Current State)\s*:\s*[A-Za-z_]+\s*$',
+            "",
+            cleaned
+        ).strip()
+
+        # 6. Remove leaked [TOOL RESULT: ...] or [END TOOL RESULT]
+        cleaned = re.sub(
+            r'\[(?:TOOL RESULT|END TOOL RESULT|DOCUMENT SOURCE|DOCUMENT CONTENT|END DOCUMENT CONTENT)[^\]]*\]',
+            "",
+            cleaned
+        ).strip()
+
+        # 7. Remove Mermaid diagrams unless explicitly requested
+        req_lower = (user_request or "").lower()
+        diagram_requested = any(w in req_lower for w in ("diagram", "mermaid", "flowchart", "chart", "visualize", "visualization", "map out", "visual layout"))
+        if not diagram_requested:
+            cleaned = re.sub(r"```(?:mermaid)\s*[\s\S]*?```", "", cleaned).strip()
+
+        # 8. Remove repeated Python code blocks unless explicitly requested
+        code_requested = any(w in req_lower for w in ("show code", "view code", "show python", "view script", "see the code", "source code", "display code", "write a python script and show"))
+        if not code_requested:
+            cleaned = re.sub(
+                r"```(?:python)?\s*(?:import\s+openpyxl|from\s+openpyxl|wb\s*=\s*openpyxl\.Workbook).*?```",
+                "",
+                cleaned,
+                flags=re.DOTALL
+            ).strip()
+            # If the user did not ask to see code, remove unrequested standalone python scripts
+            cleaned = re.sub(r"```(?:python)\s*[\s\S]*?```", "", cleaned).strip()
+
+        # 9. Remove fake execution introductory line if left dangling before the removed code block
         cleaned = re.sub(
             r"(?im)^.*(?:here is the python (?:code|script)|below is the python (?:code|script)).*$\n?",
             "",
             cleaned
         ).strip()
 
-        # 3. Remove contradictory completion / proceed boilerplate at the end of the text
+        # 10. Remove contradictory completion / proceed boilerplate at the end of the text
         cleaned = re.sub(
             r"(?i)\n*(?:(?:would|do|should)\s+you\s+like\s+me\s+to\s+proceed[^\n]*\??|(?:please\s+)?let\s+me\s+know\s+if\s+you(?:'d|\s+would)?\s+like\s+me\s+to\s+proceed[^\n]*\??)\s*$",
             "",
             cleaned
         ).strip()
 
-        return cleaned
+        # Clean multiple consecutive blank lines
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
     @staticmethod
     def _extract_explicit_requested_headers(user_request: str, step_description: str = "") -> List[str]:
@@ -2684,9 +3053,9 @@ class AgentEngine:
         combined = f"{user_request} {step_description}".strip()
         req_lower = combined.lower()
 
-        # 1. Look for explicit lists following 'Include ...', 'including ...', 'with columns ...', 'headers: ...'
+        # 1. Look for explicit lists following 'in columns: ...', 'with columns ...', 'headers: ...', 'include ...'
         m = re.search(
-            r"(?:include|including|with columns?|headers?)\s+(?:the\s+relevant\s+)?(.*?)(?:\s+in\s+a\s+structured|\s+in\s+the\s+spreadsheet|\s+in\s+a\s+spreadsheet|\s+in\s+an\s+excel|\s*\.|$)",
+            r"(?:in columns?|with columns?|columns?|headers?|include|including)\s*[:\s]\s*(?:the\s+relevant\s+)?(.*?)(?:\s+in\s+a\s+structured|\s+in\s+the\s+spreadsheet|\s+in\s+a\s+spreadsheet|\s+in\s+an\s+excel|\s*\.|$)",
             combined,
             re.IGNORECASE
         )
@@ -2819,9 +3188,9 @@ class AgentEngine:
                     if not cell_val:
                         cell_val = self._extract_evidence_for_column("Operating Observations", accumulated_context)
 
-                elif "action" in t_lower or "recommend" in t_lower or "repair" in t_lower:
+                elif ("action" in t_lower or "recommend" in t_lower or "repair" in t_lower) and "participant" not in t_lower:
                     for i, h in enumerate(p_headers_lower):
-                        if any(k in h for k in ("action", "recommend", "repair", "part", "prevent", "solution")):
+                        if "participant" not in h and any(k in h for k in ("action", "recommend", "repair", "parts", "prevent", "solution")):
                             if i < len(r):
                                 cell_val = str(r[i]).strip()
                                 break
@@ -3129,7 +3498,7 @@ class AgentEngine:
     @staticmethod
     def _extract_equipment_tags(text: str) -> List[str]:
         """Extract equipment tags (e.g. P-204, P204, K-101, E-302, V-401) from text."""
-        if not text:
+        if not text or not isinstance(text, str):
             return []
         pattern = r"\b[A-Za-z]{1,4}-?\d{2,5}\b"
         tags = []
@@ -3139,8 +3508,9 @@ class AgentEngine:
                 tags.append(t)
         return list(set(tags))
 
+    @classmethod
     def _synthesize_task_completion_response(
-        self,
+        cls,
         user_request: str,
         executed_step_results: List[Dict[str, Any]],
     ) -> str:
@@ -3152,12 +3522,52 @@ class AgentEngine:
         verified_info = []
         other_steps = []
 
+        def _is_failed(item: Dict[str, Any]) -> bool:
+            if item.get("success") is False:
+                return True
+            if item.get("error"):
+                return True
+            if item.get("tool") == "artifact_verifier":
+                res = item.get("result")
+                if isinstance(res, dict) and (res.get("verified") is False or res.get("status") == "FAILED"):
+                    return True
+            return False
+
+        # Check if ANY executed step failed or verifier failed
+        any_failed = any(_is_failed(item) for item in executed_step_results)
+        verifier_failed = any(
+            item.get("tool") == "artifact_verifier" and _is_failed(item)
+            for item in executed_step_results
+        )
+
+        if any_failed or verifier_failed:
+            fail_reasons = []
+            for item in executed_step_results:
+                if _is_failed(item):
+                    tool = item.get("tool", "step")
+                    err = None
+                    if item.get("tool") == "artifact_verifier":
+                        r = item.get("result")
+                        if isinstance(r, dict):
+                            err = r.get("error") or r.get("reason")
+                    if not err:
+                        err = item.get("error") or item.get("summary") or "Execution failed"
+                    fail_reasons.append(f"- **{tool}**: {err}")
+            if not fail_reasons:
+                fail_reasons.append("- **Execution**: One or more steps failed during task execution.")
+            return (
+                "### Execution Plan Failed\n\n"
+                "The requested operation could not be completed successfully due to the following failure(s):\n"
+                + "\n".join(fail_reasons)
+            )
+
         for item in executed_step_results:
             tool = item.get("tool")
             args = item.get("arguments", {})
             summary = item.get("summary", "")
+            is_success = not _is_failed(item)
 
-            if tool == "xlsx_report":
+            if tool == "xlsx_report" and is_success and not verifier_failed:
                 res_dict = item.get("result") if isinstance(item.get("result"), dict) else {}
                 fname = args.get("filename") or res_dict.get("filename", "report.xlsx")
                 title = args.get("title") or res_dict.get("title", "Excel Report")
@@ -3170,7 +3580,7 @@ class AgentEngine:
                     f"  - Title: *{title}*\n"
                     f"  - Structure: {row_cnt} data row(s) across {col_cnt} column(s)."
                 )
-            elif tool == "docx_create":
+            elif tool == "docx_create" and is_success and not verifier_failed:
                 res_dict = item.get("result") if isinstance(item.get("result"), dict) else {}
                 fname = args.get("filename") or res_dict.get("filename", "document.docx")
                 title = args.get("title") or res_dict.get("title", "Word Document")
@@ -3178,29 +3588,30 @@ class AgentEngine:
                     f"- **Word Document Generated**: `{fname}`\n"
                     f"  - Title: *{title}*"
                 )
-            elif tool == "file_write":
+            elif tool == "file_write" and is_success:
                 fname = args.get("filename", "file.txt")
                 artifact_info.append(f"- **File Created**: `{fname}` in sandbox.")
-            elif tool == "artifact_verifier":
+            elif tool == "artifact_verifier" and is_success and not verifier_failed:
                 path = args.get("relative_path") or args.get("filename") or args.get("file_path", "")
                 res_dict = item.get("result") if isinstance(item.get("result"), dict) else {}
-                ver_rows = res_dict.get("row_count")
-                ver_cols = res_dict.get("column_count") or len(res_dict.get("detected_headers", []))
-                details = f" ({ver_rows} row(s), {ver_cols} column(s) verified)" if ver_rows is not None and ver_cols else f" ({summary})"
-                verified_info.append(
-                    f"- **Cryptographic Verification**: Artifact `{path}` verified with SHA-256 integrity check{details}."
-                )
-            elif tool not in ("reasoning", None):
+                if res_dict.get("verified") is True or isinstance(item.get("result"), str):
+                    ver_rows = res_dict.get("row_count")
+                    ver_cols = res_dict.get("column_count") or len(res_dict.get("detected_headers", []))
+                    details = f" ({ver_rows} row(s), {ver_cols} column(s) verified)" if ver_rows is not None and ver_cols else (f" ({summary})" if summary else "")
+                    verified_info.append(
+                        f"- **Cryptographic Verification**: Artifact `{path}` verified with SHA-256 integrity check{details}."
+                    )
+            elif tool not in ("reasoning", None) and is_success:
                 other_steps.append(f"- **{tool}**: {summary}")
 
         # Cross-reference artifact_verifier with artifact_info to backfill row/column counts if needed
         for item in executed_step_results:
-            if item.get("tool") == "artifact_verifier":
+            if item.get("tool") == "artifact_verifier" and not _is_failed(item):
                 res_dict = item.get("result") if isinstance(item.get("result"), dict) else {}
                 v_fname = res_dict.get("filename")
                 v_rows = res_dict.get("row_count")
                 v_cols = res_dict.get("column_count") or len(res_dict.get("detected_headers", []))
-                if v_fname and v_rows is not None and v_cols:
+                if v_fname and v_rows is not None and v_cols and res_dict.get("verified") is True:
                     for idx, a_str in enumerate(artifact_info):
                         if v_fname in a_str and "0 data row(s)" in a_str:
                             artifact_info[idx] = re.sub(
@@ -3268,53 +3679,152 @@ class AgentEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
+    def _parse_func_call_args(t_name: str, args_str: str) -> Dict[str, Any]:
+        """Parse arguments string from a Python-style tool invocation like tool(arg='val')."""
+        args_str = args_str.strip()
+        if not args_str:
+            return {}
+
+        parsed_args: Dict[str, Any] = {}
+        # Try AST parsing first
+        try:
+            call_ast = ast.parse(f"{t_name}({args_str})", mode="eval")
+            if isinstance(call_ast.body, ast.Call):
+                for kw in call_ast.body.keywords:
+                    try:
+                        parsed_args[kw.arg] = ast.literal_eval(kw.value)
+                    except Exception:
+                        parsed_args[kw.arg] = ast.unparse(kw.value).strip("'\"")
+                for idx, p_arg in enumerate(call_ast.body.args):
+                    try:
+                        p_val = ast.literal_eval(p_arg)
+                    except Exception:
+                        p_val = ast.unparse(p_arg).strip("'\"")
+                    if idx == 0:
+                        if t_name == "file_read" and "relative_path" not in parsed_args:
+                            parsed_args["relative_path"] = p_val
+                        elif t_name == "document_search" and "query" not in parsed_args:
+                            parsed_args["query"] = p_val
+                        elif t_name == "calculator" and "expression" not in parsed_args:
+                            parsed_args["expression"] = p_val
+                        elif t_name == "code_execution" and "code" not in parsed_args:
+                            parsed_args["code"] = p_val
+                        elif t_name == "file_list" and "directory" not in parsed_args:
+                            parsed_args["directory"] = p_val
+        except Exception:
+            parsed_args = {}
+
+        if not parsed_args:
+            # Fallback regex for key='value' or key="value" or key=value
+            kw_matches = list(re.finditer(r"(\w+)\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([^,\)\n]+))", args_str))
+            if kw_matches:
+                for m in kw_matches:
+                    k = m.group(1)
+                    v = m.group(2) if m.group(2) is not None else (m.group(3) if m.group(3) is not None else m.group(4).strip())
+                    parsed_args[k] = v
+            else:
+                clean_arg = args_str.strip().strip("'\"")
+                if clean_arg:
+                    if t_name == "file_read":
+                        parsed_args["relative_path"] = clean_arg
+                    elif t_name == "document_search":
+                        parsed_args["query"] = clean_arg
+                    elif t_name == "calculator":
+                        parsed_args["expression"] = clean_arg
+                    elif t_name == "code_execution":
+                        parsed_args["code"] = clean_arg
+
+        return parsed_args
+
+    @classmethod
+    def _parse_tool_call(cls, text: str) -> Optional[Dict[str, Any]]:
         """
         Extract a tool call from the LLM response.
 
-        Looks for:
-            <tool_call>
-            {"name": "...", "arguments": {...}}
-            </tool_call>
-
-        Returns the parsed dict or None if no valid tool call found.
+        Supports:
+          1. <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+          2. <tool_call>tool_name(param='val')</tool_call>
+          3. ```json / ```tool_call blocks with name and arguments
+          4. Bare JSON with name in _KNOWN_TOOL_NAMES
+          5. Direct tool invocations: file_read(relative_path='...'), document_search(query='...'), etc.
         """
+        if not text:
+            return None
+
+        # 1. <tool_call>...</tool_call>
         match = _TOOL_CALL_PATTERN.search(text)
-        if not match:
-            return None
-
-        json_str = match.group(1).strip()
-        try:
-            parsed = json.loads(json_str)
-        except json.JSONDecodeError:
-            # Try to fix common JSON issues from small models
-            # Remove trailing commas
-            cleaned = re.sub(r",\s*}", "}", json_str)
-            cleaned = re.sub(r",\s*]", "]", cleaned)
+        if match:
+            inner = match.group(1).strip()
+            # Try JSON first
             try:
+                cleaned = re.sub(r",\s*}", "}", inner)
+                cleaned = re.sub(r",\s*]", "]", cleaned)
                 parsed = json.loads(cleaned)
+                if isinstance(parsed, dict) and "name" in parsed:
+                    if "arguments" not in parsed:
+                        parsed["arguments"] = {}
+                    return parsed
             except json.JSONDecodeError:
-                logger.warning("Malformed tool call JSON: %s", json_str[:200])
-                return None
+                pass
 
-        if not isinstance(parsed, dict):
-            return None
+            # Try func call inside <tool_call>
+            func_m = _FUNC_CALL_PATTERN.search(inner)
+            if func_m:
+                t_name = func_m.group(1)
+                t_args = cls._parse_func_call_args(t_name, func_m.group(2))
+                return {"name": t_name, "arguments": t_args}
 
-        if "name" not in parsed:
-            logger.warning("Tool call missing 'name': %s", json_str[:200])
-            return None
+        # 2. Markdown code block containing tool JSON
+        md_json = re.search(r"```(?:tool_call|json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if md_json:
+            try:
+                parsed = json.loads(md_json.group(1).strip())
+                if isinstance(parsed, dict) and parsed.get("name") in _KNOWN_TOOL_NAMES:
+                    if "arguments" not in parsed:
+                        parsed["arguments"] = {}
+                    return parsed
+            except json.JSONDecodeError:
+                pass
 
-        if "arguments" not in parsed:
-            parsed["arguments"] = {}
+        # 3. Bare JSON with tool name
+        bare_json_match = re.search(
+            r"(\{\s*\"name\"\s*:\s*\"([a-z_]+)\"\s*,\s*\"arguments\"\s*:\s*\{.*?\}\s*\})",
+            text, re.DOTALL,
+        )
+        if bare_json_match and bare_json_match.group(2) in _KNOWN_TOOL_NAMES:
+            try:
+                parsed = json.loads(bare_json_match.group(1).strip())
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
 
-        return parsed
+        # 4. Direct Python-style tool call: tool_name(param='val')
+        func_match = _FUNC_CALL_PATTERN.search(text)
+        if func_match:
+            t_name = func_match.group(1)
+            t_args = cls._parse_func_call_args(t_name, func_match.group(2))
+            return {"name": t_name, "arguments": t_args}
 
-    @staticmethod
-    def _extract_pre_tool_text(full_response: str) -> str:
-        """Extract text that appears before the <tool_call> block."""
+        return None
+
+    @classmethod
+    def _extract_pre_tool_text(cls, full_response: str) -> str:
+        """Extract text that appears before any tool call block or invocation."""
         match = _TOOL_CALL_PATTERN.search(full_response)
         if match:
             return full_response[:match.start()]
+
+        md_json = re.search(r"```(?:tool_call|json)?\s*\{", full_response)
+        if md_json:
+            parsed = cls._parse_tool_call(full_response[md_json.start():])
+            if parsed:
+                return full_response[:md_json.start()]
+
+        func_match = _FUNC_CALL_PATTERN.search(full_response)
+        if func_match:
+            return full_response[:func_match.start()]
+
         return full_response
 
     @staticmethod
@@ -3346,7 +3856,72 @@ class AgentEngine:
             if "filename" in r:
                 return f"File: {r['filename']}"
             return f"{len(r)} fields returned"
-        return str(r)[:200]
+    @classmethod
+    def _format_direct_tool_answer(cls, tool_name: str, result, user_message: str = "") -> str:
+        """Format a tool result into a clean, direct natural-language response."""
+        if not result.success:
+            return f"The tool `{tool_name}` failed: {result.error or 'Execution error'}"
+
+        r = result.result
+        if tool_name == "file_list":
+            files_data = r.get("files", []) if isinstance(r, dict) else (r if isinstance(r, list) else [])
+            file_lines = [f"- {f.get('filename', f) if isinstance(f, dict) else f}" for f in files_data]
+            return "The following files are available in the workspace:\n\n" + ("\n".join(file_lines) if file_lines else "No files found in the workspace.")
+
+        elif tool_name == "file_read":
+            fn = r.get("filename", "") if isinstance(r, dict) else ""
+            content = r.get("content", "") if isinstance(r, dict) else str(r)
+            um_lower = (user_message or "").lower()
+            if "trainer" in um_lower or "who conducted" in um_lower:
+                m = re.search(r"(?im)^\s*\*{0,2}Trainer\*{0,2}\s*:\s*([^\n\r]+)", content)
+                if m:
+                    return m.group(1).strip() + "."
+            if "duration" in um_lower:
+                m = re.search(r"(?im)^\s*\*{0,2}Duration\*{0,2}\s*:\s*([^\n\r]+)", content)
+                if m:
+                    return m.group(1).strip() + "."
+            if fn:
+                return f"Content of `{fn}`:\n\n{content}"
+            return content
+
+        elif tool_name == "document_search":
+            chunks = r if isinstance(r, list) else (r.get("results", []) if isinstance(r, dict) and isinstance(r.get("results"), list) else [])
+            if not chunks:
+                return "The requested information was not found in the uploaded evidence."
+            um_lower = (user_message or "").lower()
+            all_text = "\n".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in chunks)
+            if "duration" in um_lower:
+                m = re.search(r"(?im)^\s*\*{0,2}Duration\*{0,2}\s*:\s*([^\n\r]+)", all_text)
+                if m:
+                    return m.group(1).strip() + "."
+            if "trainer" in um_lower or "who conducted" in um_lower:
+                m = re.search(r"(?im)^\s*\*{0,2}Trainer\*{0,2}\s*:\s*([^\n\r]+)", all_text)
+                if m:
+                    return m.group(1).strip() + "."
+            parts = []
+            for item in chunks:
+                if isinstance(item, dict):
+                    fn = item.get("filename", "Document")
+                    page = item.get("page")
+                    page_str = f" (Page {page})" if page else ""
+                    txt = item.get("text", "").strip()
+                    if txt:
+                        parts.append(f"**From `{fn}`{page_str}:**\n{txt}")
+                elif isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+            return "\n\n".join(parts) if parts else "The requested information was not found in the uploaded evidence."
+
+        elif tool_name == "code_execution":
+            stdout = r.get("stdout", "") if isinstance(r, dict) else str(r)
+            return stdout.strip()
+
+        elif tool_name == "calculator":
+            calc_val = r.get("result", r) if isinstance(r, dict) else r
+            return f"**{calc_val}**"
+
+        if isinstance(r, dict):
+            return json.dumps(r, indent=2, default=str)
+        return str(r)
 
     @staticmethod
     def _format_observation(tool_name: str, result) -> str:
@@ -3354,16 +3929,14 @@ class AgentEngine:
         if tool_name == "code_execution":
             if result.success:
                 stdout_val = result.result.get("stdout", "") if isinstance(result.result, dict) else str(result.result)
-                exit_code_val = result.result.get("exit_code", 0) if isinstance(result.result, dict) else 0
                 return (
                     f"[TOOL RESULT: code_execution]\n"
                     f"Status: success\n"
-                    f"Exit Code: {exit_code_val}\n"
-                    f"Stdout:\n{stdout_val}\n"
+                    f"Stdout:\n{stdout_val.strip()}\n"
                     f"[END TOOL RESULT]\n\n"
-                    f"The code executed successfully in the sandbox with exit code {exit_code_val}. "
-                    f"Provide your final answer to the user containing the exact stdout and exit code. "
-                    f"Do NOT invent or recalculate any values."
+                    f"The code executed successfully in the sandbox. "
+                    f"Provide your final answer containing ONLY the useful computed result (e.g. stdout). "
+                    f"Do NOT include exit codes, internal execution messages, or Python source code unless the user explicitly asked to see the code."
                 )
             else:
                 err_val = result.error or (result.result.get("stderr") if isinstance(result.result, dict) else "Execution failed")
@@ -3373,74 +3946,116 @@ class AgentEngine:
                     f"Error: {err_val}\n"
                     f"[END TOOL RESULT]\n\n"
                     f"CRITICAL CODE EXECUTION POLICY:\n"
-                    f"The requested code execution was BLOCKED or failed in the sandbox.\n"
-                    f"1. You MUST report this exact error and blocked status directly to the user.\n"
-                    f"2. You must NEVER modify, rewrite, or 'correct' the user's code.\n"
-                    f"3. You must NEVER retry execution with modified code.\n"
-                    f"4. You must NEVER simulate, calculate, or invent execution output or syntax errors.\n"
-                    f"5. Provide your final response now reporting the failure."
+                    f"The requested code execution failed in the sandbox.\n"
+                    f"Report this error directly to the user. Do NOT invent a simulated output."
                 )
 
-        if result.success:
-            if tool_name == "document_search" and isinstance(result.result, list):
-                if not result.result:
-                    content_str = "No relevant document passages found matching the search query."
-                else:
-                    parts = []
-                    for i, item in enumerate(result.result, start=1):
-                        fn = item.get("filename", "Unknown")
-                        page = item.get("page")
-                        page_info = f" (Page {page})" if page else ""
-                        txt = item.get("text", "")
-                        parts.append(
-                            f"[DOCUMENT SOURCE {i}]\n"
-                            f"filename: {fn}{page_info}\n"
-                            f"source_type: retrieved_document\n"
-                            f"[DOCUMENT CONTENT]\n"
-                            f"{txt}\n"
-                            f"[END DOCUMENT CONTENT]"
-                        )
-                    content_str = "\n\n".join(parts)
-            elif tool_name == "file_read" and isinstance(result.result, dict):
-                fn = result.result.get("filename", "")
-                content = result.result.get("content", "")
-                content_str = (
-                    f"[DOCUMENT SOURCE]\n"
-                    f"filename: {fn}\n"
-                    f"source_type: file_read\n"
-                    f"[DOCUMENT CONTENT]\n"
-                    f"{content}\n"
-                    f"[END DOCUMENT CONTENT]"
-                )
-            else:
-                content_str = json.dumps(result.result, indent=2, default=str)
-
-            # Cap observation size to avoid context overflow
-            if len(content_str) > 15000:
-                content_str = content_str[:15000] + "\n... (truncated)"
-
-            return (
-                f"[TOOL RESULT: {tool_name}]\n"
-                f"Status: success\n"
-                f"Result:\n{content_str}\n"
-                f"[END TOOL RESULT]\n\n"
-                f"GROUNDING REQUIREMENTS:\n"
-                f"1. Base findings, equipment details, dates, and recommendations ONLY on factual statements inside [DOCUMENT CONTENT].\n"
-                f"2. Search metadata, filenames, scores, and chunk IDs are NOT evidence for document content.\n"
-                f"3. If a requested field (e.g. equipment name, maintenance date, findings, actions, OEM warranty expiration date, next scheduled maintenance date) is not explicitly stated in [DOCUMENT CONTENT], output exactly 'Not stated in retrieved document.'. For general categories like findings, observations, root causes, and recommended actions, synthesize all factual evidence present in [DOCUMENT CONTENT].\n"
-                f"4. NEVER invent boilerplate maintenance advice (e.g. 'No significant issues were identified during the maintenance.', 'Standard cleaning and lubrication procedures were followed.', 'Inspection of seals and couplings revealed no abnormalities.', 'Pressure and temperature checks were within acceptable ranges.', 'Continue routine maintenance schedule.', 'Schedule next maintenance within the standard interval.', 'Further inspection may be required.', 'Ensure all components are functioning.').\n"
-                f"5. If preparing a summary for file creation, show the proposed summary first and wait for approval before any file creation tool (docx_create) is called."
-            )
-        else:
+        if not result.success:
             return (
                 f"[TOOL RESULT: {tool_name}]\n"
                 f"Status: error\n"
                 f"Error: {result.error}\n"
                 f"[END TOOL RESULT]\n\n"
-                f"The tool returned an error or non-zero exit code. "
+                f"The tool returned an error. "
                 f"Report the actual tool failure directly to the user. "
                 f"Do NOT invent a fallback result, and do NOT claim execution succeeded."
             )
+
+        if tool_name == "file_list":
+            files_data = result.result
+            if isinstance(files_data, dict):
+                file_items = files_data.get("files", [])
+            elif isinstance(files_data, list):
+                file_items = files_data
+            else:
+                file_items = [str(files_data)]
+            file_lines = []
+            for f in file_items:
+                if isinstance(f, dict):
+                    file_lines.append(f"- {f.get('filename', f)}")
+                else:
+                    file_lines.append(f"- {f}")
+            list_str = "\n".join(file_lines) if file_lines else "No files found in workspace."
+            return (
+                f"[TOOL RESULT: file_list]\n"
+                f"Status: success\n"
+                f"Available Files in Workspace:\n{list_str}\n"
+                f"[END TOOL RESULT]\n\n"
+                f"Provide your final answer to the user directly listing the available filenames above. "
+                f"Do NOT call any more tools. Do NOT output tool calls, JSON, or code. "
+                f"Give a clean, helpful natural-language response."
+            )
+
+        if tool_name == "file_read":
+            fn = result.result.get("filename", "") if isinstance(result.result, dict) else ""
+            content = result.result.get("content", "") if isinstance(result.result, dict) else str(result.result)
+            return (
+                f"[TOOL RESULT: file_read]\n"
+                f"filename: {fn}\n"
+                f"Status: success\n"
+                f"[FILE CONTENT]\n{content}\n[END FILE CONTENT]\n"
+                f"[END TOOL RESULT]\n\n"
+                f"Answer the user's request accurately and completely using the file content above. "
+                f"Provide the actual requested facts, dates, names, trainer details, or records directly. "
+                f"Do NOT call any more tools. Do NOT output tool calls, JSON, code, or internal schemas."
+            )
+
+        if tool_name == "calculator":
+            calc_val = result.result.get("result", result.result) if isinstance(result.result, dict) else result.result
+            return (
+                f"[TOOL RESULT: calculator]\n"
+                f"Status: success\n"
+                f"Result: {calc_val}\n"
+                f"[END TOOL RESULT]\n\n"
+                f"Provide your final answer with the exact calculated result ({calc_val}). "
+                f"Do NOT recalculate or invoke more tools."
+            )
+
+        if tool_name == "document_search" and isinstance(result.result, list):
+            if not result.result:
+                content_str = "No relevant document passages found matching the search query."
+            else:
+                parts = []
+                for i, item in enumerate(result.result, start=1):
+                    fn = item.get("filename", "Unknown")
+                    page = item.get("page")
+                    page_info = f" (Page {page})" if page else ""
+                    txt = item.get("text", "")
+                    parts.append(
+                        f"[DOCUMENT SOURCE {i}]\n"
+                        f"filename: {fn}{page_info}\n"
+                        f"source_type: retrieved_document\n"
+                        f"[DOCUMENT CONTENT]\n"
+                        f"{txt}\n"
+                        f"[END DOCUMENT CONTENT]"
+                    )
+                content_str = "\n\n".join(parts)
+            return (
+                f"[TOOL RESULT: document_search]\n"
+                f"Status: success\n"
+                f"Result:\n{content_str}\n"
+                f"[END TOOL RESULT]\n\n"
+                f"GROUNDING REQUIREMENTS:\n"
+                f"1. Base findings, facts, dates, and details ONLY on the document content above.\n"
+                f"2. MULTIPLE SESSIONS / MATCHES: If the evidence contains multiple training sessions, records, or dates for the topic (e.g. multiple sessions held on different dates), list and present all matching dates/records found with their source document. Do NOT arbitrarily select or assume only one session.\n"
+                f"3. If the requested information is absent, clearly state: 'The requested information was not found in the uploaded evidence.'\n"
+                f"4. Provide your clean natural language answer directly. Do NOT output tool calls, JSON, code, or Mermaid diagrams."
+            )
+
+        # Fallback for generic tools
+        content_str = json.dumps(result.result, indent=2, default=str)
+        if len(content_str) > 15000:
+            content_str = content_str[:15000] + "\n... (truncated)"
+
+        return (
+            f"[TOOL RESULT: {tool_name}]\n"
+            f"Status: success\n"
+            f"Result:\n{content_str}\n"
+            f"[END TOOL RESULT]\n\n"
+            f"GROUNDING REQUIREMENTS:\n"
+            f"1. Base findings ONLY on factual statements in the tool result.\n"
+            f"2. Provide your clean natural-language answer now."
+        )
 
     # ------------------------------------------------------------------
     # RAG helpers
@@ -3452,10 +4067,13 @@ class AgentEngine:
         Applies deterministic relevance gating, equipment-tag isolation,
         and bounded deduplication.
 
+        Hard timeout of 15 seconds on the entire retrieval pipeline
+        (embedding + vector search + filtering) to prevent indefinite hangs.
+
         Returns [] if:
           - No DocumentService is wired
           - No documents are indexed
-          - Retrieval fails or no chunks pass the relevance gate
+          - Retrieval fails, times out, or no chunks pass the relevance gate
           - Query is detected as a general-knowledge question with no
             document-specific keywords
 
@@ -3473,82 +4091,92 @@ class AgentEngine:
             return []
 
         try:
-            top_k = self._agent_config.get("rag", {}).get("top_k", 5)
-            candidate_k = max(top_k * 2, 8)
-            chunks = await self._doc_service.retrieve(query, top_k=candidate_k)
-
-            # 1. Apply deterministic relevance gate
-            is_rel_fn = getattr(self._doc_service._retriever, "is_chunk_relevant", None) if hasattr(self._doc_service, "_retriever") else None
-            relevant_chunks = [
-                c for c in chunks
-                if (is_rel_fn(c.score) if is_rel_fn else getattr(c, "is_relevant", True))
-            ]
-
-            if not relevant_chunks:
-                return []
-
-            # 2. Equipment-specific grounding filter:
-            # If the user query targets specific equipment tag(s), strongly prioritize / isolate chunks
-            # that explicitly mention the target tag, and strictly filter out chunks that discuss
-            # a different equipment tag without mentioning the target tag.
-            target_tags = self._extract_equipment_tags(query)
-            if target_tags:
-                tag_matching = []
-                for c in relevant_chunks:
-                    c_text_upper = c.text.upper()
-                    matches = False
-                    for tag in target_tags:
-                        normalized_tag = tag.replace("-", "")
-                        hyphenated_tag = tag if "-" in tag else f"{tag[:1]}-{tag[1:]}"
-                        if tag in c_text_upper or normalized_tag in c_text_upper or hyphenated_tag in c_text_upper:
-                            matches = True
-                            break
-                    if matches:
-                        tag_matching.append(c)
-
-                if tag_matching:
-                    relevant_chunks = tag_matching
-
-            # 3. Bounded Deduplication:
-            # Remove exact chunk_id duplicates and near-identical text from the same document.
-            # Preserve genuinely distinct sections/pages, but cap at most 2 chunks per document
-            # to prevent a single document from flooding the entire evidence presentation.
-            deduped_chunks = []
-            doc_counts = {}
-
-            for c in relevant_chunks:
-                doc_key = c.document_id or c.filename
-                if doc_counts.get(doc_key, 0) >= 2:
-                    continue
-
-                is_duplicate = False
-                for existing in deduped_chunks:
-                    if existing.chunk_id == c.chunk_id:
-                        is_duplicate = True
-                        break
-                    existing_doc = existing.document_id or existing.filename
-                    if existing_doc == doc_key:
-                        if existing.text == c.text:
-                            is_duplicate = True
-                            break
-                        set_a = set(existing.text.split())
-                        set_b = set(c.text.split())
-                        if set_a and set_b:
-                            overlap = len(set_a & set_b) / len(set_a | set_b)
-                            if overlap > 0.5:
-                                is_duplicate = True
-                                break
-
-                if not is_duplicate:
-                    deduped_chunks.append(c)
-                    doc_counts[doc_key] = doc_counts.get(doc_key, 0) + 1
-                    if len(deduped_chunks) >= top_k:
-                        break
-
-            return deduped_chunks
+            return await asyncio.wait_for(
+                self._retrieve_context_inner(query),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("RAG retrieval timed out after 15s for query: %s", query[:80])
+            return []
         except Exception as exc:
             logger.warning("RAG retrieval failed (continuing without context): %s", exc)
             return []
+
+    async def _retrieve_context_inner(self, query: str) -> List:
+        """Inner retrieval logic — called within asyncio.wait_for timeout."""
+        top_k = self._agent_config.get("rag", {}).get("top_k", 5)
+        candidate_k = max(top_k * 2, 8)
+        chunks = await self._doc_service.retrieve(query, top_k=candidate_k)
+
+        # 1. Apply deterministic relevance gate
+        is_rel_fn = getattr(self._doc_service._retriever, "is_chunk_relevant", None) if hasattr(self._doc_service, "_retriever") else None
+        relevant_chunks = [
+            c for c in chunks
+            if (is_rel_fn(c.score) if is_rel_fn else getattr(c, "is_relevant", True))
+        ]
+
+        if not relevant_chunks:
+            return []
+
+        # 2. Equipment-specific grounding filter:
+        # If the user query targets specific equipment tag(s), strongly prioritize / isolate chunks
+        # that explicitly mention the target tag, and strictly filter out chunks that discuss
+        # a different equipment tag without mentioning the target tag.
+        target_tags = self._extract_equipment_tags(query)
+        if target_tags:
+            tag_matching = []
+            for c in relevant_chunks:
+                c_text_upper = c.text.upper()
+                matches = False
+                for tag in target_tags:
+                    normalized_tag = tag.replace("-", "")
+                    hyphenated_tag = tag if "-" in tag else f"{tag[:1]}-{tag[1:]}"
+                    if tag in c_text_upper or normalized_tag in c_text_upper or hyphenated_tag in c_text_upper:
+                        matches = True
+                        break
+                if matches:
+                    tag_matching.append(c)
+
+            if tag_matching:
+                relevant_chunks = tag_matching
+
+        # 3. Bounded Deduplication:
+        # Remove exact chunk_id duplicates and near-identical text from the same document.
+        # Preserve genuinely distinct sections/pages, but cap at most 2 chunks per document
+        # to prevent a single document from flooding the entire evidence presentation.
+        deduped_chunks = []
+        doc_counts = {}
+
+        for c in relevant_chunks:
+            doc_key = c.document_id or c.filename
+            if doc_counts.get(doc_key, 0) >= 2:
+                continue
+
+            is_duplicate = False
+            for existing in deduped_chunks:
+                if existing.chunk_id == c.chunk_id:
+                    is_duplicate = True
+                    break
+                existing_doc = existing.document_id or existing.filename
+                if existing_doc == doc_key:
+                    if existing.text == c.text:
+                        is_duplicate = True
+                        break
+                    set_a = set(existing.text.split())
+                    set_b = set(c.text.split())
+                    if set_a and set_b:
+                        overlap = len(set_a & set_b) / len(set_a | set_b)
+                        if overlap > 0.5:
+                            is_duplicate = True
+                            break
+
+            if not is_duplicate:
+                deduped_chunks.append(c)
+                doc_counts[doc_key] = doc_counts.get(doc_key, 0) + 1
+                if len(deduped_chunks) >= top_k:
+                    break
+
+        return deduped_chunks
 
     @staticmethod
     def _is_general_knowledge_query(query: str) -> bool:
@@ -3616,11 +4244,12 @@ class AgentEngine:
         else:
             context_parts.append(
                 "\nGROUNDING INSTRUCTIONS:\n"
-                "- Answer using the retrieved document context above where relevant.\n"
-                "- If the context does not contain enough information, say so clearly.\n"
+                "- Answer directly and concisely based ONLY on the retrieved document context above.\n"
+                "- MULTIPLE SESSIONS / MATCHING RECORDS: When multiple distinct records, sessions, or dates exist for the same topic (e.g. multiple training sessions held on different dates), do NOT arbitrarily pick just one. Explicitly state that multiple sessions/records exist and list all distinct dates or sessions found along with their document citations.\n"
+                "- If the requested information is absent from the evidence, clearly state: 'The requested information was not found in the uploaded evidence.'\n"
                 "- Cite which document(s) support your answer.\n"
-                "- Do not invent facts not supported by the context.\n"
-                "- Do not adapt unrelated equipment documents to answer questions about a different topic.\n"
+                "- Do not invent facts, dates, names, or values not supported by the context.\n"
+                "- Do NOT output Mermaid diagrams, JSON, code, or tool internals unless explicitly requested.\n"
             )
 
         rag_message = Message(

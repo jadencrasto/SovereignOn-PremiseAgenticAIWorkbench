@@ -33,18 +33,18 @@ class EmbeddingService:
         without touching the chat provider hierarchy.
     """
 
-    def __init__(self, base_url: str, model: str, timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str, model: str, timeout: float = 15.0) -> None:
         """
         Args:
             base_url : Ollama server URL, e.g. 'http://localhost:11434'
             model    : embedding model name, e.g. 'nomic-embed-text'
-            timeout  : HTTP timeout in seconds
+            timeout  : HTTP timeout in seconds (default 15s to bound RAG latency)
         """
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            timeout=httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=10.0),
+            timeout=httpx.Timeout(connect=5.0, read=timeout, write=15.0, pool=5.0),
         )
         logger.info("EmbeddingService ready | model=%s url=%s", model, base_url)
 

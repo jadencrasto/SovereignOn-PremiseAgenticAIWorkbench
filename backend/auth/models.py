@@ -77,11 +77,20 @@ def is_clearance_sufficient(user_clearance: Any, min_clearance: Any) -> bool:
 def resolve_user_clearance(user: Any) -> str:
     """
     Derive normalized clearance string ('viewer', 'operator', 'admin')
-    from an authenticated server-side user.
+    from an authenticated server-side user or string role.
     Client-provided parameters can never elevate this value.
     """
     if not user:
         return "viewer"
+
+    if isinstance(user, str):
+        val = user.strip().lower()
+        if val in ("admin", "l3"):
+            return "admin"
+        if val in ("operator", "l2"):
+            return "operator"
+        return "viewer"
+
     raw_role = getattr(user, "role", "viewer")
     role_val = raw_role.value if hasattr(raw_role, "value") else str(raw_role)
     role_str = role_val.strip().lower()

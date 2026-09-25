@@ -165,14 +165,55 @@ async def chat(
                             },
                         )
 
-        # Check if the query is a general knowledge question (should remain pure conversational response)
-        from backend.agent.planner import is_general_knowledge_query, should_use_planning
+        # ---- ROUTING GATE (Tests A-D fixes) ----
+        # Order:
+        #   1. Arithmetic auto-detection → deterministic answer (no LLM)
+        #   2. Approval intercept (above, unchanged)
+        #   3. Short conversational follow-up → plain stream (preserves history)
+        #   4. General knowledge (no doc refs) → plain stream (no RAG, no tools)
+        #   5. should_use_planning → Phase 6 planner
+        #   6. Default → tools_tracked stream (tool loop: document_search, file_read, etc.)
+
+        from backend.agent.planner import (
+            is_general_knowledge_query, should_use_planning,
+            is_short_conversational_followup,
+        )
+
+        # 1. Arithmetic auto-detection
+        arith_result = _try_arithmetic(body.message)
+        if arith_result is not None:
+            logger.info("arithmetic_shortcut | session=%s result=%s", session_id, arith_result)
+            return StreamingResponse(
+                _stream_arithmetic_result(session_id, body.message, arith_result, model_used, engine),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+
+        # 3. Short conversational follow-ups (e.g. "yes plz", "continue", "tell me more")
+        #    Route to plain stream to preserve conversation history context
+        if is_short_conversational_followup(body.message):
+            logger.info("conversational_followup | session=%s msg=%s", session_id, body.message[:50])
+            return StreamingResponse(
+                _stream_sse(engine, session_id, body.message, body.model, model_used),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+
+        # 4. General knowledge check
         is_general = is_general_knowledge_query(body.message)
 
         # Choose tool-enabled or plain streaming
         use_tools = body.tools_enabled and hasattr(engine, '_tool_registry') and engine._tool_registry is not None and not is_general
         if use_tools:
-            # Phase 6: Deterministic complexity heuristic — decide BEFORE execution
+            # 5. Phase 6: Deterministic complexity heuristic — decide BEFORE execution
             use_planning = should_use_planning(
                 message=body.message,
                 planning_enabled=body.planning_enabled if body.planning_enabled is not None else True,
@@ -189,7 +230,8 @@ async def chat(
                         "Connection": "keep-alive",
                     },
                 )
-            # Phase 6 unified: route through tracked wrapper when TaskManager is wired
+
+            # 6. Default: Phase 6 unified — route through tracked wrapper when TaskManager is wired
             has_task_manager = hasattr(engine, '_task_manager') and engine._task_manager is not None
             if has_task_manager:
                 user_id = getattr(current_user, "id", None) or getattr(current_user, "username", None)
@@ -368,6 +410,126 @@ async def chat_multimodal(
                     "Connection": "keep-alive",
                 },
             )
+
+
+# ---------------------------------------------------------------------------
+# Arithmetic auto-detection (Test A1/A2)
+# ---------------------------------------------------------------------------
+
+def _try_arithmetic(message: str) -> Optional[str]:
+    """
+    Detect and evaluate simple arithmetic expressions in user messages.
+
+    Returns the computed result as a string, or None if the message
+    is not a simple arithmetic query.
+
+    Handles patterns like:
+      - "What is 25 + 17?"
+      - "calculate 125 * 840 * 1.18"
+      - "25 + 17"
+      - "What is 3.14 * 2?"
+
+    Uses the existing safe_calculate() from calculator.py for
+    sandboxed evaluation — no eval() calls.
+    """
+    import re as _re
+
+    if not message or len(message) > 200:
+        return None
+
+    q = message.strip()
+    q_lower = q.lower()
+
+    # Pattern 1: "What is <expr>?" / "What's <expr>?"
+    m = _re.match(
+        r"^(?:what(?:'s|\s+is)\s+)([\d\s\+\-\*\/\.\(\)\^%x×]+)\s*\??$",
+        q_lower,
+    )
+    expr = None
+    if m:
+        expr = m.group(1).strip()
+
+    # Pattern 2: "calculate <expr>" / "compute <expr>"
+    if expr is None:
+        m = _re.match(
+            r"^(?:calculate|compute|eval(?:uate)?)\s+([\d\s\+\-\*\/\.\(\)\^%x×]+)\s*\??$",
+            q_lower,
+        )
+        if m:
+            expr = m.group(1).strip()
+
+    # Pattern 3: Pure arithmetic expression (e.g. "25 + 17", "3 * 4.5")
+    if expr is None:
+        m = _re.match(
+            r"^([\d\s\+\-\*\/\.\(\)\^%x×]+)$",
+            q.strip(),
+        )
+        if m:
+            expr = m.group(1).strip()
+
+    if expr is None or not expr:
+        return None
+
+    # Normalize: replace × with *, x with * (when between digits)
+    expr = _re.sub(r"×", "*", expr)
+    expr = _re.sub(r"(?<=\d)\s*x\s*(?=\d)", "*", expr)
+    expr = _re.sub(r"\^", "**", expr)
+
+    # Must contain at least one operator and one digit
+    if not _re.search(r"[\+\-\*\/\%]", expr):
+        return None
+    if not _re.search(r"\d", expr):
+        return None
+
+    # Use the safe calculator
+    try:
+        from backend.tools.calculator import safe_calculate
+        result = safe_calculate(expr)
+        # Format: strip trailing zeros for clean display
+        if isinstance(result, float) and result == int(result):
+            return str(int(result))
+        return str(result)
+    except Exception:
+        return None
+
+
+async def _stream_arithmetic_result(
+    session_id: str,
+    user_message: str,
+    result: str,
+    model_used: str,
+    engine,
+) -> AsyncGenerator[str, None]:
+    """
+    Stream a deterministic arithmetic result as SSE events.
+    Also stores the exchange in conversation memory.
+    """
+    # Store in conversation memory for context continuity
+    engine._ensure_session(session_id)
+    engine._memory.add_user_message(session_id, user_message)
+
+    answer = f"**{result}**"
+    engine._memory.add_assistant_message(session_id, answer)
+
+    # Emit calculator tool events for UI consistency
+    calc_start = StreamChunk(type="tool_start", content="", tool="calculator", tool_args={"expression": user_message})
+    yield f"data: {calc_start.model_dump_json()}\n\n"
+
+    calc_result = StreamChunk(type="tool_result", content="", tool="calculator", success=True, summary=f"Result: {result}")
+    yield f"data: {calc_result.model_dump_json()}\n\n"
+
+    # Emit the answer
+    chunk = StreamChunk(type="delta", content=answer)
+    yield f"data: {chunk.model_dump_json()}\n\n"
+
+    # Done
+    done_chunk = StreamChunk(
+        type="done",
+        content="",
+        session_id=session_id,
+        model_used=model_used,
+    )
+    yield f"data: {done_chunk.model_dump_json()}\n\n"
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ Security: path traversal prevention, no absolute paths, no escape.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -65,8 +66,9 @@ def create_file_list(upload_dir: Path) -> callable:
             if item.is_file():
                 try:
                     rel = item.relative_to(upload_dir.resolve())
+                    clean_name = re.sub(r"^doc_[a-f0-9]{8,32}_", "", item.name)
                     results.append({
-                        "filename": item.name,
+                        "filename": clean_name,
                         "relative_path": str(rel).replace("\\", "/"),
                         "size_bytes": item.stat().st_size,
                         "extension": item.suffix.lower(),

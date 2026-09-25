@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -162,11 +163,31 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
 
             # Data rows
             current_row = header_row + 1
+            # Detect "Topics Covered" column index (if present) for newline formatting
+            topics_col_idx = None
+            for ci, h in enumerate(args.headers):
+                if h.strip().lower() in ("topics covered", "topics"):
+                    topics_col_idx = ci
+                    break
+
             for r_data in args.rows:
+                row_height_needed = 24  # default row height in points
                 for col_idx, val in enumerate(r_data, 1):
-                    cell = ws.cell(row=current_row, column=col_idx, value=val)
+                    cell_value = val
+                    # Format "Topics Covered" with clean bullet points or line breaks
+                    if topics_col_idx is not None and (col_idx - 1) == topics_col_idx and isinstance(val, str):
+                        raw_items = re.split(r"[,;\n]", val)
+                        items = [item.strip().lstrip("-*• ") for item in raw_items if item.strip().lstrip("-*• ")]
+                        if len(items) > 1:
+                            cell_value = "\n".join(f"• {item}" for item in items)
+                            row_height_needed = max(row_height_needed, len(items) * 18 + 8)
+                        elif items:
+                            cell_value = items[0]
+
+                    cell = ws.cell(row=current_row, column=col_idx, value=cell_value)
                     cell.font = regular_font
                     cell.border = thin_border
+                    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
                     # Highlight compliance columns
                     val_str = str(val).upper()
@@ -177,17 +198,26 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
                         cell.fill = fail_fill
                         cell.font = fail_font
 
+                ws.row_dimensions[current_row].height = row_height_needed
                 current_row += 1
 
-            # Auto-adjust column widths
+            # Auto-adjust column widths with sensible readable minimums
             for col in ws.columns:
                 max_len = 0
                 col_letter = get_column_letter(col[0].column)
+                col_index_0 = col[0].column - 1  # zero-based
                 for cell in col:
                     val_str = str(cell.value or "")
-                    if len(val_str) > max_len and cell.row > 2:
-                        max_len = len(val_str)
-                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+                    # For multi-line cells, use the longest individual line
+                    for line in val_str.split("\n"):
+                        if len(line) > max_len and cell.row > 2:
+                            max_len = len(line)
+                # Give "Topics Covered" column extra width, and standard columns at least 18
+                if topics_col_idx is not None and col_index_0 == topics_col_idx:
+                    ws.column_dimensions[col_letter].width = max(max_len + 6, 36)
+                else:
+                    ws.column_dimensions[col_letter].width = max(max_len + 4, 18)
+
 
             # Write out to temp file and rename atomically
             temp_target = target_path.with_suffix(".tmp.xlsx")

@@ -89,48 +89,127 @@ def create_docx_create(sandbox_dir: Path) -> callable:
 
             doc = docx.Document()
 
-            # Add Title if present
+            # Ensure document has a clear title
+            doc_title = None
             if args.title and args.title.strip():
-                doc.add_heading(args.title.strip(), level=0)
+                doc_title = args.title.strip()
+            elif args.content and args.content.strip():
+                first_line = args.content.strip().splitlines()[0].strip()
+                if first_line.startswith("# ") and len(first_line) > 2:
+                    doc_title = first_line[2:].strip()
+            if not doc_title:
+                clean_stem = Path(safe_name).stem.replace("_", " ").strip()
+                doc_title = clean_stem.title() if clean_stem else "Document Summary"
 
-            # Add Content (parse markdown-style lines)
-            if args.content and args.content.strip():
-                lines = args.content.strip().splitlines()
+            h0 = doc.add_heading(doc_title, level=0)
+            h0.paragraph_format.space_after = Pt(12)
+
+            # Pre-process content: split lines that pack multiple training fields onto one line
+            raw_content = (args.content or "").strip()
+            content_lines: List[str] = []
+            if raw_content:
+                import re
+                field_split_pattern = re.compile(
+                    r'(?:,\s*|\.\s+|\s{2,})(?=(?:Training(?:\s+Program|\s+Name)?|Date|Training\s+Date|Trainer|Duration|Participants|Number\s+of\s+Participants|Topics(?:\s+Covered)?)\s*:)',
+                    re.IGNORECASE
+                )
+                for rl in raw_content.splitlines():
+                    trimmed_rl = rl.strip()
+                    if not trimmed_rl:
+                        continue
+                    # Skip if line was already used as title
+                    if doc_title and trimmed_rl in (f"# {doc_title}", doc_title):
+                        continue
+                    parts = field_split_pattern.split(trimmed_rl)
+                    for pt in parts:
+                        if pt.strip():
+                            content_lines.append(pt.strip())
+
+            # Add explicit paragraphs if provided
+            if args.paragraphs:
+                for p_text in args.paragraphs:
+                    if p_text and p_text.strip():
+                        content_lines.append(p_text.strip())
+
+            # Render content lines with structured paragraphs and headings
+            if content_lines:
                 current_p_lines: List[str] = []
 
                 def flush_p():
                     if current_p_lines:
-                        doc.add_paragraph(" ".join(current_p_lines).strip())
+                        p = doc.add_paragraph(" ".join(current_p_lines).strip())
+                        p.paragraph_format.space_after = Pt(4)
                         current_p_lines.clear()
 
-                for line in lines:
-                    trimmed = line.strip()
+                in_topics_section = False
+                for trimmed in content_lines:
                     if not trimmed:
                         flush_p()
                         continue
 
+                    # Markdown headings
                     if trimmed.startswith("### "):
                         flush_p()
-                        doc.add_heading(trimmed[4:].strip(), level=3)
+                        in_topics_section = False
+                        h = doc.add_heading(trimmed[4:].strip(), level=3)
+                        h.paragraph_format.space_after = Pt(4)
                     elif trimmed.startswith("## "):
                         flush_p()
-                        doc.add_heading(trimmed[3:].strip(), level=2)
+                        in_topics_section = False
+                        h = doc.add_heading(trimmed[3:].strip(), level=2)
+                        h.paragraph_format.space_after = Pt(6)
                     elif trimmed.startswith("# "):
                         flush_p()
-                        doc.add_heading(trimmed[2:].strip(), level=1)
-                    elif trimmed.startswith("- ") or trimmed.startswith("* "):
+                        in_topics_section = False
+                        h = doc.add_heading(trimmed[2:].strip(), level=1)
+                        h.paragraph_format.space_after = Pt(8)
+                    elif trimmed.startswith("- ") or trimmed.startswith("* ") or trimmed.startswith("• "):
                         flush_p()
-                        doc.add_paragraph(trimmed[2:].strip(), style="List Bullet")
+                        bullet_text = re.sub(r"^[-*•]\s*", "", trimmed).strip()
+                        bp = doc.add_paragraph(bullet_text, style="List Bullet")
+                        bp.paragraph_format.space_after = Pt(2)
+                    elif trimmed.lower().startswith("topics covered") or trimmed.lower().startswith("topics:"):
+                        flush_p()
+                        in_topics_section = True
+                        h_text = "Topics Covered"
+                        val_part = ""
+                        if ":" in trimmed:
+                            h_cand, _, val_cand = trimmed.partition(":")
+                            h_text = h_cand.strip() or "Topics Covered"
+                            val_part = val_cand.strip()
+                        h = doc.add_heading(h_text, level=2)
+                        h.paragraph_format.space_before = Pt(8)
+                        h.paragraph_format.space_after = Pt(4)
+                        if val_part:
+                            # Split comma/semicolon/newline-separated topics into separate bullet points
+                            topic_items = [t.strip().lstrip("-*• ") for t in re.split(r"[,;\n]", val_part) if t.strip()]
+                            for item in topic_items:
+                                bp = doc.add_paragraph(item, style="List Bullet")
+                                bp.paragraph_format.space_after = Pt(2)
+                    elif in_topics_section and not (":" in trimmed and not trimmed.startswith(("http:", "https:"))):
+                        # Continue topics list bullets under Topics Covered heading
+                        flush_p()
+                        clean_item = re.sub(r"^[-*•\d\.\)]\s*", "", trimmed).strip()
+                        if clean_item:
+                            bp = doc.add_paragraph(clean_item, style="List Bullet")
+                            bp.paragraph_format.space_after = Pt(2)
+                    elif ":" in trimmed and not trimmed.startswith(("http:", "https:")):
+                        # Key: Value field (e.g. Training Program: Fire Safety Awareness)
+                        flush_p()
+                        in_topics_section = False
+                        key, _, value = trimmed.partition(":")
+                        key = key.strip()
+                        value = value.strip()
+                        p = doc.add_paragraph()
+                        p.paragraph_format.space_after = Pt(4)
+                        run_key = p.add_run(f"{key}: ")
+                        run_key.bold = True
+                        if value:
+                            p.add_run(value)
                     else:
                         current_p_lines.append(trimmed)
 
                 flush_p()
-
-            # Add explicit paragraphs list if provided
-            if args.paragraphs:
-                for p_text in args.paragraphs:
-                    if p_text and p_text.strip():
-                        doc.add_paragraph(p_text.strip())
 
             # Add explicit structured sections if provided
             if args.sections:

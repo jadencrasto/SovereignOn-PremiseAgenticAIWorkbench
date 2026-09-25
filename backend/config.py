@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     # For optimal retrieval quality, re-ingest documents after changing these values.
     chunk_size: int = Field(default=800)
     chunk_overlap: int = Field(default=100)
+    rag_retrieval_timeout: int = Field(
+        default=25,
+        description="Explicit timeout in seconds for document_search / RAG retrieval.",
+    )
 
     # ------------------------------------------------------------------
     # Tool execution  (used in Phase 3)

@@ -444,13 +444,29 @@ export const ChatView: React.FC = () => {
             } else if (data.type === 'plan_step') {
               setMessages((prev) =>
                 prev.map((m) => {
-                  if (!isTarget(m) || !m.plan) return m;
-                  const updatedSteps = m.plan.steps.map((s) =>
-                    s.id === data.step_id ? { ...s, status: data.status } : s
-                  );
-                  return { ...m, plan: { ...m.plan, steps: updatedSteps } };
+                  if (!isTarget(m)) return m;
+                  // If the message has a plan with matching step, update it
+                  if (m.plan) {
+                    const updatedSteps = m.plan.steps.map((s) =>
+                      s.id === data.step_id ? { ...s, status: data.status } : s
+                    );
+                    return { ...m, plan: { ...m.plan, steps: updatedSteps } };
+                  }
+                  // Fallback: track step status in toolEvents so UI can reflect completion
+                  return {
+                    ...m,
+                    toolEvents: [
+                      ...(m.toolEvents || []),
+                      {
+                        type: 'plan_step',
+                        tool: data.tool_name || data.step_id,
+                        status: data.status,
+                      },
+                    ],
+                  };
                 })
               );
+
             } else if (data.type === 'tool_start') {
               setMessages((prev) =>
                 prev.map((m) =>
