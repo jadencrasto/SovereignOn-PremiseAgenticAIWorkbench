@@ -85,28 +85,28 @@ export const ModelScanner: React.FC = () => {
     (scanResult?.models.length ? scanResult.models[0].name : 'NONE');
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-[#f0f7ff] text-[#0f172a] p-8 space-y-6 font-mono">
+    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-slate-50 text-slate-800 p-8 space-y-6 font-sans">
       {/* Header Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 bg-white border-2 border-[#cbd5e1] brutal-shadow-blue">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-6 bg-white border border-slate-200 rounded-xl shadow-sm">
         <div>
           <div className="flex items-center gap-2.5">
-            <span className="w-3 h-3 bg-[#0284c7] inline-block" />
-            <h1 className="text-xl font-black font-display tracking-tight text-[#0f172a] uppercase">
+            <span className="w-3 h-3 bg-blue-500 rounded-full inline-block" />
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">
               Local Model Scanner &bull; Host Discovery
             </h1>
-            <span className="text-[10px] font-bold px-2 py-0.5 bg-[#e0f2fe] text-[#0369a1] border border-[#bae6fd] uppercase">
+            <span className="text-[10px] font-semibold px-2 py-0.5 bg-blue-50 text-blue-600 border border-blue-200 rounded-full uppercase">
               100% On-Premise
             </span>
           </div>
-          <p className="text-xs text-slate-600 mt-1 font-sans">
-            Actively scans Ollama on <code className="text-[#0284c7] bg-[#f0f9ff] px-1 border border-[#bae6fd]">127.0.0.1:11434</code> and dynamically routes tasks to installed models ({scanResult?.models_count || 0} models detected).
+          <p className="text-xs text-slate-500 mt-2 font-sans">
+            Actively scans Ollama on <code className="text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">127.0.0.1:11434</code> and dynamically routes tasks to installed models ({scanResult?.models_count || 0} models detected).
           </p>
         </div>
 
         <button
           onClick={runModelScan}
           disabled={isScanning}
-          className="flex items-center gap-2 px-5 py-2.5 bg-[#0284c7] hover:bg-[#0369a1] text-white font-bold text-xs uppercase border-2 border-black brutal-shadow-dark brutal-btn self-start md:self-auto disabled:opacity-50"
+          className="flex items-center gap-2 px-5 py-2.5 bg-blue-500 hover:bg-blue-600 text-white font-medium text-sm rounded-lg shadow-sm transition-all self-start md:self-auto disabled:opacity-50"
         >
           <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
           <span>{isScanning ? 'SCANNING HOST...' : 'SCAN LOCAL MODELS'}</span>
@@ -117,93 +117,93 @@ export const ModelScanner: React.FC = () => {
       {scanResult && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {/* 01: Service Status */}
-          <div className="p-4 bg-white border-2 border-[#cbd5e1] brutal-shadow-sky flex flex-col justify-between space-y-2">
-            <div className="text-[10px] font-bold text-slate-500 uppercase">
+          <div className="p-5 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col justify-between space-y-3">
+            <div className="text-xs font-semibold text-slate-500 uppercase">
               01 // OLLAMA DAEMON
             </div>
-            <div className="flex items-center gap-2 font-display text-base font-black uppercase text-[#0f172a]">
+            <div className="flex items-center gap-2 text-base font-bold text-slate-800">
               {scanResult.status === 'online' ? (
                 <>
-                  <CheckCircle2 className="w-5 h-5 text-[#059669]" />
-                  <span>ONLINE</span>
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                  <span>Online</span>
                 </>
               ) : (
                 <>
-                  <AlertCircle className="w-5 h-5 text-[#e11d48]" />
-                  <span>UNREACHABLE</span>
+                  <AlertCircle className="w-5 h-5 text-rose-500" />
+                  <span>Unreachable</span>
                 </>
               )}
             </div>
-            <div className="text-[10px] text-slate-500 truncate">
+            <div className="text-xs text-slate-400 truncate">
               {scanResult.service_url}
             </div>
           </div>
 
           {/* 02: Reasoning Engine (Dynamic) */}
-          <div className="p-4 bg-white border-2 border-[#cbd5e1] brutal-shadow-sky flex flex-col justify-between space-y-2">
-            <div className="text-[10px] font-bold text-slate-500 uppercase truncate">
-              02 // REASONING ({activeReasoningModel.toUpperCase()})
+          <div className="p-5 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col justify-between space-y-3">
+            <div className="text-xs font-semibold text-slate-500 uppercase truncate">
+              02 // REASONING ({activeReasoningModel})
             </div>
-            <div className="flex items-center gap-2 font-display text-base font-black uppercase text-[#0f172a]">
+            <div className="flex items-center gap-2 text-base font-bold text-slate-800">
               {scanResult.models.length > 0 ? (
                 <>
-                  <CheckCircle2 className="w-5 h-5 text-[#059669]" />
-                  <span>ACTIVE &bull; READY</span>
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                  <span>Active &bull; Ready</span>
                 </>
               ) : (
                 <>
-                  <AlertCircle className="w-5 h-5 text-[#d97706]" />
-                  <span>NOT DETECTED</span>
+                  <AlertCircle className="w-5 h-5 text-amber-500" />
+                  <span>Not Detected</span>
                 </>
               )}
             </div>
-            <div className="text-[10px] text-slate-500 truncate">
+            <div className="text-xs text-slate-400 truncate">
               Primary Agent FSM Solver
             </div>
           </div>
 
           {/* 03: Vision Model */}
-          <div className="p-4 bg-white border-2 border-[#cbd5e1] brutal-shadow-sky flex flex-col justify-between space-y-2">
-            <div className="text-[10px] font-bold text-slate-500 uppercase">
+          <div className="p-5 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col justify-between space-y-3">
+            <div className="text-xs font-semibold text-slate-500 uppercase">
               03 // VISION INSPECTION
             </div>
-            <div className="flex items-center gap-2 font-display text-base font-black uppercase text-[#0f172a]">
+            <div className="flex items-center gap-2 text-base font-bold text-slate-800">
               {scanResult.readiness.vision_model_ready ? (
                 <>
-                  <CheckCircle2 className="w-5 h-5 text-[#059669]" />
-                  <span>READY ({scanResult.readiness.vision_model_name?.toUpperCase()})</span>
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                  <span>Ready ({scanResult.readiness.vision_model_name})</span>
                 </>
               ) : (
                 <>
-                  <span className="w-2.5 h-2.5 bg-[#d97706] inline-block" />
-                  <span className="text-xs">PULL WITH:</span>
+                  <span className="w-2.5 h-2.5 bg-amber-500 rounded-full inline-block" />
+                  <span className="text-sm">Pull With:</span>
                 </>
               )}
             </div>
-            <div className="text-[10px] text-slate-500 font-mono">
+            <div className="text-xs text-slate-400 font-mono">
               {scanResult.readiness.vision_model_ready ? 'NDT Equipment Inspection' : 'ollama pull llava:7b'}
             </div>
           </div>
 
           {/* 04: Embeddings */}
-          <div className="p-4 bg-white border-2 border-[#cbd5e1] brutal-shadow-sky flex flex-col justify-between space-y-2">
-            <div className="text-[10px] font-bold text-slate-500 uppercase">
+          <div className="p-5 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col justify-between space-y-3">
+            <div className="text-xs font-semibold text-slate-500 uppercase">
               04 // EMBEDDINGS (RAG)
             </div>
-            <div className="flex items-center gap-2 font-display text-base font-black uppercase text-[#0f172a]">
+            <div className="flex items-center gap-2 text-base font-bold text-slate-800">
               {scanResult.readiness.embedding_model_ready ? (
                 <>
-                  <CheckCircle2 className="w-5 h-5 text-[#059669]" />
-                  <span>READY ({scanResult.readiness.embedding_model_name?.toUpperCase()})</span>
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                  <span>Ready ({scanResult.readiness.embedding_model_name})</span>
                 </>
               ) : (
                 <>
-                  <CheckCircle2 className="w-5 h-5 text-[#059669]" />
-                  <span>BUILT-IN RAG ACTIVE</span>
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                  <span>Built-in RAG Active</span>
                 </>
               )}
             </div>
-            <div className="text-[10px] text-slate-500">
+            <div className="text-xs text-slate-400">
               {scanResult.readiness.embedding_model_ready ? 'Vector Grounding RAG' : 'Optional: ollama pull nomic-embed-text'}
             </div>
           </div>
@@ -213,11 +213,11 @@ export const ModelScanner: React.FC = () => {
       {/* Discovered Models List */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <div className="font-display font-black text-sm uppercase text-[#0f172a] flex items-center gap-2">
-            <span>// DISCOVERED LOCAL HOST MODELS ({scanResult?.models.length || 0})</span>
+          <div className="font-semibold text-sm text-slate-800 flex items-center gap-2 uppercase tracking-wide">
+            <span>// Discovered Local Host Models ({scanResult?.models.length || 0})</span>
           </div>
-          <span className="text-xs text-slate-600 font-sans">
-            Active default model: <strong className="text-[#0284c7] font-mono">{selectedModel || scanResult?.default_model}</strong>
+          <span className="text-sm text-slate-500">
+            Active default model: <strong className="text-blue-600 font-mono font-medium">{selectedModel || scanResult?.default_model}</strong>
           </span>
         </div>
 
@@ -228,34 +228,34 @@ export const ModelScanner: React.FC = () => {
               return (
                 <div
                   key={m.id}
-                  className={`p-5 bg-white border-2 transition-all flex flex-col justify-between space-y-4 ${
-                    isSelected ? 'border-[#0284c7] brutal-shadow-blue ring-2 ring-[#0284c7]/20' : 'border-[#cbd5e1] hover:border-[#0284c7]'
+                  className={`p-6 bg-white border rounded-xl transition-all flex flex-col justify-between space-y-5 ${
+                    isSelected ? 'border-blue-500 shadow-md ring-2 ring-blue-500/10' : 'border-slate-200 hover:border-blue-300 shadow-sm'
                   }`}
                 >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="px-2 py-0.5 bg-[#f0f9ff] text-[#0369a1] font-bold text-[10px] uppercase border border-[#bae6fd]">
-                        {m.format.toUpperCase()} &bull; {m.parameter_size}
+                      <span className="px-2.5 py-1 bg-blue-50 text-blue-600 font-medium text-[11px] uppercase border border-blue-100 rounded-md">
+                        {m.format} &bull; {m.parameter_size}
                       </span>
-                      <span className="text-[10px] font-bold text-slate-500">
+                      <span className="text-[11px] font-medium text-slate-400">
                         {m.size_gb} GB DISK
                       </span>
                     </div>
 
                     <div>
-                      <h3 className="font-display font-black text-base text-[#0f172a] uppercase truncate">
+                      <h3 className="font-bold text-lg text-slate-900 truncate">
                         {m.name}
                       </h3>
-                      <div className="text-[10px] text-slate-500 mt-0.5">
-                        Quant: <span className="font-bold text-[#0f172a]">{m.quantization_level}</span> &bull; Family: {m.family}
+                      <div className="text-xs text-slate-500 mt-1">
+                        Quant: <span className="font-medium text-slate-700">{m.quantization_level}</span> &bull; Family: {m.family}
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap gap-1 pt-1">
+                    <div className="flex flex-wrap gap-1.5 pt-2">
                       {m.capabilities.map((cap) => (
                         <span
                           key={cap}
-                          className="px-1.5 py-0.5 bg-[#f1f5f9] text-[#334155] border border-[#cbd5e1] text-[9px] font-bold uppercase"
+                          className="px-2 py-0.5 bg-slate-50 text-slate-600 border border-slate-200 rounded text-[10px] font-medium uppercase"
                         >
                           {cap}
                         </span>
@@ -263,9 +263,9 @@ export const ModelScanner: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between">
-                    <span className="text-[10px] text-slate-500 font-bold">
-                      {isSelected ? 'ACTIVE IN USE' : 'READY TO DEPLOY'}
+                  <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
+                    <span className="text-xs text-slate-500 font-medium">
+                      {isSelected ? 'Active In Use' : 'Ready to Deploy'}
                     </span>
                     <button
                       onClick={async () => {
@@ -282,13 +282,13 @@ export const ModelScanner: React.FC = () => {
                           // Ignore
                         }
                       }}
-                      className={`px-3 py-1.5 text-xs font-bold uppercase border-2 border-black transition-all ${
+                      className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all shadow-sm ${
                         isSelected
-                          ? 'bg-[#059669] text-white'
-                          : 'bg-[#ffde59] text-black hover:bg-[#fde047] brutal-shadow-dark brutal-btn'
+                          ? 'bg-emerald-500 text-white'
+                          : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200'
                       }`}
                     >
-                      {isSelected ? 'CURRENT' : 'SELECT'}
+                      {isSelected ? 'Current' : 'Select'}
                     </button>
                   </div>
                 </div>
@@ -296,11 +296,11 @@ export const ModelScanner: React.FC = () => {
             })}
           </div>
         ) : (
-          <div className="p-8 bg-white border-2 border-[#cbd5e1] text-center space-y-3">
-            <Cpu className="w-8 h-8 text-slate-400 mx-auto" />
-            <div className="font-bold text-sm text-[#0f172a] uppercase">No Local Models Detected via Ollama</div>
-            <p className="text-xs text-slate-600 font-sans max-w-md mx-auto">
-              Ensure Ollama is active on <code className="text-[#0284c7]">localhost:11434</code> and you have pulled at least one model (e.g. <code className="text-[#0284c7]">ollama pull gemma3:4b</code>).
+          <div className="p-10 bg-white border border-slate-200 rounded-xl shadow-sm text-center space-y-3">
+            <Cpu className="w-10 h-10 text-slate-300 mx-auto" />
+            <div className="font-semibold text-slate-700">No Local Models Detected via Ollama</div>
+            <p className="text-sm text-slate-500 max-w-md mx-auto">
+              Ensure Ollama is active on <code className="text-blue-500 bg-blue-50 px-1 py-0.5 rounded">localhost:11434</code> and you have pulled at least one model (e.g. <code className="text-blue-500 bg-blue-50 px-1 py-0.5 rounded">ollama pull gemma3:4b</code>).
             </p>
           </div>
         )}

@@ -105,7 +105,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const canSend = !isStreaming && value.trim().length > 0;
 
   return (
-    <div className="shrink-0 border-t-2 border-[#cbd5e1] bg-white px-6 py-4 font-mono shadow-sm">
+    <div className="shrink-0 border-t border-slate-200 bg-white px-6 py-4 font-sans shadow-sm">
       {imageError && (
         <div className="mb-2.5 flex items-center justify-between p-2.5 bg-[#ffe4e6] text-[#be123c] font-bold text-xs border-2 border-[#f43f5e]">
           <div className="flex items-center gap-2">
@@ -119,21 +119,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       )}
 
       {attachedImage && imagePreviewUrl && (
-        <div className="mb-3 flex items-center gap-3 p-2.5 bg-[#f0f9ff] border-2 border-[#0284c7] brutal-shadow-blue">
-          <div className="relative w-12 h-12 border border-[#0284c7] shrink-0">
+        <div className="mb-3 flex items-center gap-3 p-3 bg-blue-50/50 border border-blue-100 rounded-lg shadow-sm">
+          <div className="relative w-12 h-12 border border-blue-200 rounded overflow-hidden shrink-0">
             <img src={imagePreviewUrl} alt="Attached preview" className="w-full h-full object-cover" />
           </div>
-          <div className="flex-1 min-w-0 text-xs">
-            <div className="font-bold text-[#0284c7] truncate uppercase">{attachedImage.name}</div>
-            <div className="text-[10px] text-slate-500">
-              {(attachedImage.size / 1024).toFixed(0)} KB &bull; VISION INFERENCE ARMED
+          <div className="flex-1 min-w-0 text-sm">
+            <div className="font-semibold text-blue-700 truncate">{attachedImage.name}</div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              {(attachedImage.size / 1024).toFixed(0)} KB &bull; Image Attached
             </div>
           </div>
           <button
             onClick={handleRemoveImage}
-            className="px-2 py-1 bg-white text-[#e11d48] border border-[#e11d48] font-bold text-[10px] uppercase hover:bg-[#ffe4e6]"
+            className="px-3 py-1.5 bg-white text-rose-500 border border-rose-200 font-medium text-xs rounded hover:bg-rose-50 transition-colors"
           >
-            REMOVE
+            Remove
           </button>
         </div>
       )}
@@ -153,17 +153,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         <button
           onClick={handleAttachClick}
           disabled={isStreaming}
-          title="Attach inspection photograph"
+          title="Attach image"
           className={`
-            flex-none w-11 h-11 border-2 flex items-center justify-center font-bold text-xs brutal-btn
+            flex-none w-11 h-11 border rounded-lg flex items-center justify-center transition-colors
             ${attachedImage
-              ? 'bg-[#0284c7] border-black text-white brutal-shadow-dark'
-              : 'bg-[#f8fafc] border-[#cbd5e1] text-slate-700 hover:border-[#0284c7] hover:text-[#0284c7]'
+              ? 'bg-blue-500 border-blue-600 text-white shadow-sm'
+              : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200'
             }
-            disabled:opacity-30 disabled:cursor-not-allowed
+            disabled:opacity-50 disabled:cursor-not-allowed
           `}
         >
-          <Paperclip className="w-4 h-4" />
+          <Paperclip className="w-5 h-5" />
         </button>
 
         {/* Text Area */}
@@ -177,15 +177,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             disabled={isStreaming}
             placeholder={
               attachedImage
-                ? 'ENTER INSPECTION DIRECTIVE FOR ATTACHED PHOTOGRAPH...'
-                : 'DISPATCH COMMAND OR QUERY REFINERY SPECIFICATIONS...'
+                ? 'Type a message about the attached image...'
+                : 'Type a message...'
             }
             rows={1}
             className="
-              w-full resize-none border-2 border-[#cbd5e1]
-              bg-[#f8fafc] px-4 py-3 text-xs text-[#0f172a] font-mono font-medium
-              placeholder:text-slate-500 focus:outline-none focus:border-[#0284c7]
-              transition-all disabled:opacity-40
+              w-full resize-none border border-slate-200 rounded-lg
+              bg-slate-50 px-4 py-3 text-sm text-slate-800 font-sans
+              placeholder:text-slate-400 focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400
+              transition-all disabled:opacity-50
               min-h-[44px] max-h-[160px] leading-relaxed
             "
             style={{ height: 'auto' }}
@@ -198,19 +198,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <button
               id="stop-stream-btn"
               onClick={onStopStream}
-              className="px-5 h-11 bg-[#e11d48] text-white font-black text-xs uppercase border-2 border-black brutal-shadow-dark flex items-center gap-2 brutal-btn"
+              className="px-5 h-11 rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-semibold text-sm transition-colors flex items-center gap-2 shadow-sm"
             >
               <Square className="w-4 h-4 fill-current" />
-              <span>ABORT</span>
+              <span>Stop</span>
             </button>
           ) : (
             <button
               id="send-message-btn"
               onClick={handleSubmit}
               disabled={!canSend}
-              className="px-6 h-11 bg-[#0284c7] hover:bg-[#0369a1] text-white font-black text-xs uppercase border-2 border-black brutal-shadow-dark flex items-center gap-2 brutal-btn disabled:opacity-30 disabled:cursor-not-allowed"
+              className="px-6 h-11 rounded-lg bg-blue-500 hover:bg-blue-600 text-white font-semibold text-sm transition-colors flex items-center gap-2 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <span>EXECUTE</span>
+              <span>Send</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           )}
@@ -219,17 +219,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             id="clear-session-btn"
             onClick={onClearSession}
             disabled={isStreaming}
-            className="w-11 h-11 border-2 border-[#cbd5e1] bg-[#f8fafc] text-slate-600 hover:text-[#e11d48] hover:border-[#e11d48] flex items-center justify-center brutal-btn disabled:opacity-30"
+            className="w-11 h-11 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 hover:text-rose-500 hover:border-rose-200 hover:bg-rose-50 transition-colors flex items-center justify-center disabled:opacity-50"
             title="Reset session"
           >
-            <Trash2 className="w-4 h-4" />
+            <Trash2 className="w-5 h-5" />
           </button>
         </div>
       </div>
 
-      <div className="mt-2.5 flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase">
-        <span>[ENTER] DISPATCH &bull; [SHIFT+ENTER] NEWLINE</span>
-        <span className="text-[#059669]">HOST_MEMORY: DETERMINISTIC_EVICTION_ACTIVE</span>
+      <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
+        <span>Enter to send, Shift + Enter for new line</span>
+        <span className="text-blue-500 font-medium">Memory Active</span>
       </div>
     </div>
   );

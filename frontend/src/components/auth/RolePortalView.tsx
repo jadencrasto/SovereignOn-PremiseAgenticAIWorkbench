@@ -104,27 +104,27 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-[#070b14] text-slate-100 p-5 md:p-8 font-sans">
+    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-[#f0f7ff] text-slate-900 p-5 md:p-8 font-sans">
       <div className="max-w-7xl mx-auto w-full space-y-6">
         {/* 1. Interactive Role Perspective Switcher Bar */}
-        <div className="bg-[#0f172a]/95 border border-slate-800 rounded-2xl p-4 md:p-5 shadow-2xl backdrop-blur-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-5 shadow-sm backdrop-blur-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-sky-400 animate-pulse" />
-              <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
+              <h1 className="text-base font-bold tracking-tight text-slate-900 flex items-center gap-2">
                 <span>Enterprise Multi-Role Perspective Navigator</span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/30">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
                   ROUTE: /{activeRole === 'admin' ? 'admin' : activeRole === 'operator' ? 'manager' : 'user'}
                 </span>
               </h1>
             </div>
-            <p className="text-xs text-slate-400 mt-1">
+            <p className="text-xs text-slate-600 mt-1">
               Select any role below to experience the exact access controls, capabilities, and restrictions enforced for each user tier.
             </p>
           </div>
 
           {/* Role Switcher Pills */}
-          <div className="flex items-center gap-2 bg-slate-900/90 p-1.5 rounded-xl border border-slate-800">
+          <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-xl border border-slate-200">
             {[
               {
                 id: 'admin' as UserRole,
@@ -156,7 +156,7 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
                   className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex flex-col items-start transition-all ${
                     isSelected
                       ? r.color
-                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                   }`}
                 >
                   <span className="font-bold">{r.label}</span>
@@ -175,22 +175,22 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
         {activeRole === 'admin' && (
           <div className="space-y-6 animate-in fade-in duration-200">
             {/* Header Banner */}
-            <div className="bg-gradient-to-r from-rose-950/40 via-slate-900 to-slate-900 border border-rose-800/40 rounded-2xl p-5 shadow-xl">
+            <div className="bg-gradient-to-r from-rose-50 via-white to-white border border-rose-200 rounded-2xl p-5 shadow-sm">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="flex items-center gap-3.5">
-                  <div className="w-12 h-12 rounded-xl bg-rose-600/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shadow-md">
+                  <div className="w-12 h-12 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 shadow-sm">
                     <Shield className="w-6 h-6" />
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h2 className="text-lg font-bold text-white tracking-tight">
+                      <h2 className="text-lg font-bold text-slate-900 tracking-tight">
                         Sovereign Administrator Command Center
                       </h2>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 uppercase">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-200 uppercase">
                         LEVEL 3 CLEARANCE &bull; ROOT
                       </span>
                     </div>
-                    <p className="text-xs text-slate-300 mt-1">
+                    <p className="text-xs text-slate-600 mt-1">
                       Full access to user administration, Argon2id credentials, cryptographic audit roots, model routing, and restricted plant formulations.
                     </p>
                   </div>
@@ -199,14 +199,14 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setActiveTab('audit')}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 flex items-center gap-1.5 transition-all"
+                    className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200 shadow-sm flex items-center gap-1.5 transition-all"
                   >
-                    <Activity className="w-3.5 h-3.5 text-sky-400" />
+                    <Activity className="w-3.5 h-3.5 text-blue-600" />
                     <span>View Audit Logs</span>
                   </button>
                   <button
                     onClick={() => setActiveTab('security')}
-                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg shadow-md shadow-rose-600/30 flex items-center gap-1.5 transition-all"
+                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg shadow-sm shadow-rose-600/30 flex items-center gap-1.5 transition-all"
                   >
                     <Lock className="w-3.5 h-3.5" />
                     <span>Security Posture</span>
@@ -217,56 +217,56 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
 
             {/* Quick Metrics Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-lg">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+              <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1 flex items-center justify-between">
                   <span>RBAC Users</span>
-                  <Users className="w-4 h-4 text-sky-400" />
+                  <Users className="w-4 h-4 text-blue-600" />
                 </div>
-                <div className="text-2xl font-bold text-white font-mono">{userList.length}</div>
-                <div className="text-[11px] text-emerald-400 font-medium mt-1 flex items-center gap-1">
+                <div className="text-2xl font-bold text-slate-900 font-mono">{userList.length}</div>
+                <div className="text-[11px] text-emerald-600 font-medium mt-1 flex items-center gap-1">
                   <CheckCircle2 className="w-3 h-3" /> All sessions Argon2id verified
                 </div>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-lg">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+              <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1 flex items-center justify-between">
                   <span>Active Local Model</span>
-                  <Cpu className="w-4 h-4 text-purple-400" />
+                  <Cpu className="w-4 h-4 text-purple-600" />
                 </div>
-                <div className="text-xl font-bold text-white font-mono uppercase truncate">
+                <div className="text-xl font-bold text-slate-900 font-mono uppercase truncate">
                   {selectedModel || 'qwen2.5:7b'}
                 </div>
-                <div className="text-[11px] text-slate-400 mt-1">100% local GPU inference</div>
+                <div className="text-[11px] text-slate-500 mt-1">100% local GPU inference</div>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-lg">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+              <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1 flex items-center justify-between">
                   <span>Tool Governance</span>
-                  <Sliders className="w-4 h-4 text-amber-400" />
+                  <Sliders className="w-4 h-4 text-amber-600" />
                 </div>
-                <div className="text-2xl font-bold text-white font-mono">8 Active</div>
-                <div className="text-[11px] text-amber-300 mt-1">AST Python sandbox enforced</div>
+                <div className="text-2xl font-bold text-slate-900 font-mono">8 Active</div>
+                <div className="text-[11px] text-amber-700 mt-1">AST Python sandbox enforced</div>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 shadow-lg">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+              <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1 flex items-center justify-between">
                   <span>Classified Vault</span>
-                  <Key className="w-4 h-4 text-rose-400" />
+                  <Key className="w-4 h-4 text-rose-600" />
                 </div>
-                <div className="text-2xl font-bold text-rose-400 font-mono">UNLOCKED</div>
-                <div className="text-[11px] text-rose-300 mt-1">SIL-3 SCADA &amp; NiMo Formulas</div>
+                <div className="text-2xl font-bold text-rose-600 font-mono">UNLOCKED</div>
+                <div className="text-[11px] text-rose-700 mt-1">SIL-3 SCADA &amp; NiMo Formulas</div>
               </div>
             </div>
 
             {/* Admin User Management Section */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
                 <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Users className="w-4 h-4 text-sky-400" />
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <Users className="w-4 h-4 text-blue-600" />
                     <span>User Account &amp; Access Control Administration</span>
                   </h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <p className="text-xs text-slate-600 mt-0.5">
                     Manage operator and viewer accounts with dual-boundary cryptographic permission policies.
                   </p>
                 </div>
@@ -278,12 +278,12 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
                     value={newUsername}
                     onChange={(e) => setNewUsername(e.target.value)}
                     placeholder="New username..."
-                    className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
+                    className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 shadow-sm"
                   />
                   <select
                     value={newUserRole}
                     onChange={(e) => setNewUserRole(e.target.value as UserRole)}
-                    className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-sky-500"
+                    className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-blue-500 shadow-sm"
                   >
                     <option value="operator">Operator (Manager)</option>
                     <option value="viewer">Viewer (User)</option>
@@ -300,9 +300,9 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
               </div>
 
               {/* User Table */}
-              <div className="rounded-xl border border-slate-800 overflow-hidden">
+              <div className="rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                 <table className="w-full text-left text-xs border-collapse font-sans">
-                  <thead className="bg-slate-800/80 text-slate-300 font-semibold border-b border-slate-700">
+                  <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
                     <tr>
                       <th className="py-2.5 px-4">Account Username</th>
                       <th className="py-2.5 px-4">Assigned Role</th>
@@ -311,34 +311,34 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
                       <th className="py-2.5 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800 text-slate-200">
+                  <tbody className="divide-y divide-slate-200 text-slate-700">
                     {userList.map((u) => (
-                      <tr key={u.id} className="hover:bg-slate-800/40 transition-colors">
-                        <td className="py-2.5 px-4 font-mono font-semibold text-white">
+                      <tr key={u.id} className="hover:bg-slate-50 transition-colors">
+                        <td className="py-2.5 px-4 font-mono font-semibold text-slate-900">
                           {u.username}
                         </td>
                         <td className="py-2.5 px-4">
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                               u.role === 'admin'
-                                ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                                ? 'bg-rose-50 text-rose-700 border border-rose-200'
                                 : u.role === 'operator'
-                                ? 'bg-amber-950 text-amber-300 border border-amber-800'
-                                : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                             }`}
                           >
                             {u.role}
                           </span>
                         </td>
-                        <td className="py-2.5 px-4 text-slate-400 font-mono text-[11px]">
+                        <td className="py-2.5 px-4 text-slate-500 font-mono text-[11px]">
                           {u.clearance}
                         </td>
-                        <td className="py-2.5 px-4 text-slate-400">{u.lastLogin}</td>
+                        <td className="py-2.5 px-4 text-slate-500">{u.lastLogin}</td>
                         <td className="py-2.5 px-4 text-right">
                           {u.role !== 'admin' && (
                             <button
                               onClick={() => handleDeleteUser(u.id, u.username)}
-                              className="text-slate-400 hover:text-rose-400 p-1 rounded hover:bg-slate-800 transition-colors"
+                              className="text-slate-500 hover:text-rose-600 p-1 rounded hover:bg-slate-100 transition-colors"
                               title="Delete User"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -353,38 +353,38 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
             </div>
 
             {/* Classified Secrets Access Deck (Admin Only) */}
-            <div className="bg-rose-950/20 border border-rose-900/40 rounded-2xl p-5 shadow-xl space-y-3">
-              <div className="flex items-center gap-2 text-rose-400 font-bold text-sm">
+            <div className="bg-rose-50 border border-rose-200 rounded-2xl p-5 shadow-sm space-y-3">
+              <div className="flex items-center gap-2 text-rose-700 font-bold text-sm">
                 <Key className="w-4 h-4" />
                 <span>Restricted Sovereign Secrets &amp; SCADA SIL-3 Key Store</span>
               </div>
-              <p className="text-xs text-slate-300">
+              <p className="text-xs text-slate-600">
                 These sensitive assets are cryptographically protected and strictly invisible to Manager and Standard User roles:
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-                <div className="p-3 bg-slate-900/90 border border-rose-800/30 rounded-xl">
-                  <span className="text-[10px] font-mono text-rose-400 font-bold block mb-1">
+                <div className="p-3 bg-white border border-rose-200 shadow-sm rounded-xl">
+                  <span className="text-[10px] font-mono text-rose-600 font-bold block mb-1">
                     SEC_CATALYST_FORMULA
                   </span>
-                  <h4 className="text-xs font-semibold text-white">NiMo/CoMo Zeolite Ratio</h4>
-                  <p className="text-[11px] text-slate-400 mt-1">Hash: e9b28a71c828d841e4 (+$3.40/bbl impact)</p>
+                  <h4 className="text-xs font-semibold text-slate-900">NiMo/CoMo Zeolite Ratio</h4>
+                  <p className="text-[11px] text-slate-500 mt-1">Hash: e9b28a71c828d841e4 (+$3.40/bbl impact)</p>
                 </div>
 
-                <div className="p-3 bg-slate-900/90 border border-rose-800/30 rounded-xl">
-                  <span className="text-[10px] font-mono text-rose-400 font-bold block mb-1">
+                <div className="p-3 bg-white border border-rose-200 shadow-sm rounded-xl">
+                  <span className="text-[10px] font-mono text-rose-600 font-bold block mb-1">
                     SEC_SCADA_OVERRIDE
                   </span>
-                  <h4 className="text-xs font-semibold text-white">SIL-3 Trip Bypass HSM Key</h4>
-                  <p className="text-[11px] text-slate-400 mt-1">Slot: HSM_SLOT_0 &bull; Two-Person Rule</p>
+                  <h4 className="text-xs font-semibold text-slate-900">SIL-3 Trip Bypass HSM Key</h4>
+                  <p className="text-[11px] text-slate-500 mt-1">Slot: HSM_SLOT_0 &bull; Two-Person Rule</p>
                 </div>
 
-                <div className="p-3 bg-slate-900/90 border border-rose-800/30 rounded-xl">
-                  <span className="text-[10px] font-mono text-rose-400 font-bold block mb-1">
+                <div className="p-3 bg-white border border-rose-200 shadow-sm rounded-xl">
+                  <span className="text-[10px] font-mono text-rose-600 font-bold block mb-1">
                     SEC_LEDGER_ROOT
                   </span>
-                  <h4 className="text-xs font-semibold text-white">Master Ed25519 Root Authority</h4>
-                  <p className="text-[11px] text-slate-400 mt-1">Signs all industrial compliance artifacts</p>
+                  <h4 className="text-xs font-semibold text-slate-900">Master Ed25519 Root Authority</h4>
+                  <p className="text-[11px] text-slate-500 mt-1">Signs all industrial compliance artifacts</p>
                 </div>
               </div>
             </div>
@@ -397,22 +397,22 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
         {activeRole === 'operator' && (
           <div className="space-y-6 animate-in fade-in duration-200">
             {/* Header Banner */}
-            <div className="bg-gradient-to-r from-amber-950/40 via-slate-900 to-slate-900 border border-amber-800/40 rounded-2xl p-5 shadow-xl">
+            <div className="bg-gradient-to-r from-amber-50 via-white to-white border border-amber-200 rounded-2xl p-5 shadow-sm">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="flex items-center gap-3.5">
-                  <div className="w-12 h-12 rounded-xl bg-amber-600/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-md">
+                  <div className="w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600 shadow-sm">
                     <Sliders className="w-6 h-6" />
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h2 className="text-lg font-bold text-white tracking-tight">
+                      <h2 className="text-lg font-bold text-slate-900 tracking-tight">
                         Plant Operations &amp; Engineering Console
                       </h2>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 uppercase">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-200 uppercase">
                         LEVEL 2 CLEARANCE &bull; OPERATOR
                       </span>
                     </div>
-                    <p className="text-xs text-slate-300 mt-1">
+                    <p className="text-xs text-slate-600 mt-1">
                       Equipped for autonomous multi-step planning, Human-in-the-loop task approvals, NDT defect remediation, and SOP document ingestion.
                     </p>
                   </div>
@@ -421,16 +421,16 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setActiveTab('tasks')}
-                    className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg shadow-md shadow-amber-600/30 flex items-center gap-1.5 transition-all"
+                    className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg shadow-sm shadow-amber-600/30 flex items-center gap-1.5 transition-all"
                   >
                     <History className="w-3.5 h-3.5" />
                     <span>Review Tasks &amp; Approvals</span>
                   </button>
                   <button
                     onClick={() => setActiveTab('chat')}
-                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 flex items-center gap-1.5 transition-all"
+                    className="px-3.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200 shadow-sm flex items-center gap-1.5 transition-all"
                   >
-                    <Terminal className="w-3.5 h-3.5 text-sky-400" />
+                    <Terminal className="w-3.5 h-3.5 text-blue-600" />
                     <span>Open Agent Chat</span>
                   </button>
                 </div>
@@ -440,77 +440,77 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
             {/* Operator Capabilities Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Human-in-the-loop Gate */}
-              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 shadow-lg space-y-3">
-                <div className="flex items-center justify-between text-amber-400">
+              <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <div className="flex items-center justify-between text-amber-600">
                   <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-1.5">
                     <CheckCircle2 className="w-4 h-4" />
                     <span>Human Approval Gate</span>
                   </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-50 border border-amber-200">
                     ENABLED
                   </span>
                 </div>
-                <p className="text-xs text-slate-300 leading-relaxed">
+                <p className="text-xs text-slate-600 leading-relaxed">
                   As Manager/Operator, you hold cryptographic signing authority to review and approve high-risk operations (e.g. <code>file_write</code>, <code>docx_create</code>, <code>code_execution</code>) with SHA-256 parameter validation.
                 </p>
-                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
                   <span>Mutating Tools:</span>
-                  <span className="text-emerald-400 font-semibold font-mono">AUTHORIZED</span>
+                  <span className="text-emerald-600 font-semibold font-mono">AUTHORIZED</span>
                 </div>
               </div>
 
               {/* NDT Failure Modes & Remediation */}
-              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 shadow-lg space-y-3">
-                <div className="flex items-center justify-between text-sky-400">
+              <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <div className="flex items-center justify-between text-blue-600">
                   <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <AlertTriangle className="w-4 h-4 text-amber-600" />
                     <span>Defect Tolerances</span>
                   </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/30">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 border border-blue-200">
                     UNLOCKED
                   </span>
                 </div>
-                <p className="text-xs text-slate-300 leading-relaxed">
+                <p className="text-xs text-slate-600 leading-relaxed">
                   Inspect active failure modes (Pitting corrosion, valve stem galling, graphite oxidation, pump cavitation) cross-referenced against API 570 and ASME standards.
                 </p>
-                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
                   <span>Engineering Limits:</span>
-                  <span className="text-sky-300 font-semibold font-mono">VISIBLE</span>
+                  <span className="text-blue-600 font-semibold font-mono">VISIBLE</span>
                 </div>
               </div>
 
               {/* Ingestion & RAG Indexing */}
-              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 shadow-lg space-y-3">
-                <div className="flex items-center justify-between text-emerald-400">
+              <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <div className="flex items-center justify-between text-emerald-600">
                   <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-1.5">
                     <FileText className="w-4 h-4" />
                     <span>Document Ingestion</span>
                   </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">
                     {documents.length} DOCS
                   </span>
                 </div>
-                <p className="text-xs text-slate-300 leading-relaxed">
+                <p className="text-xs text-slate-600 leading-relaxed">
                   Upload PDF, DOCX, TXT, and Markdown engineering runbooks into local ChromaDB with automatic sliding-window chunking.
                 </p>
-                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
                   <span>Write Permissions:</span>
-                  <span className="text-emerald-400 font-semibold font-mono">ACTIVE</span>
+                  <span className="text-emerald-600 font-semibold font-mono">ACTIVE</span>
                 </div>
               </div>
             </div>
 
             {/* RBAC Boundary Notification Banner */}
-            <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400 flex items-center justify-between">
+            <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm text-xs text-slate-600 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Lock className="w-4 h-4 text-rose-400" />
+                <Lock className="w-4 h-4 text-rose-600" />
                 <span>
                   <strong>RBAC Security Policy:</strong> Level 3 Classified SCADA master override keys and User Account Deletion are restricted to Administrator accounts.
                 </span>
               </div>
               <button
                 onClick={() => handleSwitchRole('admin')}
-                className="text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1"
+                className="text-blue-600 hover:text-blue-500 font-semibold flex items-center gap-1"
               >
                 <span>Elevate to Admin</span>
                 <ArrowRight className="w-3 h-3" />
@@ -525,22 +525,22 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
         {activeRole === 'viewer' && (
           <div className="space-y-6 animate-in fade-in duration-200">
             {/* Header Banner */}
-            <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border border-emerald-800/40 rounded-2xl p-5 shadow-xl">
+            <div className="bg-gradient-to-r from-emerald-50 via-white to-white border border-emerald-200 rounded-2xl p-5 shadow-sm">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="flex items-center gap-3.5">
-                  <div className="w-12 h-12 rounded-xl bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shadow-md">
+                  <div className="w-12 h-12 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shadow-sm">
                     <CheckCircle2 className="w-6 h-6" />
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h2 className="text-lg font-bold text-white tracking-tight">
+                      <h2 className="text-lg font-bold text-slate-900 tracking-tight">
                         Field Analyst &amp; General User Portal
                       </h2>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 border border-emerald-200 uppercase">
                         LEVEL 1 CLEARANCE &bull; VIEWER
                       </span>
                     </div>
-                    <p className="text-xs text-slate-300 mt-1">
+                    <p className="text-xs text-slate-600 mt-1">
                       Read-only sovereign Q&amp;A over company technical documents, public telemetry monitoring, and plant topology exploration.
                     </p>
                   </div>
@@ -548,7 +548,7 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
 
                 <button
                   onClick={() => setActiveTab('chat')}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg shadow-md shadow-emerald-600/30 flex items-center gap-1.5 transition-all"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg shadow-sm shadow-emerald-600/30 flex items-center gap-1.5 transition-all"
                 >
                   <Terminal className="w-3.5 h-3.5" />
                   <span>Start Document Q&amp;A</span>
@@ -559,44 +559,44 @@ export const RolePortalView: React.FC<RolePortalViewProps> = ({ initialRole }) =
             {/* Viewer Capabilities & Guardrails */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Allowed Capabilities */}
-              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 shadow-lg space-y-3">
-                <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+              <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <h3 className="text-xs font-bold text-emerald-600 uppercase tracking-wider flex items-center gap-1.5">
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Authorized Viewer Features</span>
                 </h3>
-                <ul className="space-y-2 text-xs text-slate-300">
+                <ul className="space-y-2 text-xs text-slate-600">
                   <li className="flex items-start gap-2">
-                    <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                     <span><strong>Grounded RAG Search:</strong> Ask natural language technical questions over ingested manuals with exact chunk citations.</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                     <span><strong>Plant Topology Explorer:</strong> View public equipment assets (Pumps, Valves, Columns) and live sensor probes.</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                     <span><strong>Safe Arithmetic Tools:</strong> Deterministic calculations without backend state mutation.</span>
                   </li>
                 </ul>
               </div>
 
               {/* Enforced RBAC Guardrails */}
-              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 shadow-lg space-y-3">
-                <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+              <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-sm space-y-3">
+                <h3 className="text-xs font-bold text-amber-600 uppercase tracking-wider flex items-center gap-1.5">
                   <Shield className="w-4 h-4" />
                   <span>Enforced Security Restrictions (Viewer)</span>
                 </h3>
-                <ul className="space-y-2 text-xs text-slate-400">
+                <ul className="space-y-2 text-xs text-slate-500">
                   <li className="flex items-start gap-2">
-                    <X className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <X className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <span><strong>Mutating Tools Blocked:</strong> <code>file_write</code>, <code>docx_create</code>, and Python <code>code_execution</code> require Operator approval.</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <X className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <X className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <span><strong>Approval Gate Disabled:</strong> Viewers cannot sign off on high-risk task plans.</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <X className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <X className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <span><strong>Classified Data Redacted:</strong> Proprietary catalysts and root encryption keys are masked.</span>
                   </li>
                 </ul>

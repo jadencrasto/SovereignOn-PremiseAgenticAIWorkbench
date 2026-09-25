@@ -48,32 +48,32 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
   };
 
   return (
-    <div className="mb-4 border-2 border-[#bae6fd] bg-[#f0f9ff] font-mono text-xs">
+    <div className="mb-4 border border-blue-100 rounded-lg bg-blue-50/30 font-sans text-xs">
       <div
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center justify-between p-3 bg-[#e0f2fe] border-b-2 border-[#bae6fd] cursor-pointer hover:bg-[#bae6fd]/50 transition-colors"
+        className="flex items-center justify-between p-3 bg-blue-50/50 border-b border-blue-100 cursor-pointer hover:bg-blue-100/50 transition-colors rounded-t-lg"
       >
         <div className="flex items-center gap-2">
-          <span className="px-1.5 py-0.5 bg-[#0284c7] text-white font-black text-[10px] uppercase">
-            {runningTool ? 'RUNNING' : 'COMPLETED'}
+          <span className="px-2 py-0.5 bg-blue-500 text-white font-semibold text-[10px] rounded-full">
+            {runningTool ? 'Running' : 'Completed'}
           </span>
-          <span className="font-bold text-[#0369a1] uppercase tracking-tight">
-            // AGENT TOOL PIPELINE ({completedTools.length} ACTIONS)
+          <span className="font-semibold text-blue-700 tracking-tight">
+            Tool Pipeline ({completedTools.length} actions)
           </span>
         </div>
-        <span className="text-[10px] font-bold text-[#0284c7] uppercase">
-          [{expanded ? 'HIDE_LOGS' : 'VIEW_LOGS'}]
+        <span className="text-[10px] font-medium text-blue-600">
+          {expanded ? 'Hide Logs' : 'View Logs'}
         </span>
       </div>
 
       {!expanded && completedTools.length > 0 && (
-        <div className="p-2.5 flex flex-wrap gap-1.5 bg-[#f0f9ff]">
+        <div className="p-2.5 flex flex-wrap gap-2 bg-blue-50/30 rounded-b-lg">
           {completedTools.map((ev, i) => (
             <span
               key={i}
-              className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white border border-[#bae6fd] text-[10px] font-bold text-[#0369a1] uppercase"
+              className="inline-flex items-center gap-1.5 px-2 py-1 bg-white border border-blue-100 rounded-md text-[11px] font-medium text-blue-700 shadow-sm"
             >
-              <CheckCircle2 className="w-3 h-3 text-[#059669]" />
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
               <span>{formatToolName(ev.tool)}</span>
             </span>
           ))}
@@ -81,15 +81,15 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
       )}
 
       {expanded && (
-        <div className="p-3 space-y-2 bg-[#f0f9ff]">
+        <div className="p-3 space-y-2 bg-white rounded-b-lg border-t border-blue-100">
           {events.map((event, idx) => (
             <div key={idx} className="flex items-start gap-2 text-[11px]">
               {event.type === 'tool_start' ? (
                 <>
-                  <span className="w-2 h-2 bg-[#0284c7] mt-1 shrink-0" />
+                  <span className="w-2 h-2 rounded-full bg-blue-500 mt-1 shrink-0" />
                   <div>
-                    <span className="font-bold text-[#0284c7] uppercase">
-                      &gt; {formatToolName(event.tool)}
+                    <span className="font-semibold text-blue-600">
+                      Running {formatToolName(event.tool)}
                     </span>
                     {event.arguments && (
                       <span className="text-slate-600 ml-2">
@@ -100,10 +100,10 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
                 </>
               ) : (
                 <>
-                  <CheckCircle2 className="w-3.5 h-3.5 text-[#059669] shrink-0 mt-0.5" />
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-bold text-[#0f172a] uppercase">
-                      &gt; {formatToolName(event.tool)} [OK]
+                    <span className="font-semibold text-slate-700">
+                      Completed {formatToolName(event.tool)}
                     </span>
                     {event.summary && (
                       <span className="ml-2 text-slate-600">{event.summary}</span>
@@ -135,32 +135,32 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
   if (isUser) {
     return (
-      <div className="flex justify-end gap-3 max-w-5xl mx-auto px-2 py-2 font-mono">
+      <div className="flex justify-end gap-3 max-w-5xl mx-auto px-2 py-2 font-sans">
         <div className="flex flex-col items-end max-w-[85%]">
-          <div className="flex items-center gap-2 mb-1 text-[10px] font-bold text-slate-500 uppercase">
+          <div className="flex items-center gap-2 mb-1 text-[10px] font-medium text-slate-500">
             <span>{message.timestamp}</span>
-            <span className="px-1 bg-[#e0f2fe] text-[#0369a1] border border-[#bae6fd]">OP_DISPATCH</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">User</span>
           </div>
 
           {message.attachments && message.attachments.length > 0 && (
             <div className="mb-2 flex flex-col items-end gap-1.5 w-full">
               {message.attachments.map((att) => (
-                <div key={att.id} className="max-w-xs border-2 border-black bg-white p-1 brutal-shadow-blue">
+                <div key={att.id} className="max-w-xs border border-slate-200 rounded-lg bg-white p-1.5 shadow-sm">
                   <img
                     src={att.objectUrl}
                     alt={att.filename}
-                    className="w-full max-h-48 object-cover border border-[#cbd5e1]"
+                    className="w-full max-h-48 object-cover rounded-md border border-slate-100"
                   />
-                  <div className="flex items-center justify-between px-2 py-1 text-[10px] font-bold text-[#0f172a] uppercase">
+                  <div className="flex items-center justify-between px-2 py-1.5 text-xs font-medium text-slate-700">
                     <span className="truncate max-w-[180px]">{att.filename}</span>
-                    <span className="text-[#059669]">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
+                    <span className="text-slate-500">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          <div className="p-4 border-2 border-black bg-[#0284c7] text-white font-sans font-semibold text-sm leading-relaxed brutal-shadow-dark">
+          <div className="p-4 rounded-2xl rounded-tr-sm bg-blue-500 text-white font-sans text-sm leading-relaxed shadow-sm">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
         </div>
@@ -172,16 +172,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
   const hasToolEvents = message.toolEvents && message.toolEvents.length > 0;
 
   return (
-    <div className="flex flex-col gap-2 max-w-5xl mx-auto px-2 py-3 font-mono">
+    <div className="flex flex-col gap-2 max-w-5xl mx-auto px-2 py-3 font-sans">
       {/* Meta Header */}
-      <div className="flex items-center justify-between w-full text-[11px] font-bold border-b-2 border-[#cbd5e1] pb-1.5">
+      <div className="flex items-center justify-between w-full text-xs font-medium border-b border-slate-200 pb-2 mb-1">
         <div className="flex items-center gap-2">
-          <span className="px-2 py-0.5 bg-[#0284c7] text-white font-black uppercase text-[10px]">
-            SOVEREIGN_CORE
+          <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-semibold text-[10px]">
+            Assistant
           </span>
           {message.model_used && (
-            <span className="px-1.5 py-0.5 bg-[#e0f2fe] border border-[#bae6fd] text-[#0369a1] text-[10px]">
-              MODEL: {message.model_used.toUpperCase()}
+            <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[10px]">
+              {message.model_used}
             </span>
           )}
         </div>
@@ -190,25 +190,25 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
       {/* Main Terminal Output Box */}
       <div
-        className={`w-full p-5 bg-white border-2 ${
+        className={`w-full p-6 rounded-xl bg-white border shadow-sm ${
           message.error
-            ? 'border-[#e11d48] text-[#be123c]'
-            : 'border-[#cbd5e1] text-[#0f172a] brutal-shadow-blue'
+            ? 'border-rose-200 text-rose-700'
+            : 'border-slate-200 text-slate-800'
         }`}
       >
         {message.error ? (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 font-black text-xs text-[#e11d48] uppercase">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 font-semibold text-sm text-rose-600">
               <AlertTriangle className="w-4 h-4" />
-              <span>[INFERENCE_EXECUTION_FAILURE]</span>
+              <span>Execution Failed</span>
             </div>
-            <p className="text-xs font-mono">{message.content}</p>
+            <p className="text-sm font-mono bg-rose-50 p-3 rounded-lg border border-rose-100">{message.content}</p>
             {onRetry && (
               <button
                 onClick={() => onRetry(message.content)}
-                className="mt-3 px-3 py-1 bg-[#e11d48] text-white font-black text-xs uppercase border-2 border-black brutal-btn"
+                className="mt-3 px-4 py-2 rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-medium text-sm transition-colors shadow-sm"
               >
-                Retry Dispatch
+                Retry
               </button>
             )}
           </div>
@@ -248,26 +248,26 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
               </div>
             ) : (
               message.isStreaming && (
-                <div className="flex items-center gap-2 text-xs text-[#0284c7] font-mono py-2">
-                  <span className="w-2.5 h-2.5 bg-[#0284c7] animate-ping" />
-                  <span className="uppercase font-bold">
-                    {hasToolEvents ? 'EXECUTING AIR-GAPPED TOOLS...' : 'SYNTHESIZING DETERMINISTIC RESPONSE...'}
+                <div className="flex items-center gap-2 text-sm text-blue-600 py-2 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
+                  <span>
+                    {hasToolEvents ? 'Running tools...' : 'Thinking...'}
                   </span>
                 </div>
               )
             )}
 
             {message.isStreaming && message.content && (
-              <span className="inline-block w-2 h-4 ml-1 bg-[#0284c7] animate-pulse align-middle" />
+              <span className="inline-block w-2 h-4 ml-1 bg-blue-500 animate-pulse align-middle rounded-sm" />
             )}
           </>
         )}
 
         {/* Sources Grid */}
         {message.sources && message.sources.length > 0 && (
-          <div className="mt-5 pt-4 border-t-2 border-[#e2e8f0]">
-            <div className="text-[10px] font-black text-[#0284c7] uppercase tracking-widest mb-2">
-              // GROUNDING BENCHMARK EVIDENCE ({message.sources.length} CHUNKS)
+          <div className="mt-6 pt-5 border-t border-slate-100">
+            <div className="text-xs font-semibold text-slate-500 tracking-wide mb-3">
+              Sources & Evidence
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {message.sources.map((src, idx) => (
@@ -280,20 +280,20 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
       {/* Copy / Actions Footer */}
       {!message.isStreaming && !message.error && message.content && (
-        <div className="flex items-center justify-end gap-2 text-[10px]">
+        <div className="flex items-center justify-end gap-2 mt-1">
           <button
             onClick={handleCopy}
-            className="px-2.5 py-1 bg-white border border-[#cbd5e1] text-slate-700 hover:text-[#0284c7] hover:border-[#0284c7] uppercase font-bold flex items-center gap-1 shadow-sm"
+            className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 font-medium text-xs flex items-center gap-1.5 shadow-sm transition-colors"
           >
             {copied ? (
               <>
-                <Check className="w-3 h-3 text-[#059669]" />
-                <span className="text-[#059669]">COPIED</span>
+                <Check className="w-3.5 h-3.5 text-emerald-500" />
+                <span className="text-emerald-600">Copied</span>
               </>
             ) : (
               <>
-                <Copy className="w-3 h-3" />
-                <span>COPY_OUTPUT</span>
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
               </>
             )}
           </button>

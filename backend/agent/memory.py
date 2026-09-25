@@ -1,25 +1,29 @@
 """
 backend/agent/memory.py
 -----------------------
-In-memory conversation store for Phase 1.
+In-memory conversation store for Phase 1, modified to persist to disk.
 
 Each session is identified by a UUID.  Messages are stored in an ordered
-list per session.  No database, no Redis — this is intentional for the
-MVP (single-user, localhost).  The design can be swapped for a persistent
-store in Phase 4 without touching the agent engine.
+list per session.  The state is persisted to data/memory.json so it
+survives backend restarts and allows continuous chat per user session.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+from pathlib import Path
 
 from backend.models.base import Message
+from backend.config import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
+MEMORY_FILE = PROJECT_ROOT / "data" / "memory.json"
 
 @dataclass
 class Conversation:
@@ -49,7 +53,8 @@ class Conversation:
 
 class ConversationMemory:
     """
-    Thread-safe in-memory store of Conversation objects, keyed by session_id.
+    Thread-safe in-memory store of Conversation objects, keyed by session_id,
+    persisted to disk.
 
     Usage:
         memory = ConversationMemory()
@@ -61,6 +66,33 @@ class ConversationMemory:
 
     def __init__(self) -> None:
         self._store: Dict[str, Conversation] = {}
+        self._load()
+
+    def _save(self) -> None:
+        try:
+            MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+            for sid, conv in self._store.items():
+                data[sid] = [msg.model_dump() for msg in conv.messages]
+            with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save memory: {e}")
+
+    def _load(self) -> None:
+        if not MEMORY_FILE.exists():
+            return
+        try:
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for sid, msg_dicts in data.items():
+                conv = Conversation(session_id=sid)
+                for msg_dict in msg_dicts:
+                    conv.messages.append(Message(**msg_dict))
+                self._store[sid] = conv
+            logger.info(f"Loaded {len(self._store)} sessions from {MEMORY_FILE}")
+        except Exception as e:
+            logger.error(f"Failed to load memory: {e}")
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -97,6 +129,7 @@ class ConversationMemory:
             logger.debug("Created session %s (no system prompt)", sid)
 
         self._store[sid] = conv
+        self._save()
         return sid
 
     def session_exists(self, session_id: str) -> bool:
@@ -108,6 +141,7 @@ class ConversationMemory:
         self._store.pop(session_id, None)
         if existed:
             logger.debug("Deleted session %s", session_id)
+            self._save()
         return existed
 
     # ------------------------------------------------------------------
@@ -116,15 +150,21 @@ class ConversationMemory:
 
     def add_user_message(self, session_id: str, content: str) -> Message:
         """Append a user message to the session."""
-        return self._get_or_create(session_id).add_message("user", content)
+        msg = self._get_or_create(session_id).add_message("user", content)
+        self._save()
+        return msg
 
     def add_assistant_message(self, session_id: str, content: str) -> Message:
         """Append an assistant message to the session."""
-        return self._get_or_create(session_id).add_message("assistant", content)
+        msg = self._get_or_create(session_id).add_message("assistant", content)
+        self._save()
+        return msg
 
     def add_system_message(self, session_id: str, content: str) -> Message:
         """Prepend or append a system message (for mid-session injection)."""
-        return self._get_or_create(session_id).add_message("system", content)
+        msg = self._get_or_create(session_id).add_message("system", content)
+        self._save()
+        return msg
 
     def get_history(self, session_id: str) -> List[Message]:
         """Return the full message history for a session."""
@@ -136,6 +176,7 @@ class ConversationMemory:
         """Clear messages but keep the session entry."""
         if session_id in self._store:
             self._store[session_id].clear()
+            self._save()
 
     # ------------------------------------------------------------------
     # Introspection
@@ -155,4 +196,6 @@ class ConversationMemory:
         if session_id not in self._store:
             logger.debug("Auto-creating session %s", session_id)
             self._store[session_id] = Conversation(session_id=session_id)
+            self._save()
         return self._store[session_id]
+

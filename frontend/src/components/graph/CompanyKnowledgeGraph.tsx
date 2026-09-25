@@ -143,7 +143,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
         stroke: '#475569',
         ring: '#64748b',
         text: '#94a3b8',
-        tagBg: 'bg-slate-800 text-slate-400 border-slate-700',
+        tagBg: 'bg-slate-100 text-slate-600 border-slate-300',
         badge: 'RESTRICTED',
       };
     }
@@ -154,7 +154,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#38bdf8',
           ring: '#0284c7',
           text: '#ffffff',
-          tagBg: 'bg-sky-950/90 text-sky-300 border-sky-700',
+          tagBg: 'bg-sky-50 text-sky-700 border-sky-200',
           badge: 'UNIT',
         };
       case 'equipment':
@@ -163,7 +163,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#60a5fa',
           ring: '#2563eb',
           text: '#ffffff',
-          tagBg: 'bg-blue-950/90 text-blue-300 border-blue-700',
+          tagBg: 'bg-blue-50 text-blue-700 border-blue-200',
           badge: 'EQUIPMENT',
         };
       case 'sensor':
@@ -172,7 +172,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#34d399',
           ring: '#059669',
           text: '#ffffff',
-          tagBg: 'bg-emerald-950/90 text-emerald-300 border-emerald-700',
+          tagBg: 'bg-emerald-50 text-emerald-700 border-emerald-200',
           badge: 'SENSOR',
         };
       case 'defect':
@@ -181,7 +181,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#fbbf24',
           ring: '#d97706',
           text: '#ffffff',
-          tagBg: 'bg-amber-950/90 text-amber-300 border-amber-700',
+          tagBg: 'bg-amber-50 text-amber-700 border-amber-200',
           badge: 'DEFECT',
         };
       case 'sop':
@@ -190,7 +190,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#c084fc',
           ring: '#7c3aed',
           text: '#ffffff',
-          tagBg: 'bg-purple-950/90 text-purple-300 border-purple-700',
+          tagBg: 'bg-purple-50 text-purple-700 border-purple-200',
           badge: 'SOP',
         };
       case 'document':
@@ -199,7 +199,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#2dd4bf',
           ring: '#0d9488',
           text: '#ffffff',
-          tagBg: 'bg-teal-950/90 text-teal-300 border-teal-600',
+          tagBg: 'bg-teal-50 text-teal-700 border-teal-200',
           badge: 'LIVE DOC',
         };
       case 'classified':
@@ -208,7 +208,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#f87171',
           ring: '#dc2626',
           text: '#ffffff',
-          tagBg: 'bg-rose-950/90 text-rose-300 border-rose-700',
+          tagBg: 'bg-rose-50 text-rose-700 border-rose-200',
           badge: 'CLASSIFIED',
         };
       default:
@@ -217,7 +217,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           stroke: '#64748b',
           ring: '#334155',
           text: '#ffffff',
-          tagBg: 'bg-slate-900 text-slate-300 border-slate-700',
+          tagBg: 'bg-slate-100 text-slate-700 border-slate-300',
           badge: 'ENTITY',
         };
     }
@@ -517,9 +517,9 @@ export const CompanyKnowledgeGraph: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#070b14] text-slate-100 select-none font-sans">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-white text-slate-900 select-none font-sans">
       {/* 1. Header Toolbar */}
-      <div className="px-5 py-3 bg-[#0d1424] border-b border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3 shrink-0 shadow-lg z-20">
+      <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3 shrink-0 shadow-sm z-20">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center shadow-md shadow-sky-500/25">
             {viewMode === 'graph' ? (
@@ -530,7 +530,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-2">
+              <h1 className="text-sm font-bold tracking-tight text-slate-900 flex items-center gap-2">
                 Sovereign Knowledge Topology &amp; RBAC Database
               </h1>
               {liveDocCount > 0 && (
@@ -549,13 +549,13 @@ export const CompanyKnowledgeGraph: React.FC = () => {
         {/* View Switcher & Clearance Controls */}
         <div className="flex items-center gap-2.5">
           {/* Toggle View Mode: Graph vs Database */}
-          <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-800">
+          <div className="flex bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
             <button
               onClick={() => setViewMode('graph')}
               className={`px-3 py-1 text-xs font-semibold rounded-md flex items-center gap-1.5 transition-all ${
                 viewMode === 'graph'
-                  ? 'bg-sky-600 text-white shadow-sm shadow-sky-600/40'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/40'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               <Network className="w-3.5 h-3.5" />
@@ -565,8 +565,8 @@ export const CompanyKnowledgeGraph: React.FC = () => {
               onClick={() => setViewMode('database')}
               className={`px-3 py-1 text-xs font-semibold rounded-md flex items-center gap-1.5 transition-all ${
                 viewMode === 'database'
-                  ? 'bg-sky-600 text-white shadow-sm shadow-sky-600/40'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/40'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               <Table className="w-3.5 h-3.5" />
@@ -575,13 +575,13 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           </div>
 
           {/* Clearance Level Switcher */}
-          <div className="flex items-center gap-1.5 pl-2 border-l border-slate-800">
-            <div className="text-xs font-medium text-slate-400 flex items-center gap-1 mr-1">
-              <Shield className="w-3.5 h-3.5 text-sky-400" />
+          <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200">
+            <div className="text-xs font-medium text-slate-600 flex items-center gap-1 mr-1">
+              <Shield className="w-3.5 h-3.5 text-blue-500" />
               <span>Clearance:</span>
             </div>
 
-            <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-800">
+            <div className="flex bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
               {[
                 { key: 'viewer', label: 'L1: Viewer' },
                 { key: 'operator', label: 'L2: Operator' },
@@ -594,8 +594,8 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                     onClick={() => setSelectedClearance(lvl.key)}
                     className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
                       isCurrent
-                        ? 'bg-sky-600 text-white shadow-sm shadow-sky-600/50'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                        ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/50'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
                     }`}
                   >
                     {lvl.label}
@@ -621,7 +621,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
       </div>
 
       {/* 2. Filter Bar */}
-      <div className="px-5 py-2.5 bg-[#0a101f] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0 text-xs z-10">
+      <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0 text-xs z-10 shadow-sm">
         <div className="flex items-center gap-2.5">
           {/* Search Box */}
           <div className="relative">
@@ -631,7 +631,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search assets, telemetry, SOPs..."
-              className="pl-8 pr-3 py-1.5 bg-slate-900 border border-slate-800 rounded-md text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500 w-60 transition-all font-sans"
+              className="pl-8 pr-3 py-1.5 bg-white border border-slate-300 rounded-md text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 w-60 transition-all font-sans shadow-sm"
             />
           </div>
 
@@ -652,8 +652,8 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                 onClick={() => setSelectedCategory(c.id)}
                 className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all ${
                   selectedCategory === c.id
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/50'
-                    : 'bg-slate-900/80 text-slate-400 border border-slate-800 hover:border-slate-700 hover:text-slate-200'
+                    ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-900 shadow-sm'
                 }`}
               >
                 {c.label}
@@ -663,11 +663,11 @@ export const CompanyKnowledgeGraph: React.FC = () => {
         </div>
 
         {/* Telemetry Stats & Physics Control */}
-        <div className="flex items-center gap-3 text-[11px] text-slate-400 font-medium">
-          <span>Visible Entities: <strong className="text-sky-400 font-semibold">{visibleNodes.length}</strong></span>
-          <span>Active Links: <strong className="text-emerald-400 font-semibold">{visibleEdges.length}</strong></span>
+        <div className="flex items-center gap-3 text-[11px] text-slate-600 font-medium">
+          <span>Visible Entities: <strong className="text-blue-600 font-semibold">{visibleNodes.length}</strong></span>
+          <span>Active Links: <strong className="text-emerald-600 font-semibold">{visibleEdges.length}</strong></span>
           {graphMeta && graphMeta.hidden_nodes > 0 && (
-            <span className="text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 flex items-center gap-1 font-semibold">
+            <span className="text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 flex items-center gap-1 font-semibold">
               <Lock className="w-3 h-3" />
               <span>{graphMeta.hidden_nodes} RBAC LOCKED</span>
             </span>
@@ -681,8 +681,8 @@ export const CompanyKnowledgeGraph: React.FC = () => {
               }}
               className={`px-2 py-0.5 rounded border text-[10px] font-semibold flex items-center gap-1 transition-all ${
                 isPhysicsFrozen
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-600'
+                  ? 'bg-amber-50 text-amber-700 border-amber-200'
+                  : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300 shadow-sm'
               }`}
               title={isPhysicsFrozen ? 'Release layout physics' : 'Freeze node positions'}
             >
@@ -699,23 +699,23 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           {/* Crisp, Non-Blurred Force-Directed Canvas */}
           <div
             ref={canvasRef}
-            className="flex-1 relative bg-[#070b14] overflow-hidden cursor-crosshair select-none"
+            className="flex-1 relative bg-slate-50 overflow-hidden cursor-crosshair select-none"
             onMouseDown={handleCanvasMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
           >
             {/* Zoom Controls */}
-            <div className="absolute top-4 left-4 z-10 flex flex-col gap-1 bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg p-1 shadow-xl">
+            <div className="absolute top-4 left-4 z-10 flex flex-col gap-1 bg-white/90 backdrop-blur border border-slate-200 rounded-lg p-1 shadow-sm">
               <button
                 onClick={() => setZoom((z) => Math.min(z + 0.15, 2.2))}
-                className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors"
+                className="p-1.5 hover:bg-slate-100 text-slate-600 hover:text-slate-900 rounded transition-colors"
                 title="Zoom In"
               >
                 <ZoomIn className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setZoom((z) => Math.max(z - 0.15, 0.4))}
-                className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors"
+                className="p-1.5 hover:bg-slate-100 text-slate-600 hover:text-slate-900 rounded transition-colors"
                 title="Zoom Out"
               >
                 <ZoomOut className="w-4 h-4" />
@@ -726,7 +726,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                   setPan({ x: 0, y: 0 });
                   alphaRef.current = 0.5;
                 }}
-                className="p-1.5 hover:bg-slate-800 text-slate-300 hover:text-white rounded transition-colors"
+                className="p-1.5 hover:bg-slate-100 text-slate-600 hover:text-slate-900 rounded transition-colors"
                 title="Reset View"
               >
                 <RotateCcw className="w-4 h-4" />
@@ -879,10 +879,10 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                       >
                         <div className="flex justify-center w-full">
                           <span
-                            className={`px-2 py-0.5 rounded-md text-[11px] font-semibold text-center truncate max-w-[150px] shadow-lg border ${
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-semibold text-center truncate max-w-[150px] shadow-sm border ${
                               isSelected
-                                ? 'bg-sky-950 text-white border-sky-400 font-bold ring-1 ring-sky-400'
-                                : 'bg-[#0f172a]/95 text-slate-100 border-slate-700'
+                                ? 'bg-blue-600 text-white border-blue-600 font-bold ring-1 ring-blue-600'
+                                : 'bg-white/95 text-slate-900 border-slate-200'
                             }`}
                           >
                             {node.label}
@@ -897,11 +897,11 @@ export const CompanyKnowledgeGraph: React.FC = () => {
           </div>
 
           {/* 4. Entity Inspector Sidebar */}
-          <div className="w-84 lg:w-96 bg-[#0c1322] border-l border-slate-800 flex flex-col justify-between overflow-hidden shadow-2xl z-20 shrink-0">
+          <div className="w-84 lg:w-96 bg-white border-l border-slate-200 flex flex-col justify-between overflow-hidden shadow-sm z-20 shrink-0">
             {selectedNode ? (
               <div className="flex-1 flex flex-col h-full overflow-hidden">
                 {/* Header */}
-                <div className="p-4 border-b border-slate-800 bg-slate-900/70">
+                <div className="p-4 border-b border-slate-200 bg-slate-50">
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded border uppercase ${getNodeColor(selectedNode.category).tagBg}`}>
@@ -909,22 +909,22 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                       </span>
                       <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase ${
                         selectedNode.is_static
-                          ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800/60'
-                          : 'bg-purple-950/70 text-purple-300 border-purple-800/60'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-purple-50 text-purple-700 border-purple-200'
                       }`}>
                         {selectedNode.is_static ? 'STATIC TOPOLOGY' : 'DOCUMENT DERIVED'}
                       </span>
                     </div>
-                    <span className="text-[10px] font-mono text-slate-300 uppercase flex items-center gap-1">
-                      <Shield className="w-3 h-3 text-sky-400" />
+                    <span className="text-[10px] font-mono text-slate-500 uppercase flex items-center gap-1">
+                      <Shield className="w-3 h-3 text-blue-500" />
                       <span>{selectedNode.clearance.toUpperCase()} CLEARANCE</span>
                     </span>
                   </div>
 
-                  <h2 className="text-sm font-bold text-white tracking-tight leading-snug">
+                  <h2 className="text-sm font-bold text-slate-900 tracking-tight leading-snug">
                     {selectedNode.label}
                   </h2>
-                  <span className="text-[11px] font-mono text-sky-400 block mt-0.5">
+                  <span className="text-[11px] font-mono text-blue-600 block mt-0.5">
                     ID: {selectedNode.id}
                   </span>
                 </div>
@@ -933,27 +933,27 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                 <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
                   {/* Overview */}
                   <div>
-                    <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                    <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                       Entity Specification
                     </h3>
-                    <p className="text-slate-200 leading-relaxed bg-slate-900/90 p-3 rounded-lg border border-slate-800">
+                    <p className="text-slate-700 leading-relaxed bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
                       {selectedNode.description}
                     </p>
                   </div>
 
                   {/* Telemetry Properties */}
                   <div>
-                    <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                    <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center justify-between">
                       <span>Telemetry &amp; Operating Attributes</span>
-                      <span className="text-[10px] text-slate-500 font-mono">
+                      <span className="text-[10px] text-slate-400 font-mono">
                         {Object.keys(selectedNode.properties).length} ATTRIBUTES
                       </span>
                     </h3>
-                    <div className="bg-slate-900/90 rounded-lg border border-slate-800 divide-y divide-slate-800 overflow-hidden">
+                    <div className="bg-white rounded-lg border border-slate-200 divide-y divide-slate-200 overflow-hidden shadow-sm">
                       {Object.entries(selectedNode.properties).map(([k, v]) => (
                         <div key={k} className="p-2.5 flex items-center justify-between text-[11px]">
-                          <span className="font-mono text-slate-400">{k}</span>
-                          <span className="font-semibold text-sky-300 text-right max-w-[55%] truncate font-mono">
+                          <span className="font-mono text-slate-500">{k}</span>
+                          <span className="font-semibold text-blue-600 text-right max-w-[55%] truncate font-mono">
                             {v}
                           </span>
                         </div>
@@ -963,44 +963,44 @@ export const CompanyKnowledgeGraph: React.FC = () => {
 
                   {/* Source Evidence & Grounding */}
                   <div>
-                    <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                    <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center justify-between">
                       <span>Source Evidence &amp; Grounding</span>
-                      <span className="text-[10px] text-slate-500 font-mono">
+                      <span className="text-[10px] text-slate-400 font-mono">
                         {selectedNode.is_static ? 'FACILITY REGISTRY' : `${selectedNode.provenance?.length || 0} CITATION(S)`}
                       </span>
                     </h3>
                     {selectedNode.is_static ? (
-                      <div className="bg-slate-900/90 rounded-lg border border-slate-800 p-3 text-[11px]">
-                        <div className="flex items-center gap-1.5 text-emerald-400 font-semibold mb-1">
+                      <div className="bg-white rounded-lg border border-slate-200 p-3 text-[11px] shadow-sm">
+                        <div className="flex items-center gap-1.5 text-emerald-600 font-semibold mb-1">
                           <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                           <span>Base Facility Topology</span>
                         </div>
-                        <p className="text-slate-400 leading-relaxed text-[11px]">
+                        <p className="text-slate-600 leading-relaxed text-[11px]">
                           Seeded from verified MRPL refinery P&amp;ID asset master registry. Immutable operational baseline.
                         </p>
                       </div>
                     ) : selectedNode.provenance && selectedNode.provenance.length > 0 ? (
                       <div className="space-y-2">
                         {selectedNode.provenance.map((prov, pidx) => (
-                          <div key={pidx} className="bg-slate-900/90 rounded-lg border border-slate-800 p-3 text-[11px] space-y-1.5">
+                          <div key={pidx} className="bg-white rounded-lg border border-slate-200 p-3 text-[11px] space-y-1.5 shadow-sm">
                             <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-1.5 text-sky-300 font-semibold truncate">
-                                <FileText className="w-3.5 h-3.5 shrink-0 text-sky-400" />
+                              <div className="flex items-center gap-1.5 text-blue-700 font-semibold truncate">
+                                <FileText className="w-3.5 h-3.5 shrink-0 text-blue-500" />
                                 <span className="truncate">{prov.filename || 'Ingested Document'}</span>
                               </div>
                               {prov.confidence !== undefined && prov.confidence !== null && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-950 text-sky-400 border border-sky-800/50 font-mono">
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-mono">
                                   {Math.round(prov.confidence * 100)}% conf
                                 </span>
                               )}
                             </div>
-                            <div className="text-[10px] text-slate-400 flex items-center gap-2 font-mono">
+                            <div className="text-[10px] text-slate-500 flex items-center gap-2 font-mono">
                               {prov.page_number && <span>Page {prov.page_number}</span>}
                               {prov.chunk_id && <span>• Chunk {prov.chunk_id}</span>}
-                              <span className="uppercase text-amber-400/80">• {prov.clearance || 'viewer'}</span>
+                              <span className="uppercase text-amber-600">• {prov.clearance || 'viewer'}</span>
                             </div>
                             {prov.source_snippet && (
-                              <div className="bg-slate-950/70 p-2 rounded border border-slate-850 text-slate-300 italic text-[11px] leading-relaxed">
+                              <div className="bg-slate-50 p-2 rounded border border-slate-200 text-slate-600 italic text-[11px] leading-relaxed">
                                 "{prov.source_snippet}"
                               </div>
                             )}
@@ -1008,7 +1008,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                         ))}
                       </div>
                     ) : (
-                      <div className="bg-slate-900/90 rounded-lg border border-slate-800 p-3 text-[11px] text-slate-400">
+                      <div className="bg-slate-50 rounded-lg border border-slate-200 p-3 text-[11px] text-slate-500 shadow-sm">
                         Derived dynamically from ingested operational records.
                       </div>
                     )}
@@ -1016,7 +1016,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
 
                   {/* Connected Pathways */}
                   <div>
-                    <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                    <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center justify-between">
                       <span>Connected Topology ({selectedNodeEdges.length})</span>
                     </h3>
 
@@ -1030,17 +1030,17 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                           <div
                             key={idx}
                             onClick={() => targetNode && setSelectedNodeId(targetNode.id)}
-                            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-sky-500/50 cursor-pointer flex items-center justify-between gap-2 transition-all"
+                            className="p-2 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 hover:border-blue-500/50 cursor-pointer flex items-center justify-between gap-2 transition-all shadow-sm"
                           >
                             <div className="min-w-0">
-                              <span className="text-[10px] font-mono text-sky-400 block truncate font-semibold">
+                              <span className="text-[10px] font-mono text-blue-600 block truncate font-semibold">
                                 {e.label} {isSource ? '→' : '←'}
                               </span>
-                              <span className="text-[11px] font-medium text-slate-200 truncate block">
+                              <span className="text-[11px] font-medium text-slate-700 truncate block">
                                 {targetNode ? targetNode.label : targetId}
                               </span>
                             </div>
-                            <ArrowRight className="w-3 h-3 text-slate-400 shrink-0" />
+                            <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
                           </div>
                         );
                       })}
@@ -1049,12 +1049,12 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                 </div>
 
                 {/* Action Bar */}
-                <div className="p-3.5 bg-slate-900/95 border-t border-slate-800">
+                <div className="p-3.5 bg-white border-t border-slate-200">
                   <button
                     onClick={() => handleDispatchQuery(selectedNode)}
-                    className="w-full py-2.5 px-3 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white text-xs font-semibold rounded-lg shadow-md shadow-sky-600/30 flex items-center justify-center gap-2 transition-all"
+                    className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow-sm shadow-blue-600/30 flex items-center justify-center gap-2 transition-all"
                   >
-                    <Sparkles className="w-3.5 h-3.5 text-sky-200" />
+                    <Sparkles className="w-3.5 h-3.5 text-blue-200" />
                     <span>Query Sovereign Agent About Entity</span>
                   </button>
                 </div>
@@ -1062,7 +1062,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-slate-500">
                 <Database className="w-8 h-8 mb-2 opacity-40 text-slate-400" />
-                <p className="text-xs font-medium text-slate-300">Select any entity on the canvas</p>
+                <p className="text-xs font-medium text-slate-600">Select any entity on the canvas</p>
                 <p className="text-[11px] text-slate-500 mt-1 max-w-[200px]">
                   Click or drag any node to view real-time attributes and telemetry.
                 </p>
@@ -1072,31 +1072,31 @@ export const CompanyKnowledgeGraph: React.FC = () => {
         </div>
       ) : (
         /* 5. ROLE-BASED DATABASE VIEW (Enterprise RBAC Matrix Table) */
-        <div className="flex-1 overflow-y-auto p-6 bg-[#070b14]">
+        <div className="flex-1 overflow-y-auto p-6 bg-slate-50">
           <div className="max-w-7xl mx-auto space-y-4">
             {/* Table Header Info */}
-            <div className="flex items-center justify-between bg-slate-900/80 p-4 rounded-xl border border-slate-800 shadow-lg">
+            <div className="flex items-center justify-between bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
               <div>
-                <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                  <Database className="w-4 h-4 text-sky-400" />
+                <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-blue-500" />
                   <span>Enterprise Relational Database Matrix</span>
                 </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
+                <p className="text-xs text-slate-500 mt-0.5">
                   Full tabular record view of company plant units, mechanical assets, telemetry probes, failure modes, and live documents.
                 </p>
               </div>
               <div className="flex items-center gap-2 text-xs">
-                <span className="text-slate-400">Current Role Filter:</span>
-                <span className="px-2.5 py-1 rounded bg-sky-500/20 text-sky-300 font-bold border border-sky-500/40 uppercase">
+                <span className="text-slate-500">Current Role Filter:</span>
+                <span className="px-2.5 py-1 rounded bg-blue-50 text-blue-700 font-bold border border-blue-200 uppercase">
                   {selectedClearance.toUpperCase()}
                 </span>
               </div>
             </div>
 
             {/* Main Data Table */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden shadow-xl">
+            <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
               <table className="w-full text-left text-xs border-collapse font-sans">
-                <thead className="bg-slate-800/90 text-slate-300 font-semibold border-b border-slate-700">
+                <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
                   <tr>
                     <th className="py-3 px-4">Entity ID &amp; Tag</th>
                     <th className="py-3 px-4">Name &amp; Description</th>
@@ -1106,22 +1106,22 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                     <th className="py-3 px-3 text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/80 text-slate-200">
+                <tbody className="divide-y divide-slate-200 text-slate-700">
                   {visibleNodes.map((n) => {
                     const colors = getNodeColor(n.category);
                     const isRestricted = n.category === 'restricted_stub';
 
                     return (
-                      <tr key={n.id} className="hover:bg-slate-800/40 transition-colors">
+                      <tr key={n.id} className="hover:bg-slate-50 transition-colors">
                         {/* ID */}
-                        <td className="py-3 px-4 font-mono font-bold text-sky-400 whitespace-nowrap">
+                        <td className="py-3 px-4 font-mono font-bold text-blue-600 whitespace-nowrap">
                           {n.id}
                         </td>
 
                         {/* Name & Desc */}
                         <td className="py-3 px-4 max-w-xs">
-                          <div className="font-semibold text-white truncate">{n.label}</div>
-                          <div className="text-[11px] text-slate-400 line-clamp-1 mt-0.5">
+                          <div className="font-semibold text-slate-900 truncate">{n.label}</div>
+                          <div className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">
                             {n.description}
                           </div>
                         </td>
@@ -1138,10 +1138,10 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                           <span
                             className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border uppercase flex items-center gap-1 w-fit ${
                               n.clearance === 'admin'
-                                ? 'bg-rose-950/80 text-rose-300 border-rose-800'
+                                ? 'bg-rose-50 text-rose-700 border-rose-200'
                                 : n.clearance === 'operator'
-                                ? 'bg-amber-950/80 text-amber-300 border-amber-800'
-                                : 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
+                                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                             }`}
                           >
                             <Shield className="w-2.5 h-2.5" />
@@ -1155,9 +1155,9 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                             {Object.entries(n.properties).slice(0, 3).map(([k, v]) => (
                               <span
                                 key={k}
-                                className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] font-mono text-slate-300 truncate"
+                                className="px-1.5 py-0.5 rounded bg-slate-50 border border-slate-200 text-[10px] font-mono text-slate-700 truncate"
                               >
-                                <strong className="text-slate-400">{k}:</strong> {v}
+                                <strong className="text-slate-500">{k}:</strong> {v}
                               </span>
                             ))}
                             {Object.keys(n.properties).length > 3 && (
@@ -1173,7 +1173,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                           {!isRestricted ? (
                             <button
                               onClick={() => handleDispatchQuery(n)}
-                              className="px-2.5 py-1 rounded bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/40 text-[11px] font-semibold transition-all inline-flex items-center gap-1"
+                              className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white border border-blue-200 shadow-sm text-[11px] font-semibold transition-all inline-flex items-center gap-1"
                             >
                               <Sparkles className="w-3 h-3" />
                               <span>Query Agent</span>

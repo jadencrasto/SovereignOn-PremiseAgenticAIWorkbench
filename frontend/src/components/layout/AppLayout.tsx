@@ -109,75 +109,75 @@ export const AppLayout: React.FC = () => {
     <div className="flex flex-col h-screen w-screen bg-[#f0f7ff] text-[#0f172a] overflow-hidden font-sans select-text">
       <ToastContainer />
 
-      {/* Top Header Bar (White & Light Blue Industrial Style) */}
-      <header className="border-b-2 border-[#cbd5e1] bg-white px-4 py-2 flex flex-col xl:flex-row xl:items-center justify-between gap-2 shrink-0 select-none brutal-shadow-sky z-20 font-mono">
+      {/* Top Header Bar */}
+      <header className="border-b border-slate-200 bg-white px-5 py-3 flex flex-col xl:flex-row xl:items-center justify-between gap-3 shrink-0 select-none shadow-sm z-20 font-sans">
         {/* Top Row: Brand & Quick Role Route Switcher */}
-        <div className="flex items-center justify-between gap-3 shrink-0 flex-wrap">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 bg-[#0284c7] border-2 border-black flex items-center justify-center text-white font-black font-display text-sm shadow-sm">
+        <div className="flex items-center justify-between gap-4 shrink-0 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 bg-blue-500 rounded-lg flex items-center justify-center text-white font-bold font-display text-lg shadow-sm">
               S
             </div>
             <div>
-              <div className="font-display font-black text-sm text-[#0f172a] tracking-tight leading-none uppercase">
-                SOVEREIGN // STATION
+              <div className="font-display font-semibold text-lg text-slate-800 tracking-tight leading-none">
+                Sovereign Dashboard
               </div>
-              <div className="text-[9px] text-slate-500 font-mono tracking-wider mt-0.5 font-bold">
-                AIR-GAPPED AGENTIC WORKBENCH
+              <div className="text-[10px] text-slate-500 font-medium tracking-wide mt-1 uppercase">
+                Air-Gapped Agentic Workbench
               </div>
             </div>
           </div>
 
           {/* Quick Role View Direct Links (/admin, /manager, /user) */}
-          <div className="flex items-center gap-1 bg-[#f1f5f9] p-1 border border-[#cbd5e1] rounded">
-            <span className="text-[9px] font-bold text-slate-500 px-1 uppercase">ROLES:</span>
+          <div className="flex items-center gap-1.5 bg-slate-50 p-1.5 border border-slate-200 rounded-lg">
+            <span className="text-[10px] font-medium text-slate-500 px-1 uppercase">Roles:</span>
             <button
               onClick={() => handleNavigateToRole('/admin')}
-              className="px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-rose-50 text-rose-700 hover:bg-rose-600 hover:text-white border border-rose-200 transition-all"
+              className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-white text-slate-700 hover:bg-slate-100 border border-slate-200 transition-all shadow-sm"
               title="View as Administrator (/admin)"
             >
-              👑 /admin
+              👑 Admin
             </button>
             <button
               onClick={() => handleNavigateToRole('/manager')}
-              className="px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-amber-50 text-amber-800 hover:bg-amber-600 hover:text-white border border-amber-200 transition-all"
+              className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-white text-slate-700 hover:bg-slate-100 border border-slate-200 transition-all shadow-sm"
               title="View as Operations Manager (/manager)"
             >
-              🛠️ /manager
+              🛠️ Manager
             </button>
             <button
               onClick={() => handleNavigateToRole('/user')}
-              className="px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white border border-emerald-200 transition-all"
+              className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-white text-slate-700 hover:bg-slate-100 border border-slate-200 transition-all shadow-sm"
               title="View as Standard User (/user)"
             >
-              👤 /user
+              👤 User
             </button>
           </div>
 
           {/* Active Model Indicator Chip */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f0f9ff] border border-[#bae6fd] text-[10px] font-bold text-[#0369a1]">
-            <span className="text-slate-400">MODEL:</span>
-            <span className="text-[#0284c7] uppercase">{selectedModel || 'QWEN2.5:7B'}</span>
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-100 rounded-full text-xs font-medium text-blue-700">
+            <span className="text-blue-400">Model:</span>
+            <span>{selectedModel || 'QWEN2.5:7B'}</span>
           </div>
 
           {/* User Profile & Airgap Status */}
-          <div className="flex items-center gap-2">
-            <div className="px-2 py-0.5 bg-[#f0f9ff] border border-[#bae6fd] text-[9px] font-bold flex items-center gap-1 text-[#0369a1]">
-              <span className={`w-1.5 h-1.5 ${isBackendConnected ? 'bg-[#059669]' : 'bg-[#e11d48]'}`} />
-              <span>{isBackendConnected ? 'AIRGAP_OK' : 'OFFLINE'}</span>
+          <div className="flex items-center gap-3">
+            <div className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-[10px] font-medium flex items-center gap-1.5 text-slate-600">
+              <span className={`w-2 h-2 rounded-full ${isBackendConnected ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+              <span>{isBackendConnected ? 'Connected' : 'Offline'}</span>
             </div>
 
             <button
               onClick={() => setIsLoginOpen(true)}
-              className="px-2.5 py-1 bg-white border border-[#cbd5e1] hover:border-[#0284c7] text-slate-700 font-bold text-[11px] uppercase flex items-center gap-1"
+              className="px-3 py-1.5 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 rounded-full text-slate-700 font-medium text-xs flex items-center gap-1.5 transition-colors shadow-sm"
             >
-              <UserIcon className="w-3 h-3 text-[#0284c7]" />
-              <span>{user ? user.username : 'OPERATOR'}</span>
+              <UserIcon className="w-3.5 h-3.5 text-blue-500" />
+              <span>{user ? user.username : 'Operator'}</span>
             </button>
           </div>
         </div>
 
-        {/* Navigation Tabs Strip (All 13 Modules Visible) */}
-        <nav className="flex items-center flex-wrap gap-1 bg-[#f8fafc] border border-[#cbd5e1] p-1">
+        {/* Navigation Tabs Strip */}
+        <nav className="flex items-center flex-wrap gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1.5">
           {allTabs.map((tab) => {
             const isActive = activeTab === tab.id;
             const Icon = tab.icon;
@@ -186,16 +186,16 @@ export const AppLayout: React.FC = () => {
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 title={tab.label}
-                className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold uppercase transition-all whitespace-nowrap ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all whitespace-nowrap ${
                   isActive
-                    ? 'bg-[#0284c7] text-white border border-black brutal-shadow-dark font-black'
-                    : 'text-slate-600 hover:text-[#0284c7] hover:bg-[#e0f2fe] border border-transparent'
+                    ? 'bg-white text-blue-600 shadow-sm border border-slate-200'
+                    : 'text-slate-600 hover:text-blue-600 hover:bg-slate-100/50 border border-transparent'
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
-                <span>{tab.shortLabel}</span>
+                <span>{tab.label}</span>
                 {tab.count !== undefined && tab.count > 0 && (
-                  <span className={`text-[9px] px-1 py-0.2 ${isActive ? 'bg-black text-white' : 'bg-[#e2e8f0] text-[#0369a1]'}`}>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-600'}`}>
                     {tab.count}
                   </span>
                 )}

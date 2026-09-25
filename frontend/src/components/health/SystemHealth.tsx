@@ -53,15 +53,15 @@ export const SystemHealth: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-auto bg-[#090d16] text-slate-100 p-6 space-y-6">
+    <div className="flex-1 flex flex-col h-full overflow-auto bg-white text-slate-900 p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-            <Activity className="w-5 h-5 text-emerald-400" />
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+            <Activity className="w-5 h-5 text-blue-600" />
             System Health &amp; Observability
           </h1>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-slate-500 mt-1">
             Real-time dependency readiness checks (polled safely without model inference overhead).
           </p>
         </div>
@@ -73,35 +73,35 @@ export const SystemHealth: React.FC = () => {
           <button
             onClick={loadHealth}
             disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-xs font-mono text-slate-300 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-mono text-slate-600 transition-colors disabled:opacity-50 shadow-sm"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-400' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-blue-600' : ''}`} />
             <span>Check Now</span>
           </button>
         </div>
       </div>
 
       {loading && !data ? (
-        <div className="flex-1 flex items-center justify-center text-slate-400 text-xs font-mono gap-2 py-16">
-          <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs font-mono gap-2 py-16">
+          <RefreshCw className="w-4 h-4 animate-spin text-blue-600" />
           <span>Evaluating local dependency readiness...</span>
         </div>
       ) : error ? (
-        <div className="p-4 bg-rose-950/40 border border-rose-800/60 rounded-xl text-rose-300 text-xs font-mono">
+        <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-600 text-xs font-mono">
           {error}
         </div>
       ) : data ? (
         <div className="space-y-4 max-w-4xl">
           {/* Status summary card */}
-          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-4 flex items-center justify-between shadow-md">
+          <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
             <div className="flex items-center gap-3">
               {getStatusDot(data.status)}
-              <span className="text-sm font-semibold uppercase tracking-wider text-slate-200 font-mono">
+              <span className="text-sm font-semibold uppercase tracking-wider text-slate-700 font-mono">
                 System Status: {data.status}
               </span>
             </div>
             {data.cached && (
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-500">
                 Cached (5s TTL)
               </span>
             )}
@@ -112,20 +112,20 @@ export const SystemHealth: React.FC = () => {
             {data.components.map((comp) => (
               <div
                 key={comp.name}
-                className="bg-[#0d1424]/60 border border-slate-800 rounded-xl p-4 space-y-2 hover:border-slate-700 transition"
+                className="bg-white border border-slate-200 rounded-xl p-4 space-y-2 hover:border-slate-300 transition shadow-sm"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     {getStatusDot(comp.status)}
-                    <h3 className="font-semibold text-sm font-mono text-slate-200">{comp.name}</h3>
+                    <h3 className="font-semibold text-sm font-mono text-slate-800">{comp.name}</h3>
                   </div>
                   {comp.latency_ms !== null && comp.latency_ms !== undefined && (
-                    <span className="text-[11px] font-mono text-slate-400">
+                    <span className="text-[11px] font-mono text-slate-500">
                       {comp.latency_ms.toFixed(1)} ms
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-slate-400 leading-relaxed font-sans">{comp.details}</p>
+                <p className="text-xs text-slate-600 leading-relaxed font-sans">{comp.details}</p>
               </div>
             ))}
           </div>

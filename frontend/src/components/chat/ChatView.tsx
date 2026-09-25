@@ -458,7 +458,7 @@ export const ChatView: React.FC = () => {
                     toolEvents: [
                       ...(m.toolEvents || []),
                       {
-                        type: 'plan_step',
+                        type: 'plan_step' as any,
                         tool: data.tool_name || data.step_id,
                         status: data.status,
                       },
@@ -651,24 +651,24 @@ export const ChatView: React.FC = () => {
   }, [handleSendMessage]);
 
   return (
-    <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-[#090d16] relative font-sans">
+    <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-white relative font-sans">
       {/* 1. Main Workspace Top Header */}
-      <div className="h-13 border-b border-slate-800/90 px-5 flex items-center justify-between shrink-0 bg-[#0c1322]/95 backdrop-blur-md z-20 shadow-md">
+      <div className="h-13 border-b border-slate-200 px-5 flex items-center justify-between shrink-0 bg-white/95 backdrop-blur-md z-20 shadow-sm">
         <div className="flex items-center gap-3">
           {/* History Toggle Button */}
           <button
             onClick={() => setIsHistoryOpen(!isHistoryOpen)}
-            className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-2 transition-all ${
+            className={`px-3 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-2 transition-all ${
               isHistoryOpen
-                ? 'bg-sky-600 text-white border-sky-500 shadow-md shadow-sky-600/30'
-                : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-white'
+                ? 'bg-blue-50 text-blue-700 border-blue-200 shadow-sm'
+                : 'bg-white text-slate-600 border-slate-200 hover:border-blue-300 hover:text-blue-600 shadow-sm'
             }`}
             title="Open Chat History"
           >
-            <Clock className="w-3.5 h-3.5 text-sky-400" />
+            <Clock className="w-4 h-4 text-blue-500" />
             <span>History</span>
             {sessionCount > 0 && (
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
                 {sessionCount}
               </span>
             )}
@@ -677,19 +677,19 @@ export const ChatView: React.FC = () => {
           {/* New Chat Button */}
           <button
             onClick={handleStartNewChat}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all"
+            className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:border-blue-300 text-slate-600 hover:text-blue-600 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
             title="Start New Conversation"
           >
-            <Plus className="w-3.5 h-3.5 text-sky-400" />
+            <Plus className="w-4 h-4 text-blue-500" />
             <span>New Chat</span>
           </button>
 
           {/* Current Session Title */}
-          <div className="hidden sm:flex items-center gap-2 pl-2 border-l border-slate-800">
-            <span className="text-xs font-semibold text-slate-200 truncate max-w-[280px]">
+          <div className="hidden sm:flex items-center gap-2 pl-3 border-l border-slate-200">
+            <span className="text-sm font-semibold text-slate-800 truncate max-w-[280px]">
               {sessionTitle}
             </span>
-            <span className="text-[10px] font-mono text-slate-500">
+            <span className="text-xs text-slate-400">
               ({activeSessionId.substring(0, 8)}...)
             </span>
           </div>
@@ -697,10 +697,10 @@ export const ChatView: React.FC = () => {
 
         {/* Right Status */}
         <div className="flex items-center gap-3 text-xs">
-          <span className="text-[11px] font-mono text-slate-400 hidden md:inline">
-            Model: <strong className="text-sky-400">{selectedModel}</strong>
+          <span className="text-xs text-slate-500 hidden md:inline">
+            Model: <strong className="text-blue-600">{selectedModel}</strong>
           </span>
-          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
+          <span className="text-xs px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-600 font-medium shadow-sm">
             {messages.length} {messages.length === 1 ? 'msg' : 'msgs'}
           </span>
         </div>

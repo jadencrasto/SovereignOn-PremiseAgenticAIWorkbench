@@ -144,17 +144,17 @@ const CodeBlock: React.FC<{ language: string; code: string }> = ({ language, cod
   };
 
   return (
-    <div className="relative my-3 rounded-lg border border-slate-800 bg-[#070b14] overflow-hidden text-xs shadow-md shadow-black/40">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 font-mono text-[11px] text-slate-400">
-        <span className="text-sky-400 font-semibold">{language || 'text'}</span>
+    <div className="relative my-3 rounded-lg border border-slate-200 bg-white overflow-hidden text-xs shadow-sm">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b border-slate-200 font-mono text-[11px] text-slate-500">
+        <span className="text-blue-600 font-semibold">{language || 'text'}</span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 hover:text-white transition-colors text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+          className="flex items-center gap-1 hover:text-slate-900 transition-colors text-[10px] px-2 py-0.5 rounded bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 shadow-sm"
         >
           {copied ? (
             <>
-              <Check className="w-3 h-3 text-emerald-400" />
-              <span className="text-emerald-400 font-medium">Copied</span>
+              <Check className="w-3 h-3 text-blue-600" />
+              <span className="text-blue-600 font-medium">Copied</span>
             </>
           ) : (
             <>
@@ -164,8 +164,8 @@ const CodeBlock: React.FC<{ language: string; code: string }> = ({ language, cod
           )}
         </button>
       </div>
-      <div className="p-3 overflow-x-auto bg-[#070b14]">
-        <pre className="!bg-transparent !p-0 !m-0 !border-0 font-mono text-slate-200 text-xs leading-relaxed">
+      <div className="p-3 overflow-x-auto bg-slate-50">
+        <pre className="!bg-transparent !p-0 !m-0 !border-0 font-mono text-slate-700 text-xs leading-relaxed">
           <code>{code}</code>
         </pre>
       </div>

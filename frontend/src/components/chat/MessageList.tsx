@@ -56,17 +56,17 @@ export const MessageList: React.FC<MessageListProps> = ({
     return (
       <div className="flex-1 flex flex-col justify-center p-8 max-w-5xl mx-auto select-none space-y-6">
         {/* Header Block */}
-        <div className="border-2 border-[#cbd5e1] bg-white text-[#0f172a] p-6 brutal-shadow-blue">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b-2 border-[#f1f5f9] pb-3 mb-3">
-            <div className="font-display font-black text-2xl tracking-tighter uppercase text-[#0f172a]">
-              SOVEREIGN // INDUSTRIAL AGENT TERMINAL
+        <div className="border border-slate-200 rounded-xl bg-white text-slate-800 p-8 shadow-sm">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-100 pb-4 mb-4">
+            <div className="font-display font-semibold text-2xl tracking-tight text-slate-900">
+              Sovereign Assistant
             </div>
-            <span className="font-mono text-xs font-black px-2.5 py-1 bg-[#0284c7] text-white uppercase self-start md:self-auto">
-              ZERO-EGRESS &bull; 100% LOCAL
+            <span className="font-sans text-xs font-semibold px-3 py-1 bg-blue-50 text-blue-600 rounded-full border border-blue-100 self-start md:self-auto">
+              Secure &bull; Local
             </span>
           </div>
-          <p className="font-mono text-xs font-bold leading-relaxed text-slate-600 max-w-3xl">
-            AUTONOMOUS ON-PREMISE ENGINE FOR REFINERY QA, MECHANICAL NDT CORROSION ANALYSIS, AND EMERGENCY INTERLOCK DISPATCH. ALL INFERENCE EXCLUSIVELY ON THIS HOST.
+          <p className="font-sans text-sm font-medium leading-relaxed text-slate-600 max-w-3xl">
+            Autonomous agent for analysis, data QA, and intelligent workflows. All inference runs securely on your local machine.
           </p>
         </div>
 
@@ -79,25 +79,25 @@ export const MessageList: React.FC<MessageListProps> = ({
                 "Read the lab dataset 'mrpl_lab_composition_test.csv' and cross-check the chemical composition values against our internal refinery quality specifications. Identify all deviations exceeding maximum allowable thresholds, calculate the percentage variance for each, and generate a styled compliance report 'mrpl_chemical_compliance_report.xlsx' with pass/fail conditional formatting. Finally, verify the generated report."
               )
             }
-            className="border-2 border-[#cbd5e1] bg-white p-5 cursor-pointer brutal-btn hover:border-[#0284c7] brutal-shadow-blue flex flex-col justify-between space-y-4"
+            className="border border-slate-200 rounded-xl bg-white p-6 cursor-pointer hover:border-blue-300 hover:shadow-md transition-all shadow-sm flex flex-col justify-between space-y-4"
           >
-            <div className="space-y-2">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-2xl font-black font-display text-[#0284c7]">01</span>
-                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#e0f2fe] text-[#0369a1] uppercase border border-[#bae6fd]">
-                  CSV &rarr; XLSX
+                <span className="text-xl font-bold font-display text-blue-500">Data QA</span>
+                <span className="text-[10px] font-semibold px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
+                  CSV to XLSX
                 </span>
               </div>
-              <h3 className="font-display font-black text-sm uppercase text-[#0f172a] tracking-tight">
-                Hydrocarbon Chemical QA
+              <h3 className="font-display font-semibold text-base text-slate-800">
+                Data Quality Assurance
               </h3>
-              <p className="font-sans text-xs text-slate-600 leading-normal">
-                Cross-reference batch composition vs MRPL limit standard. Compute tolerances and build verified Excel artifact.
+              <p className="font-sans text-sm text-slate-600 leading-normal">
+                Cross-reference data against standards. Compute tolerances and build verified Excel artifacts.
               </p>
             </div>
-            <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between text-xs font-bold text-[#0284c7]">
-              <span>[RUN PROCEDURE]</span>
-              <ArrowUpRight className="w-4 h-4" />
+            <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-blue-600 group">
+              <span>Run Example</span>
+              <ArrowUpRight className="w-4 h-4 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" />
             </div>
           </div>
 
@@ -108,25 +108,25 @@ export const MessageList: React.FC<MessageListProps> = ({
                 "Analyze the inspection image of valve MOV-4102-B in the Desalter Unit. Identify visible corrosion defects, cross-reference with our equipment maintenance manual, and produce an inspection advisory with recommended remedial action."
               )
             }
-            className="border-2 border-[#cbd5e1] bg-white p-5 cursor-pointer brutal-btn hover:border-[#2563eb] brutal-shadow-sky flex flex-col justify-between space-y-4"
+            className="border border-slate-200 rounded-xl bg-white p-6 cursor-pointer hover:border-blue-400 hover:shadow-md transition-all shadow-sm flex flex-col justify-between space-y-4"
           >
-            <div className="space-y-2">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-2xl font-black font-display text-[#2563eb]">02</span>
-                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#dbeafe] text-[#1d4ed8] uppercase border border-[#bfdbfe]">
-                  VLM &rarr; SOP
+                <span className="text-xl font-bold font-display text-blue-600">Visual</span>
+                <span className="text-[10px] font-semibold px-2 py-1 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100">
+                  Image Analysis
                 </span>
               </div>
-              <h3 className="font-display font-black text-sm uppercase text-[#0f172a] tracking-tight">
-                Visual NDT Valve Inspection
+              <h3 className="font-display font-semibold text-base text-slate-800">
+                Image Inspection
               </h3>
-              <p className="font-sans text-xs text-slate-600 leading-normal">
-                Examine valve MOV-4102-B photograph for pitting corrosion, query mechanical manual, and generate remedial advisory.
+              <p className="font-sans text-sm text-slate-600 leading-normal">
+                Examine images for defects, query manual, and generate remedial advisory.
               </p>
             </div>
-            <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between text-xs font-bold text-[#2563eb]">
-              <span>[RUN PROCEDURE]</span>
-              <ArrowUpRight className="w-4 h-4" />
+            <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-blue-600 group">
+              <span>Run Example</span>
+              <ArrowUpRight className="w-4 h-4 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" />
             </div>
           </div>
 
@@ -137,25 +137,25 @@ export const MessageList: React.FC<MessageListProps> = ({
                 "Alert: Pressure transmitter PT-4011 on Flare Knock-Out Drum FKOD-101 has spiked to 2.85 bar gauge. Check the standard emergency operating procedure, list immediate interlock actions, and draft the control room incident dispatch log."
               )
             }
-            className="border-2 border-[#cbd5e1] bg-white p-5 cursor-pointer brutal-btn hover:border-[#d97706] brutal-shadow-yellow flex flex-col justify-between space-y-4"
+            className="border border-slate-200 rounded-xl bg-white p-6 cursor-pointer hover:border-amber-400 hover:shadow-md transition-all shadow-sm flex flex-col justify-between space-y-4"
           >
-            <div className="space-y-2">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-2xl font-black font-display text-[#d97706]">03</span>
-                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#fef3c7] text-[#92400e] uppercase border border-[#fde68a]">
-                  EMERGENCY
+                <span className="text-xl font-bold font-display text-amber-500">Emergency</span>
+                <span className="text-[10px] font-semibold px-2 py-1 rounded-full bg-amber-50 text-amber-600 border border-amber-100">
+                  Critical
                 </span>
               </div>
-              <h3 className="font-display font-black text-sm uppercase text-[#0f172a] tracking-tight">
-                Flare Drum Pressure Anomaly
+              <h3 className="font-display font-semibold text-base text-slate-800">
+                Incident Response
               </h3>
-              <p className="font-sans text-xs text-slate-600 leading-normal">
-                Process transmitter spike, retrieve flare system runbook, verify interlock steps, and log control room dispatch.
+              <p className="font-sans text-sm text-slate-600 leading-normal">
+                Process metrics, retrieve runbooks, verify interlock steps, and draft dispatch logs.
               </p>
             </div>
-            <div className="pt-3 border-t-2 border-[#f1f5f9] flex items-center justify-between text-xs font-bold text-[#d97706]">
-              <span>[RUN PROCEDURE]</span>
-              <ArrowUpRight className="w-4 h-4" />
+            <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-amber-500 group">
+              <span>Run Example</span>
+              <ArrowUpRight className="w-4 h-4 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" />
             </div>
           </div>
         </div>
@@ -167,7 +167,7 @@ export const MessageList: React.FC<MessageListProps> = ({
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className="flex-1 min-h-0 overflow-y-auto px-4 py-6 pb-8 space-y-4 font-mono bg-[#f0f7ff]"
+      className="flex-1 min-h-0 overflow-y-auto px-4 py-6 pb-8 space-y-4 bg-slate-50 font-sans"
     >
       {messages.map((message) => (
         <MessageItem

@@ -64,10 +64,10 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUpload, isUploading }) => 
         onClick={() => !isUploading && fileInputRef.current?.click()}
         className={`p-6 rounded-xl border-2 border-dashed transition-all cursor-pointer text-center select-none ${
           isDragOver
-            ? 'border-emerald-500 bg-emerald-950/20 text-emerald-300'
+            ? 'border-blue-500 bg-blue-50 text-blue-700'
             : isUploading
-            ? 'border-slate-700 bg-slate-900/40 opacity-75 cursor-wait'
-            : 'border-slate-800 bg-[#0d1424]/50 hover:border-slate-700 hover:bg-[#0d1424]'
+            ? 'border-slate-300 bg-slate-100 opacity-75 cursor-wait'
+            : 'border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-blue-50/50'
         }`}
       >
         <input
@@ -82,27 +82,27 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUpload, isUploading }) => 
         <div className="flex flex-col items-center justify-center gap-2 max-w-sm mx-auto">
           <div
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition-transform ${
-              isDragOver ? 'bg-emerald-900/60 text-emerald-400 scale-110' : 'bg-slate-800 text-slate-300'
+              isDragOver ? 'bg-blue-100 text-blue-600 scale-110' : 'bg-white border border-slate-200 text-slate-400 shadow-sm'
             }`}
           >
             {isUploading ? (
-              <Loader2 className="w-6 h-6 animate-spin text-emerald-400" />
+              <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
             ) : (
               <UploadCloud className="w-6 h-6" />
             )}
           </div>
 
           <div>
-            <p className="text-sm font-semibold text-slate-200">
+            <p className="text-sm font-semibold text-slate-700">
               {isUploading ? 'Ingesting, Chunking & Embedding...' : 'Drop documents here to index'}
             </p>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-slate-500 mt-0.5">
               or click to browse from local filesystem
             </p>
           </div>
 
           <div className="flex items-center gap-2 mt-1">
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
               PDF · DOCX · TXT · MD
             </span>
             <span className="text-[10px] text-slate-500 font-mono">Max 50MB</span>
@@ -111,8 +111,8 @@ export const DropZone: React.FC<DropZoneProps> = ({ onUpload, isUploading }) => 
       </div>
 
       {clientError && (
-        <div className="flex items-center gap-2 p-2.5 rounded-lg bg-rose-950/60 border border-rose-800/50 text-rose-300 text-xs font-mono animate-in fade-in">
-          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+        <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-600 text-xs font-mono animate-in fade-in">
+          <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
           <span>{clientError}</span>
         </div>
       )}

@@ -22,9 +22,9 @@ interface ApprovalCardProps {
 }
 
 const riskColors: Record<string, { bg: string; border: string; text: string; badge: string }> = {
-  high: { bg: 'bg-rose-950/30', border: 'border-rose-500/40', text: 'text-rose-400', badge: 'bg-rose-500/20' },
-  medium: { bg: 'bg-amber-950/30', border: 'border-amber-500/40', text: 'text-amber-400', badge: 'bg-amber-500/20' },
-  low: { bg: 'bg-sky-950/30', border: 'border-sky-500/40', text: 'text-sky-400', badge: 'bg-sky-500/20' },
+  high: { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-600', badge: 'bg-rose-100' },
+  medium: { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-600', badge: 'bg-amber-100' },
+  low: { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-600', badge: 'bg-blue-100' },
 };
 
 export const ApprovalCard: React.FC<ApprovalCardProps> = ({
@@ -53,12 +53,12 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({
   };
 
   return (
-    <div className={`my-3 rounded-lg border ${colors.border} ${colors.bg} overflow-hidden`}>
+    <div className={`my-3 rounded-lg border ${colors.border} ${colors.bg} overflow-hidden shadow-sm font-sans`}>
       {/* Header */}
-      <div className="px-4 py-3 border-b border-slate-700/40 flex items-center justify-between">
+      <div className="px-4 py-3 border-b border-slate-200/60 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <ShieldAlert className={`w-4 h-4 ${colors.text} animate-pulse`} />
-          <span className="text-xs font-semibold text-white uppercase tracking-wider">
+          <span className="text-xs font-semibold text-slate-800 uppercase tracking-wider">
             Approval Required
           </span>
         </div>
@@ -70,35 +70,35 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({
       {/* Body */}
       <div className="px-4 py-3 space-y-3">
         {/* Operator notice */}
-        <div className="flex items-start gap-2 p-2 rounded bg-slate-800/40 border border-slate-700/40">
-          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
-          <p className="text-[11px] text-slate-300 leading-tight">
-            The model requested this operation. <strong className="text-white">The operator decides.</strong>
+        <div className="flex items-start gap-2 p-2 rounded-md bg-white/60 border border-slate-200/60">
+          <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+          <p className="text-[11px] text-slate-700 leading-tight">
+            The model requested this operation. <strong className="text-slate-900 font-semibold">The operator decides.</strong>
           </p>
         </div>
 
         {/* Tool info */}
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <Wrench className="w-3.5 h-3.5 text-slate-400" />
-            <span className="text-xs font-mono text-slate-300">{toolName}</span>
+            <Wrench className="w-4 h-4 text-slate-500" />
+            <span className="text-xs font-mono font-medium text-slate-800">{toolName}</span>
           </div>
 
           {reason && (
-            <p className="text-xs text-slate-400 pl-5">{reason}</p>
+            <p className="text-xs text-slate-600 pl-6">{reason}</p>
           )}
 
           {/* Arguments */}
           {Object.keys(toolArgs).length > 0 && (
-            <div className="pl-5">
-              <span className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">
+            <div className="pl-6">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wider font-mono font-medium">
                 Arguments
               </span>
-              <div className="mt-1 p-2 rounded bg-slate-900/60 border border-slate-700/40">
+              <div className="mt-1 p-2.5 rounded-md bg-white border border-slate-200">
                 {Object.entries(toolArgs).map(([key, value]) => (
                   <div key={key} className="flex gap-2 text-[11px] font-mono">
-                    <span className="text-slate-500">{key}:</span>
-                    <span className="text-slate-300 break-all">{String(value)}</span>
+                    <span className="text-slate-500 font-semibold">{key}:</span>
+                    <span className="text-slate-800 break-all">{String(value)}</span>
                   </div>
                 ))}
               </div>
@@ -106,41 +106,41 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({
           )}
 
           {/* Expiry */}
-          <div className="flex items-center gap-1.5 pl-5 text-[10px] text-slate-500 font-mono">
+          <div className="flex items-center gap-1.5 pl-6 text-[10px] text-slate-500 font-mono mt-2">
             <Clock className="w-3 h-3" />
             Expires: {new Date(expiresAt).toLocaleTimeString()}
           </div>
         </div>
 
         {/* Actions */}
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex items-center gap-3 pt-2">
           <button
             onClick={handleApprove}
             disabled={isLoading}
-            className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-medium
-              bg-emerald-600/80 hover:bg-emerald-500/90 text-white border border-emerald-500/40
+            className="flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium
+              bg-emerald-500 hover:bg-emerald-600 text-white
               transition-all disabled:opacity-50 disabled:cursor-not-allowed
-              shadow-sm shadow-emerald-950/50"
+              shadow-sm"
           >
-            <ShieldCheck className="w-3.5 h-3.5" />
+            <ShieldCheck className="w-4 h-4" />
             Approve
           </button>
           <button
             onClick={handleReject}
             disabled={isLoading}
-            className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-medium
-              bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-500/30
-              transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium
+              bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 hover:border-rose-300
+              transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
-            <ShieldX className="w-3.5 h-3.5" />
+            <ShieldX className="w-4 h-4" />
             Reject
           </button>
         </div>
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-1.5 border-t border-slate-700/40 bg-slate-800/20">
-        <span className="text-[10px] font-mono text-slate-500">
+      <div className="px-4 py-2 border-t border-slate-200/60 bg-white/40">
+        <span className="text-[10px] font-mono text-slate-400">
           Approval {approvalId.slice(0, 16)} · Step {stepId}
         </span>
       </div>

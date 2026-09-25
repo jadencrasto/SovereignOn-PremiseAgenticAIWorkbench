@@ -122,15 +122,15 @@ export const AuditDashboard: React.FC = () => {
   }, [selectedEvent]);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#090d16] text-slate-100 p-6 space-y-5">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-white text-slate-900 p-6 space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-            <ShieldAlert className="w-5 h-5 text-amber-400" />
+          <h1 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+            <ShieldAlert className="w-5 h-5 text-amber-500" />
             Audit Log &amp; Event Ledger
           </h1>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-slate-500 mt-1">
             Immutable on-premise ledger recording tool dispatches, human approvals, authentication, and task lifecycles.
           </p>
         </div>
@@ -139,15 +139,15 @@ export const AuditDashboard: React.FC = () => {
           <button
             onClick={loadData}
             disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-xs font-mono text-slate-300 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-mono text-slate-600 transition-colors disabled:opacity-50 shadow-sm"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-400' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-blue-600' : ''}`} />
             <span>Refresh</span>
           </button>
           {hasRole('admin') && (
             <button
               onClick={handlePrune}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 rounded-lg border border-slate-700 transition"
+              className="px-3 py-1.5 bg-white hover:bg-slate-50 text-xs font-medium text-slate-600 rounded-lg border border-slate-200 transition shadow-sm"
             >
               Prune Expired Logs
             </button>
@@ -158,88 +158,88 @@ export const AuditDashboard: React.FC = () => {
       {/* Summary Stat Cards */}
       {summary && (
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-3.5 space-y-1">
-            <div className="text-[11px] text-slate-400 uppercase font-mono font-medium flex items-center justify-between">
+          <div className="bg-slate-50 border border-slate-200 shadow-sm rounded-xl p-3.5 space-y-1">
+            <div className="text-[11px] text-slate-500 uppercase font-mono font-medium flex items-center justify-between">
               <span>Total Events</span>
-              <Activity className="w-3.5 h-3.5 text-slate-500" />
+              <Activity className="w-3.5 h-3.5 text-slate-400" />
             </div>
-            <div className="text-2xl font-bold text-white font-mono">{summary.total_events}</div>
+            <div className="text-2xl font-bold text-slate-900 font-mono">{summary.total_events}</div>
             <div className="text-[10.5px] text-slate-500 font-mono">SQLite WAL Ledger</div>
           </div>
 
-          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-3.5 space-y-1">
-            <div className="text-[11px] text-slate-400 uppercase font-mono font-medium flex items-center justify-between">
+          <div className="bg-slate-50 border border-slate-200 shadow-sm rounded-xl p-3.5 space-y-1">
+            <div className="text-[11px] text-slate-500 uppercase font-mono font-medium flex items-center justify-between">
               <span>Tool Executions</span>
-              <Wrench className="w-3.5 h-3.5 text-sky-400" />
+              <Wrench className="w-3.5 h-3.5 text-blue-500" />
             </div>
-            <div className="text-2xl font-bold text-sky-400 font-mono">{summary.tool_executions}</div>
+            <div className="text-2xl font-bold text-blue-600 font-mono">{summary.tool_executions}</div>
             <div className="text-[10.5px] text-slate-500 font-mono">5 Registered Tools</div>
           </div>
 
-          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-3.5 space-y-1">
-            <div className="text-[11px] text-slate-400 uppercase font-mono font-medium flex items-center justify-between">
+          <div className="bg-slate-50 border border-slate-200 shadow-sm rounded-xl p-3.5 space-y-1">
+            <div className="text-[11px] text-slate-500 uppercase font-mono font-medium flex items-center justify-between">
               <span>Failed Events</span>
-              <XCircle className="w-3.5 h-3.5 text-rose-400" />
+              <XCircle className="w-3.5 h-3.5 text-red-500" />
             </div>
-            <div className="text-2xl font-bold text-rose-400 font-mono">{summary.failed_events}</div>
+            <div className="text-2xl font-bold text-red-600 font-mono">{summary.failed_events}</div>
             <div className="text-[10.5px] text-slate-500 font-mono">Handled Cleanly</div>
           </div>
 
-          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-3.5 space-y-1">
-            <div className="text-[11px] text-slate-400 uppercase font-mono font-medium flex items-center justify-between">
+          <div className="bg-slate-50 border border-slate-200 shadow-sm rounded-xl p-3.5 space-y-1">
+            <div className="text-[11px] text-slate-500 uppercase font-mono font-medium flex items-center justify-between">
               <span>Denied Actions</span>
-              <ShieldX className="w-3.5 h-3.5 text-amber-400" />
+              <ShieldX className="w-3.5 h-3.5 text-amber-500" />
             </div>
-            <div className="text-2xl font-bold text-amber-400 font-mono">{summary.denied_actions}</div>
+            <div className="text-2xl font-bold text-amber-600 font-mono">{summary.denied_actions}</div>
             <div className="text-[10.5px] text-slate-500 font-mono">Operator Rejections</div>
           </div>
 
-          <div className="bg-[#0d1424]/70 border border-slate-800 rounded-xl p-3.5 space-y-1">
-            <div className="text-[11px] text-slate-400 uppercase font-mono font-medium flex items-center justify-between">
+          <div className="bg-slate-50 border border-slate-200 shadow-sm rounded-xl p-3.5 space-y-1">
+            <div className="text-[11px] text-slate-500 uppercase font-mono font-medium flex items-center justify-between">
               <span>Auth Failures</span>
-              <KeyRound className="w-3.5 h-3.5 text-rose-400" />
+              <KeyRound className="w-3.5 h-3.5 text-red-500" />
             </div>
-            <div className="text-2xl font-bold text-rose-400 font-mono">{summary.auth_failures}</div>
+            <div className="text-2xl font-bold text-red-600 font-mono">{summary.auth_failures}</div>
             <div className="text-[10.5px] text-slate-500 font-mono">Lockout Protected</div>
           </div>
         </div>
       )}
 
       {/* Filters Bar */}
-      <div className="bg-[#0d1424]/60 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center gap-3 text-xs">
+      <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex flex-wrap items-center gap-3 text-xs">
         <div className="flex items-center gap-2">
-          <span className="text-slate-400 font-mono text-[11px]">Event:</span>
+          <span className="text-slate-500 font-mono text-[11px]">Event:</span>
           <div className="relative">
             <input
               type="text"
               placeholder="e.g. tool.execution"
               value={eventTypeInput}
               onChange={(e) => setEventTypeInput(e.target.value)}
-              className="px-2.5 py-1.5 bg-[#090d16] border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-emerald-500 font-mono text-xs w-44"
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-blue-500 font-mono text-xs w-44"
             />
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-slate-400 font-mono text-[11px]">Tool:</span>
+          <span className="text-slate-500 font-mono text-[11px]">Tool:</span>
           <input
             type="text"
             placeholder="e.g. file_write"
             value={toolInput}
             onChange={(e) => setToolInput(e.target.value)}
-            className="px-2.5 py-1.5 bg-[#090d16] border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-emerald-500 font-mono text-xs w-36"
+            className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-blue-500 font-mono text-xs w-36"
           />
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-slate-400 font-mono text-[11px]">Status:</span>
+          <span className="text-slate-500 font-mono text-[11px]">Status:</span>
           <select
             value={successFilter}
             onChange={(e) => {
               setSuccessFilter(e.target.value);
               setPage(0);
             }}
-            className="px-2.5 py-1.5 bg-[#090d16] border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-emerald-500 font-mono text-xs cursor-pointer"
+            className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 focus:outline-none focus:border-blue-500 font-mono text-xs cursor-pointer"
           >
             <option value="all">All Statuses</option>
             <option value="success">Success Only</option>
@@ -253,10 +253,10 @@ export const AuditDashboard: React.FC = () => {
       </div>
 
       {/* Events Table */}
-      <div className="flex-1 min-h-0 bg-[#0d1424]/60 border border-slate-800 rounded-xl overflow-hidden flex flex-col shadow-md">
+      <div className="flex-1 min-h-0 bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col shadow-sm">
         {loading ? (
-          <div className="flex-1 flex items-center justify-center text-slate-400 text-xs font-mono gap-2">
-            <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+          <div className="flex-1 flex items-center justify-center text-slate-500 text-xs font-mono gap-2">
+            <RefreshCw className="w-4 h-4 animate-spin text-blue-600" />
             <span>Loading audit ledger...</span>
           </div>
         ) : error ? (
@@ -268,7 +268,7 @@ export const AuditDashboard: React.FC = () => {
         ) : (
           <div className="flex-1 overflow-auto">
             <table className="w-full text-left text-xs border-collapse">
-              <thead className="bg-[#090d16] sticky top-0 border-b border-slate-800 text-slate-400 font-mono text-[11px]">
+              <thead className="bg-slate-50 sticky top-0 border-b border-slate-200 text-slate-600 font-mono text-[11px]">
                 <tr>
                   <th className="py-3 px-4 font-medium">Timestamp</th>
                   <th className="py-3 px-4 font-medium">Event Type</th>
@@ -279,7 +279,7 @@ export const AuditDashboard: React.FC = () => {
                   <th className="py-3 px-4 font-medium text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60 font-mono text-[11.5px]">
+              <tbody className="divide-y divide-slate-200 font-mono text-[11.5px]">
                 {events.map((evt) => (
                   <tr
                     key={evt.event_id}
@@ -343,7 +343,7 @@ export const AuditDashboard: React.FC = () => {
         )}
 
         {/* Pagination Bar */}
-        <div className="p-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 bg-[#090d16] font-mono">
+        <div className="p-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500 bg-slate-50 font-mono">
           <div>
             Page {page + 1} of {Math.max(1, Math.ceil(total / pageSize))}
           </div>
@@ -351,14 +351,14 @@ export const AuditDashboard: React.FC = () => {
             <button
               disabled={page === 0}
               onClick={() => setPage((p) => Math.max(0, p - 1))}
-              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded text-slate-300 transition text-xs font-mono"
+              className="px-3 py-1 bg-white hover:bg-slate-100 border border-slate-200 disabled:opacity-40 rounded text-slate-700 shadow-sm transition text-xs font-mono"
             >
               Previous
             </button>
             <button
               disabled={(page + 1) * pageSize >= total}
               onClick={() => setPage((p) => p + 1)}
-              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded text-slate-300 transition text-xs font-mono"
+              className="px-3 py-1 bg-white hover:bg-slate-100 border border-slate-200 disabled:opacity-40 rounded text-slate-700 shadow-sm transition text-xs font-mono"
             >
               Next
             </button>
@@ -369,28 +369,28 @@ export const AuditDashboard: React.FC = () => {
       {/* Structured Metadata Detail Modal */}
       {selectedEvent && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4"
           onClick={(e) => {
             if (e.target === e.currentTarget) setSelectedEvent(null);
           }}
         >
-          <div className="w-full max-w-2xl bg-[#0d1424] border border-slate-800 rounded-2xl shadow-2xl overflow-hidden max-h-[88vh] flex flex-col">
+          <div className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden max-h-[88vh] flex flex-col">
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-[#090d16]">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-amber-400">
+                <div className="w-8 h-8 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
                   <ShieldAlert className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-semibold text-sm text-white">
-                    Audit Event: <span className="font-mono text-emerald-400">{selectedEvent.event_type}</span>
+                  <h3 className="font-semibold text-sm text-slate-900">
+                    Audit Event: <span className="font-mono text-blue-600">{selectedEvent.event_type}</span>
                   </h3>
                   <p className="text-[11px] font-mono text-slate-500">ID: {selectedEvent.event_id}</p>
                 </div>
               </div>
               <button
                 onClick={() => setSelectedEvent(null)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                className="p-1.5 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -399,46 +399,46 @@ export const AuditDashboard: React.FC = () => {
             {/* Modal Body */}
             <div className="p-6 overflow-y-auto space-y-4 text-xs font-mono">
               {/* Event Core Details */}
-              <div className="grid grid-cols-2 gap-2 bg-[#090d16] p-3.5 rounded-xl border border-slate-800">
-                <div><span className="text-slate-500">Event Type:</span> <span className="text-white font-bold">{selectedEvent.event_type}</span></div>
-                <div><span className="text-slate-500">Timestamp:</span> <span className="text-slate-300">{new Date(selectedEvent.timestamp).toLocaleString()}</span></div>
-                <div><span className="text-slate-500">User:</span> <span className="text-slate-300">{selectedEvent.user_id || 'anonymous'}</span></div>
-                <div><span className="text-slate-500">Role:</span> <span className="text-emerald-400 uppercase">{selectedEvent.role || 'none'}</span></div>
-                <div><span className="text-slate-500">Tool:</span> <span className="text-sky-400">{selectedEvent.tool || '-'}</span></div>
-                <div><span className="text-slate-500">Task ID:</span> <span className="text-slate-300">{selectedEvent.task_id || '-'}</span></div>
-                <div><span className="text-slate-500">Duration:</span> <span className="text-slate-300">{selectedEvent.duration_ms !== null && selectedEvent.duration_ms !== undefined ? `${selectedEvent.duration_ms.toFixed(1)} ms` : '-'}</span></div>
+              <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                <div><span className="text-slate-500">Event Type:</span> <span className="text-slate-900 font-bold">{selectedEvent.event_type}</span></div>
+                <div><span className="text-slate-500">Timestamp:</span> <span className="text-slate-700">{new Date(selectedEvent.timestamp).toLocaleString()}</span></div>
+                <div><span className="text-slate-500">User:</span> <span className="text-slate-700">{selectedEvent.user_id || 'anonymous'}</span></div>
+                <div><span className="text-slate-500">Role:</span> <span className="text-blue-600 uppercase">{selectedEvent.role || 'none'}</span></div>
+                <div><span className="text-slate-500">Tool:</span> <span className="text-blue-600">{selectedEvent.tool || '-'}</span></div>
+                <div><span className="text-slate-500">Task ID:</span> <span className="text-slate-700">{selectedEvent.task_id || '-'}</span></div>
+                <div><span className="text-slate-500">Duration:</span> <span className="text-slate-700">{selectedEvent.duration_ms !== null && selectedEvent.duration_ms !== undefined ? `${selectedEvent.duration_ms.toFixed(1)} ms` : '-'}</span></div>
                 <div>
                   <span className="text-slate-500">Status:</span>{' '}
                   {selectedEvent.success ? (
-                    <span className="text-emerald-400 font-bold">SUCCESS</span>
+                    <span className="text-emerald-600 font-bold">SUCCESS</span>
                   ) : (
-                    <span className="text-rose-400 font-bold">FAILED</span>
+                    <span className="text-rose-600 font-bold">FAILED</span>
                   )}
                 </div>
               </div>
 
               {/* Failure Alert Banner */}
               {selectedEvent.failure_reason && (
-                <div className="p-3.5 bg-rose-950/40 border border-rose-800/60 rounded-xl text-rose-300 space-y-1">
-                  <div className="font-bold text-[11px] text-rose-400 flex items-center gap-1.5">
+                <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 space-y-1">
+                  <div className="font-bold text-[11px] text-rose-600 flex items-center gap-1.5">
                     <XCircle className="w-3.5 h-3.5" />
                     Failure Reason:
                   </div>
-                  <div className="text-xs font-sans text-rose-200">{selectedEvent.failure_reason}</div>
+                  <div className="text-xs font-sans text-rose-700">{selectedEvent.failure_reason}</div>
                 </div>
               )}
 
               {/* Structured Metadata Breakdown */}
               {selectedEvent.metadata && typeof selectedEvent.metadata === 'object' && Object.keys(selectedEvent.metadata).length > 0 && (
-                <div className="p-3.5 bg-[#090d16] border border-slate-800 rounded-xl space-y-2">
-                  <div className="text-slate-400 font-semibold uppercase text-[10.5px] tracking-wider">
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <div className="text-slate-500 font-semibold uppercase text-[10.5px] tracking-wider">
                     Structured Event Metadata
                   </div>
                   <div className="space-y-1.5">
                     {Object.entries(selectedEvent.metadata).map(([k, v]) => (
-                      <div key={k} className="flex items-start gap-2 border-b border-slate-800/50 pb-1 last:border-0 last:pb-0">
+                      <div key={k} className="flex items-start gap-2 border-b border-slate-200 pb-1 last:border-0 last:pb-0">
                         <span className="text-slate-500 min-w-[120px] shrink-0 font-medium">{k}:</span>
-                        <span className="text-slate-200 break-all font-mono">
+                        <span className="text-slate-700 break-all font-mono">
                           {typeof v === 'object' ? JSON.stringify(v) : String(v)}
                         </span>
                       </div>
@@ -449,11 +449,11 @@ export const AuditDashboard: React.FC = () => {
 
               {/* Raw JSON Secondary Inspector */}
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-slate-400 font-semibold text-[11px]">
+                <div className="flex items-center justify-between text-slate-500 font-semibold text-[11px]">
                   <span>Raw Sanitized JSON:</span>
                   <button
                     onClick={() => handleCopyRaw(JSON.stringify(selectedEvent, null, 2))}
-                    className="flex items-center gap-1 text-[10px] text-emerald-400 hover:text-emerald-300 transition"
+                    className="flex items-center gap-1 text-[10px] text-blue-600 hover:text-blue-500 transition"
                   >
                     {copiedRaw ? (
                       <>
@@ -468,18 +468,18 @@ export const AuditDashboard: React.FC = () => {
                     )}
                   </button>
                 </div>
-                <pre className="p-3 bg-[#070a12] border border-slate-800 rounded-xl text-slate-300 overflow-x-auto text-[11px] max-h-48">
+                <pre className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-700 overflow-x-auto text-[11px] max-h-48 shadow-sm">
                   {JSON.stringify(selectedEvent.metadata || {}, null, 2)}
                 </pre>
               </div>
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-3 border-t border-slate-800 bg-[#090d16] flex items-center justify-between text-xs text-slate-500 font-mono">
+            <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs text-slate-500 font-mono">
               <span>On-premise cryptographic ledger record</span>
               <button
                 onClick={() => setSelectedEvent(null)}
-                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition"
+                className="px-4 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg text-xs font-semibold shadow-sm transition"
               >
                 Close
               </button>

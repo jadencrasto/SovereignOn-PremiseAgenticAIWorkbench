@@ -62,9 +62,9 @@ export const StatusBar: React.FC = () => {
       {/* Left Block */}
       <div className="flex items-center gap-2.5 shrink-0 font-bold">
         {/* Core Sovereignty Tag */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f0f9ff] border border-[#bae6fd]">
-          <span className={`w-2 h-2 ${isBackendConnected ? 'bg-[#059669]' : 'bg-[#e11d48]'}`} />
-          <span className={isBackendConnected ? 'text-[#0369a1]' : 'text-[#be123c]'}>
+        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-200 shadow-sm rounded-sm">
+          <span className={`w-2 h-2 rounded-full ${isBackendConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+          <span className={isBackendConnected ? 'text-blue-700' : 'text-red-600'}>
             {isBackendConnected ? 'SOVEREIGN_AIRGAP' : 'DISCONNECTED'}
           </span>
           <button
@@ -73,35 +73,35 @@ export const StatusBar: React.FC = () => {
               fetchHardware();
             }}
             title="Refresh hardware readout"
-            className="ml-1 text-slate-400 hover:text-[#0284c7]"
+            className="ml-1 text-slate-400 hover:text-blue-600 transition-colors"
             disabled={isCheckingHealth}
           >
-            <RefreshCw className={`w-3 h-3 ${isCheckingHealth ? 'animate-spin text-[#0284c7]' : ''}`} />
+            <RefreshCw className={`w-3 h-3 ${isCheckingHealth ? 'animate-spin text-blue-600' : ''}`} />
           </button>
         </div>
 
         {/* Hardware VRAM readout */}
         {hw && hw.gpu_available ? (
-          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 text-slate-700 shadow-sm rounded-sm">
             <span className="text-slate-500">VRAM:</span>
-            <span className="text-[#0284c7]">
+            <span className="text-blue-600">
               {(hw.gpu_vram_used_mb / 1024).toFixed(1)}/{(hw.gpu_vram_total_mb / 1024).toFixed(1)}GB
             </span>
             <span className="text-slate-500">({hw.gpu_utilization_pct.toFixed(0)}% GPU)</span>
           </div>
         ) : hw ? (
-          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 text-slate-700 shadow-sm rounded-sm">
             <span className="text-slate-500">RAM:</span>
-            <span className="text-[#0f172a] font-bold">
+            <span className="text-slate-900 font-bold">
               {(hw.ram_used_mb / 1024).toFixed(1)}/{(hw.ram_total_mb / 1024).toFixed(1)}GB
             </span>
           </div>
         ) : null}
 
         {/* Active Model */}
-        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 text-slate-700 shadow-sm rounded-sm">
           <span className="text-slate-500">ACTIVE_MODEL:</span>
-          <span className="text-[#2563eb] uppercase">
+          <span className="text-blue-600 uppercase">
             {hw?.active_loaded_models && hw.active_loaded_models.length > 0
               ? hw.active_loaded_models[0]
               : selectedModel || health?.default_model || 'QWEN2.5:7B'}
@@ -109,9 +109,9 @@ export const StatusBar: React.FC = () => {
         </div>
 
         {/* Local Vector Chunks */}
-        <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-[#f8fafc] border border-[#cbd5e1] text-slate-700">
+        <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 text-slate-700 shadow-sm rounded-sm">
           <span className="text-slate-500">KB_INDEX:</span>
-          <span className="text-[#059669]">
+          <span className="text-emerald-600">
             {documents.length > 0 ? `${documents.length} REPO_DOCS` : 'EMPTY'}
           </span>
         </div>
@@ -119,7 +119,7 @@ export const StatusBar: React.FC = () => {
 
       {/* Right Block */}
       <div className="flex items-center gap-2 shrink-0 font-bold text-[10px]">
-        <div className="px-2 py-0.5 bg-[#0284c7] text-white border border-black uppercase">
+        <div className="px-2 py-0.5 bg-blue-600 text-white border border-blue-700 rounded-sm shadow-sm uppercase">
           NO_CLOUD_LEAK &bull; SHA256_VERIFIED
         </div>
       </div>
