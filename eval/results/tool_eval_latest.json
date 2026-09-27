@@ -1,16 +1,16 @@
 {
   "suite_name": "Tool Execution, Authorization & Latency Benchmark",
-  "timestamp": "2026-08-31T15:55:31Z",
+  "timestamp": "2026-09-27T20:17:37Z",
   "environment": "Air-Gapped Sandbox Environment",
   "total_cases": 7,
   "passed": 7,
   "failed": 0,
   "environment_unavailable": 0,
-  "duration_seconds": 0.0930000000007567,
+  "duration_seconds": 0.011579199999687262,
   "summary_metrics": {
     "Tools_Evaluated": 5,
     "Passed_Tool_Operations": 7,
-    "Average_Tool_Latency_ms": 8.86,
+    "Average_Tool_Latency_ms": 1.01,
     "Success_Rate_Percent": 100.0
   },
   "test_cases": [
@@ -19,7 +19,7 @@
       "name": "Calculator: Complex Arithmetic",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 0.0,
+      "duration_ms": 0.2941999991890043,
       "metrics": {},
       "details": "Result=585.0",
       "error": null
@@ -29,7 +29,7 @@
       "name": "Calculator: Division by Zero Safety",
       "category": "error_handling",
       "status": "PASS",
-      "duration_ms": 0.0,
+      "duration_ms": 0.21389999892562628,
       "metrics": {},
       "details": "Clean error returned: Division by zero.",
       "error": null
@@ -39,7 +39,7 @@
       "name": "File List: Sandbox Listing",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 14.999999999417923,
+      "duration_ms": 1.2779999960912392,
       "metrics": {},
       "details": "Listed 1 items in sandbox root",
       "error": null
@@ -49,7 +49,7 @@
       "name": "File Read: Sandbox File Access",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 15.99999999962165,
+      "duration_ms": 1.5032999945105985,
       "metrics": {},
       "details": "Read 32 bytes",
       "error": null
@@ -59,7 +59,7 @@
       "name": "File Write: Atomic Sandbox Write",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 15.99999999962165,
+      "duration_ms": 1.6428000089945272,
       "metrics": {},
       "details": "Atomic write committed in sandbox workspace",
       "error": null
@@ -69,7 +69,7 @@
       "name": "Document Search: Semantic Search",
       "category": "execution",
       "status": "PASS",
-      "duration_ms": 15.000000001236913,
+      "duration_ms": 1.8286999984411523,
       "metrics": {},
       "details": "Retrieved 1 chunks",
       "error": null
@@ -79,7 +79,7 @@
       "name": "RBAC: Viewer Write Rejection",
       "category": "authorization",
       "status": "PASS",
-      "duration_ms": 0.0,
+      "duration_ms": 0.28839999868068844,
       "metrics": {},
       "details": "Viewer role blocked at ToolRegistry boundary",
       "error": null

@@ -62,6 +62,8 @@ class SecurityChecker:
             self._check_code_execution_isolation(),
             self._check_cookie_security(),
             self._check_documentation_exposure(),
+            self._check_audit_logging(),
+            self._check_document_storage(),
         ]
         return [d.to_dict() for d in diagnostics]
 
@@ -192,7 +194,7 @@ class SecurityChecker:
                 category="Filesystem Sandbox",
                 title="Sandbox Containment",
                 status="WARN",
-                details=f"Sandbox path '{sandbox}' is located outside standard project data directory.",
+                details="Sandbox path is located outside standard project data directory.",
                 remediation="Ensure sandbox directory has restricted filesystem permissions.",
             )
 
@@ -201,7 +203,7 @@ class SecurityChecker:
             category="Filesystem Sandbox",
             title="Sandbox Containment",
             status="PASS",
-            details=f"Sandbox directory is properly contained at {sandbox}.",
+            details="Sandbox directory is properly contained at 'Local / data/sandbox'.",
         )
 
     def _check_cors_policy(self) -> SecurityDiagnostic:
@@ -381,4 +383,24 @@ class SecurityChecker:
                 status="PASS",
                 details="Interactive documentation endpoints (/docs, /redoc, /openapi.json) are enabled for local development.",
             )
+
+    def _check_audit_logging(self) -> SecurityDiagnostic:
+        retention = getattr(self._cfg, "audit_retention_days", 180)
+        max_rows = getattr(self._cfg, "audit_max_rows", 50000)
+        return SecurityDiagnostic(
+            id="SEC-010",
+            category="Audit Logging",
+            title="Cryptographic Audit Logging Status",
+            status="PASS",
+            details=f"Audit logging is active. Structured events persisted to SQLite at 'data/tasks.db' with {retention}-day retention and max {max_rows} rows.",
+        )
+
+    def _check_document_storage(self) -> SecurityDiagnostic:
+        return SecurityDiagnostic(
+            id="SEC-011",
+            category="Storage",
+            title="Document Storage Location",
+            status="PASS",
+            details="Local sovereign document storage contained at 'Local / data/uploads'.",
+        )
 

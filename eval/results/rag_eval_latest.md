@@ -1,7 +1,7 @@
 # Evaluation Report: RAG Industrial Retrieval & Groundedness Benchmark
-**Timestamp:** 2026-08-30T17:20:42Z UTC  
-**Environment:** Air-Gapped Local ChromaDB  
-**Total Duration:** 7.00s  
+**Timestamp:** 2026-08-30T17:20:42Z UTC
+**Environment:** Air-Gapped Local ChromaDB
+**Total Duration:** 7.00s
 
 ## Summary Scorecard
 

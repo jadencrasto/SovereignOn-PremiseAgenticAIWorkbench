@@ -73,6 +73,9 @@ from backend.tools.artifact_verifier import ArtifactVerifierInput, create_artifa
 from backend.tools.code_execution import CodeExecutionInput, create_code_execution
 from backend.tools.docx_create import DocxCreateInput, create_docx_create
 from backend.tools.knowledge_graph import KnowledgeGraphQueryInput, create_knowledge_graph_query
+from backend.tools.hardware_status import HardwareStatusInput, create_hardware_status
+from backend.tools.model_scan import ModelScanInput, create_model_scan
+from backend.tools.security_diagnostics import SecurityDiagnosticsInput, create_security_diagnostics
 from backend.graph.store import KnowledgeGraphStore
 from backend.graph.service import KnowledgeGraphService
 
@@ -129,6 +132,8 @@ def _register_tools(
     tools_config: dict = None,
     graph_service: Optional[KnowledgeGraphService] = None,
     cfg: Optional[Settings] = None,
+    model_router: Optional[Any] = None,
+    auth_store: Optional[Any] = None,
 ) -> None:
     """Register all Phase 4 & Knowledge Graph tools with the registry."""
     tools_cfg = tools_config or {}
@@ -364,6 +369,57 @@ def _register_tools(
         enabled=kg_enabled,
     ))
 
+    # 11. hardware_status
+    registry.register(ToolDefinition(
+        name="hardware_status",
+        description=(
+            "Query live host hardware status and GPU telemetry. "
+            "Returns CPU percent, core counts, RAM usage, and GPU VRAM usage and temperature. "
+            "Use this when the user asks about current system hardware, resources, CPU, RAM, or GPU telemetry."
+        ),
+        input_schema=HardwareStatusInput,
+        execute_fn=create_hardware_status(model_router),
+        category="System",
+        read_only=True,
+        risk_level=_get_risk_level("hardware_status", "low"),
+        requires_approval=_get_requires_approval("hardware_status", False, read_only=True),
+        enabled=_is_enabled("hardware_status"),
+    ))
+
+    # 12. model_scan
+    registry.register(ToolDefinition(
+        name="model_scan",
+        description=(
+            "Scan and report installed local AI models from host Ollama. "
+            "Returns discovered models, parameter sizes, quantization, formats, families, and capabilities. "
+            "Use this when the user asks to scan, discover, or list installed AI models or their capabilities."
+        ),
+        input_schema=ModelScanInput,
+        execute_fn=create_model_scan(model_router, active_cfg.ollama_base_url),
+        category="System",
+        read_only=True,
+        risk_level=_get_risk_level("model_scan", "low"),
+        requires_approval=_get_requires_approval("model_scan", False, read_only=True),
+        enabled=_is_enabled("model_scan"),
+    ))
+
+    # 13. security_diagnostics
+    registry.register(ToolDefinition(
+        name="security_diagnostics",
+        description=(
+            "Run local security diagnostics and posture checks. "
+            "Evaluates authentication mode, air-gap egress boundaries, sandbox isolation, and database hardening. "
+            "Requires VIEW_SECURITY authorization. Use when the user asks for security diagnostics or posture status."
+        ),
+        input_schema=SecurityDiagnosticsInput,
+        execute_fn=create_security_diagnostics(active_cfg, auth_store),
+        category="Security",
+        read_only=True,
+        risk_level=_get_risk_level("security_diagnostics", "low"),
+        requires_approval=_get_requires_approval("security_diagnostics", False, read_only=True),
+        enabled=_is_enabled("security_diagnostics"),
+    ))
+
     logger.info("Registered %d tools (%d enabled)",
                 len(registry.list_tools()), len(registry.list_enabled_tools()))
 
@@ -481,7 +537,15 @@ async def lifespan(app: FastAPI):
     tool_registry = ToolRegistry()
     tool_registry.set_audit_logger(audit_logger)
     tools_config = _load_tools_config(active_settings)
-    _register_tools(tool_registry, retriever, tools_config, graph_service=kg_service, cfg=active_settings)
+    _register_tools(
+        tool_registry,
+        retriever,
+        tools_config,
+        graph_service=kg_service,
+        cfg=active_settings,
+        model_router=model_router,
+        auth_store=auth_store,
+    )
 
     # ---- Code Execution Isolation Startup Diagnostics ----
     isolation_mode = getattr(active_settings, "code_exec_isolation", "subprocess").lower()

@@ -43,6 +43,11 @@ class _InMemoryFallbackCollection:
         for cid in ids:
             self._chunks.pop(cid, None)
 
+    def update(self, ids: List[str], metadatas: List[Dict]) -> None:
+        for cid, meta in zip(ids, metadatas):
+            if cid in self._chunks:
+                self._chunks[cid]["metadata"].update(meta)
+
     def get(self, where: Optional[Dict] = None, include: Optional[List[str]] = None) -> Dict[str, Any]:
         matched_ids = []
         matched_docs = []
@@ -99,6 +104,29 @@ class VectorStore:
             logger.warning("ChromaDB persistent client unavailable (%s). Using in-memory fallback store.", exc)
             self._client = None
             self._collection = _InMemoryFallbackCollection()
+
+        # Reconcile legacy chunk metadata so existing unclassified chunks default to 'viewer'
+        self._reconcile_metadata()
+
+    def _reconcile_metadata(self) -> None:
+        """Backfill default clearance='viewer' for legacy chunks lacking clearance metadata."""
+        try:
+            res = self._collection.get(include=["metadatas"])
+            ids = res.get("ids", [])
+            metadatas = res.get("metadatas", [])
+            update_ids = []
+            update_metas = []
+            for cid, meta in zip(ids, metadatas):
+                if meta and (meta.get("clearance") is None or not str(meta.get("clearance", "")).strip()):
+                    meta_copy = dict(meta)
+                    meta_copy["clearance"] = "viewer"
+                    update_ids.append(cid)
+                    update_metas.append(meta_copy)
+            if update_ids:
+                self._collection.update(ids=update_ids, metadatas=update_metas)
+                logger.info("VectorStore: Reconciled clearance metadata for %d legacy chunks", len(update_ids))
+        except Exception as exc:
+            logger.debug("VectorStore: Metadata reconciliation skipped (%s)", exc)
 
     # ------------------------------------------------------------------
     # Write operations

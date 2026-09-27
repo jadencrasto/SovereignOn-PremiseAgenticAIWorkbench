@@ -64,33 +64,59 @@ class ConversationMemory:
         history = memory.get_history(session_id)
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        storage_file: Optional[Path | str] = None,
+        persist: Optional[bool] = None,
+    ) -> None:
         self._store: Dict[str, Conversation] = {}
-        self._load()
+        # Isolate tests: in test environments (e.g. pytest), do not load/save disk state unless explicitly requested
+        is_test_env = "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("ENVIRONMENT") == "test"
+        if persist is None:
+            persist = not is_test_env or storage_file is not None
+
+        if storage_file is not None:
+            self._storage_file = Path(storage_file)
+        elif persist:
+            self._storage_file = MEMORY_FILE
+        else:
+            self._storage_file = None
+
+        if self._storage_file:
+            self._load()
 
     def _save(self) -> None:
+        if not self._storage_file:
+            return
         try:
-            MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._storage_file.parent.mkdir(parents=True, exist_ok=True)
             data = {}
             for sid, conv in self._store.items():
-                data[sid] = [msg.model_dump() for msg in conv.messages]
-            with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+                data[sid] = [
+                    {
+                        "role": msg.role,
+                        "content": msg.content,
+                        "images": getattr(msg, "images", []),
+                    }
+                    for msg in conv.messages
+                ]
+            with open(self._storage_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save memory: {e}")
 
     def _load(self) -> None:
-        if not MEMORY_FILE.exists():
+        if not self._storage_file or not self._storage_file.exists():
             return
         try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            with open(self._storage_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for sid, msg_dicts in data.items():
                 conv = Conversation(session_id=sid)
                 for msg_dict in msg_dicts:
                     conv.messages.append(Message(**msg_dict))
                 self._store[sid] = conv
-            logger.info(f"Loaded {len(self._store)} sessions from {MEMORY_FILE}")
+            logger.info(f"Loaded {len(self._store)} sessions from {self._storage_file}")
         except Exception as e:
             logger.error(f"Failed to load memory: {e}")
 

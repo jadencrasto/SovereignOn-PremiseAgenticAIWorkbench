@@ -21,14 +21,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Maximum read size: 1 MB
+# Maximum read size: 1 MB for plain text, 50 MB for rich documents (.pdf, .docx)
 _MAX_READ_BYTES = 1 * 1024 * 1024
+_MAX_DOC_READ_BYTES = 50 * 1024 * 1024
 
-# Allowed text extensions for direct reading
+# Allowed text and document extensions for direct reading
 _ALLOWED_READ_EXTENSIONS = {
     ".txt", ".md", ".csv", ".json", ".yaml", ".yml",
     ".log", ".ini", ".cfg", ".toml", ".xml", ".html",
     ".py", ".js", ".ts", ".sh", ".bat", ".ps1",
+    ".pdf", ".docx",
 }
 
 
@@ -50,6 +52,8 @@ def _resolve_candidate_file(raw_path: str, upload_dir: Path) -> Path:
       - case differences
       - uploaded doc_{id}_ prefixes on disk
       - missing file extension if unambiguous
+
+    Does NOT silently substitute arbitrary or unrelated files.
     """
     # 1. Direct path validation first (ensures path safety: traversal/null-bytes reject immediately)
     resolved = validate_path_within(raw_path, upload_dir)
@@ -82,9 +86,6 @@ def _resolve_candidate_file(raw_path: str, upload_dir: Path) -> Path:
         # Priority 3: Stem match when target had no extension
         elif c_stem_norm == target_stem_norm and not target_ext and c_ext in _ALLOWED_READ_EXTENSIONS:
             candidates.append((3, item))
-        # Priority 4: Target is contained in candidate name or vice versa (unambiguous fallback)
-        elif (target_norm in c_norm or c_norm in target_norm) and (c_ext == target_ext or not target_ext):
-            candidates.append((4, item))
 
     if candidates:
         candidates.sort(key=lambda x: x[0])
@@ -156,20 +157,25 @@ def create_file_read(upload_dir: Path) -> callable:
         if ext not in _ALLOWED_READ_EXTENSIONS:
             raise ValueError(
                 f"File type '{ext}' is not supported for direct reading. "
-                f"Supported: {sorted(_ALLOWED_READ_EXTENSIONS)}. "
-                f"For PDF/DOCX files, use the document_search tool instead."
+                f"Supported: {sorted(_ALLOWED_READ_EXTENSIONS)}."
             )
 
-        # Check size
-        check_file_size(resolved, _MAX_READ_BYTES)
+        # Check size: allow 50 MB for rich documents (.pdf, .docx), 1 MB for text files
+        max_limit = _MAX_DOC_READ_BYTES if ext in {".pdf", ".docx"} else _MAX_READ_BYTES
+        check_file_size(resolved, max_limit)
 
         # Read content
         try:
-            content = resolved.read_text(encoding="utf-8", errors="replace")
+            if ext in {".pdf", ".docx"}:
+                from backend.rag.ingest import DocumentParser
+                doc = DocumentParser.parse(resolved.name, resolved.read_bytes())
+                content = doc.text
+            else:
+                content = resolved.read_text(encoding="utf-8", errors="replace")
         except Exception as exc:
             raise ValueError(f"Could not read file: {exc}")
 
-        rel_path = str(resolved.relative_to(upload_dir.resolve())).replace("\\", "/")
+        rel_path = str(resolved.resolve().relative_to(upload_dir.resolve())).replace("\\", "/")
         clean_filename = re.sub(r"^doc_[a-f0-9]{8,32}_", "", resolved.name)
         logger.info("file_read | path=%s size=%d", rel_path, len(content))
 

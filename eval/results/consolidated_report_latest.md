@@ -1,8 +1,8 @@
 # Sovereign AI Workbench — Phase 8 Evaluation Scorecard
-**Generated:** 2026-08-30 17:20:42 UTC  
-**Overall Status:** `PASS`  
-**Air-Gapped Local Environment:** Verified (100% on-premise execution)  
-**Total Execution Time:** 28.27s  
+**Generated:** 2026-08-30 17:20:42 UTC
+**Overall Status:** `PASS`
+**Air-Gapped Local Environment:** Verified (100% on-premise execution)
+**Total Execution Time:** 28.27s
 
 ---
 

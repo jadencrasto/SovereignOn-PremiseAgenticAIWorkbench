@@ -594,7 +594,7 @@ class TestToolsAPI:
         data = resp.json()
         assert "tools" in data
         assert "total" in data
-        assert data["total"] == 10
+        assert data["total"] == 13
         names = [t["name"] for t in data["tools"]]
         expected_names = [
             "document_search",
@@ -607,8 +607,11 @@ class TestToolsAPI:
             "code_execution",
             "artifact_verifier",
             "knowledge_graph_query",
+            "hardware_status",
+            "model_scan",
+            "security_diagnostics",
         ]
-        assert len(names) == 10
+        assert len(names) == 13
         for name in expected_names:
             assert name in names
 
@@ -862,7 +865,7 @@ class TestToolsConfigRegistration:
         # Call with graph_service=None
         _register_tools(reg, mock_retriever, tools_config={}, graph_service=None, cfg=settings)
 
-        assert len(reg.list_tools()) == 10
+        assert len(reg.list_tools()) == 13
         assert reg.has_tool("knowledge_graph_query")
 
         kg_tool = reg.get("knowledge_graph_query")

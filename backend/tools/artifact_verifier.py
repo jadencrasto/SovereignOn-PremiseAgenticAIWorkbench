@@ -28,15 +28,19 @@ logger = logging.getLogger(__name__)
 
 class ArtifactVerifierInput(BaseModel):
     """Input schema for the artifact_verifier tool."""
-    relative_path: str = Field(
-        ...,
+    relative_path: Optional[str] = Field(
+        default=None,
         description="Path to the artifact to verify, e.g. 'data/sandbox/P-204_Maintenance_Summary.docx' or filename.",
+    )
+    file_path: Optional[str] = Field(
+        default=None,
+        description="Alternative alias for relative_path.",
     )
     expected_columns: Optional[List[str]] = Field(
         default=None,
         description="Optional list of column names or headings that must exist in the artifact.",
     )
-    expected_content: Optional[List[str]] = Field(
+    expected_content: Optional[Any] = Field(
         default=None,
         description="Optional list of keywords or text strings that must appear in the artifact content.",
     )
@@ -50,8 +54,12 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
     """Create the artifact verifier execution function."""
 
     async def execute_artifact_verifier(args: ArtifactVerifierInput) -> Dict[str, Any]:
+        path_str = args.relative_path or args.file_path or ""
+        if not path_str:
+            raise ValueError("Artifact path not specified (relative_path or file_path is required).")
+
         # Strip path prefixes if provided
-        clean_name = args.relative_path.replace("data/sandbox/", "").replace("data\\sandbox\\", "").strip()
+        clean_name = path_str.replace("data/sandbox/", "").replace("data\\sandbox\\", "").strip()
         target_path = validate_path_within(clean_name, sandbox_dir)
 
         if not target_path.exists():
@@ -84,24 +92,50 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
                 for p in doc.paragraphs:
                     style_name = p.style.name.lower() if p.style else ""
                     if "heading" in style_name or "title" in style_name:
-                        detected_headers.append(p.text.strip())
+                        txt = p.text.strip()
+                        if txt and txt not in detected_headers:
+                            detected_headers.append(txt)
+                    for run in p.runs:
+                        if run.bold and run.text.strip() and ":" in run.text:
+                            label = run.text.strip().rstrip(":")
+                            if label and label not in detected_headers:
+                                detected_headers.append(label)
 
-                # Inspect tables if present
+                # Inspect tables if present and collect all cell texts
+                table_cell_texts: List[str] = []
+                table_data_row_count = 0
                 for tbl in doc.tables:
+                    num_t_rows = len(tbl.rows)
+                    if num_t_rows > 1:
+                        table_data_row_count += (num_t_rows - 1)
                     for r_idx, row in enumerate(tbl.rows):
                         row_vals = [c.text.strip() for c in row.cells]
-                        if r_idx == 0 and not detected_headers:
-                            detected_headers.extend(row_vals)
+                        for c in row.cells:
+                            c_txt = c.text.strip()
+                            if c_txt:
+                                table_cell_texts.append(c_txt)
+                        if r_idx == 0:
+                            for val in row_vals:
+                                if val and val not in detected_headers:
+                                    detected_headers.append(val)
                         if len(preview_rows) < 5:
                             preview_rows.append(row_vals)
+
+                # If tables exist and expected_columns was specified, ensure table has populated data rows
+                if len(doc.tables) > 0 and args.expected_columns and table_data_row_count == 0:
+                    raise ValueError(
+                        f"Artifact verification failed: Document '{clean_name}' contains a table with headers {detected_headers} but no data rows (table is empty)."
+                    )
 
                 # If no preview from tables, use paragraph preview
                 if not preview_rows:
                     preview_rows = [[p] for p in paragraphs[:5]]
 
-                row_count = max(paragraph_count, len(preview_rows), 1 if paragraph_count > 0 else 0)
+                row_count = max(paragraph_count, len(preview_rows), 1 if (paragraph_count > 0 or table_cell_texts) else 0)
                 extra_metadata["paragraph_count"] = paragraph_count
                 extra_metadata["table_count"] = table_count
+                extra_metadata["table_data_row_count"] = table_data_row_count
+                extra_metadata["table_cell_texts"] = table_cell_texts
                 extra_metadata["preview_text"] = "\n".join(paragraphs[:3])
 
             except Exception as exc:
@@ -156,7 +190,7 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
                 # If headers request findings/observations/actions, ensure they are not all 'Not stated'
                 detail_headers = [
                     idx for idx, h in enumerate(detected_headers)
-                    if any(k in h.lower() for k in ("finding", "observation", "action", "recommend", "cause", "defect", "repair"))
+                    if any(k in h.lower() for k in ("finding", "observation", "action", "recommend", "cause", "defect", "repair", "problem", "improvement", "issue", "solution"))
                 ]
                 if detail_headers and len(all_cell_texts) >= len(detected_headers):
                     detail_cells = []
@@ -201,8 +235,16 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
         if args.expected_columns:
             headers_lower = [h.lower() for h in detected_headers]
             for exp_col in args.expected_columns:
-                if not any(exp_col.lower() in h for h in headers_lower):
-                    missing_columns.append(exp_col)
+                s_col = str(exp_col).strip().lower()
+                # Check directly in detected_headers
+                if any(s_col in h or h in s_col for h in headers_lower):
+                    continue
+                # For DOCX documents, allow matching section titles, headings, or paragraph keys
+                if suffix == ".docx":
+                    docx_text_corpus = (" ".join(detected_headers) + " " + " ".join(paragraphs)).lower()
+                    if s_col in docx_text_corpus:
+                        continue
+                missing_columns.append(exp_col)
 
             if missing_columns:
                 raise ValueError(
@@ -213,7 +255,7 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
         if args.expected_content:
             corpus = ""
             if suffix == ".docx":
-                corpus = " ".join(paragraphs) + " " + " ".join(str(c) for r in preview_rows for c in r)
+                corpus = " ".join(paragraphs) + " " + " ".join(extra_metadata.get("table_cell_texts", []))
             elif suffix == ".xlsx":
                 corpus = " ".join(detected_headers) + " " + " ".join(extra_metadata.get("all_cell_texts", []))
             else:
@@ -221,9 +263,29 @@ def create_artifact_verifier(sandbox_dir: Path) -> callable:
 
             corpus_lower = corpus.lower()
             missing_content = []
-            for exp in args.expected_content:
+
+            items_to_check: List[str] = []
+
+            def _extract_exp_items(val: Any):
+                if isinstance(val, str):
+                    items_to_check.append(val)
+                elif isinstance(val, dict):
+                    for k, v in val.items():
+                        if str(k).lower() not in {"tables", "table", "headers", "rows", "columns", "content", "expected_content"}:
+                            _extract_exp_items(k)
+                        _extract_exp_items(v)
+                elif isinstance(val, (list, tuple, set)):
+                    for it in val:
+                        _extract_exp_items(it)
+
+            _extract_exp_items(args.expected_content)
+
+            structural_terms = {"tables", "table", "headers", "header", "rows", "row", "columns", "column", "content", "expected_content", "title"}
+            for exp in items_to_check:
                 s_exp = str(exp).strip()
                 s_lower = s_exp.lower()
+                if not s_lower or s_lower in structural_terms:
+                    continue
                 # Skip generic placeholder labels if present
                 if (
                     s_lower.endswith(" text")

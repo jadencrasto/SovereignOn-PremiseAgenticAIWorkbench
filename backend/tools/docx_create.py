@@ -63,6 +63,41 @@ class DocxCreateInput(BaseModel):
     )
 
 
+def _is_markdown_table_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _extract_markdown_tables(text: str) -> List[Dict[str, Any]]:
+    import re
+    tables = []
+    lines = text.splitlines()
+    in_table = False
+    cur_headers: List[str] = []
+    cur_rows: List[List[str]] = []
+    for line in lines:
+        stripped = line.strip()
+        if _is_markdown_table_line(stripped):
+            cells = [c.strip() for c in stripped[1:-1].split("|")]
+            # Check if separator row like |---|---|
+            if all(re.match(r"^:?-+:?$", c) for c in cells if c):
+                in_table = True
+                continue
+            if not in_table:
+                cur_headers = cells
+            else:
+                cur_rows.append(cells)
+        else:
+            if in_table and cur_headers and cur_rows:
+                tables.append({"headers": cur_headers, "rows": cur_rows})
+            in_table = False
+            cur_headers = []
+            cur_rows = []
+    if in_table and cur_headers and cur_rows:
+        tables.append({"headers": cur_headers, "rows": cur_rows})
+    return tables
+
+
 def create_docx_create(sandbox_dir: Path) -> callable:
     """
     Create the docx_create execution function bound to sandbox_dir.
@@ -115,14 +150,14 @@ def create_docx_create(sandbox_dir: Path) -> callable:
                 )
                 for rl in raw_content.splitlines():
                     trimmed_rl = rl.strip()
-                    if not trimmed_rl:
+                    if not trimmed_rl or _is_markdown_table_line(trimmed_rl):
                         continue
                     # Skip if line was already used as title
                     if doc_title and trimmed_rl in (f"# {doc_title}", doc_title):
                         continue
                     parts = field_split_pattern.split(trimmed_rl)
                     for pt in parts:
-                        if pt.strip():
+                        if pt.strip() and not _is_markdown_table_line(pt.strip()):
                             content_lines.append(pt.strip())
 
             # Add explicit paragraphs if provided
@@ -222,26 +257,47 @@ def create_docx_create(sandbox_dir: Path) -> callable:
                     if sec_body:
                         doc.add_paragraph(str(sec_body))
 
-            # Add explicit tables if provided
+            # Add tables (from args.tables or extracted from markdown content)
+            tables_to_render: List[Dict[str, Any]] = []
             if args.tables:
                 for tbl_spec in args.tables:
-                    headers = tbl_spec.get("headers", [])
-                    rows = tbl_spec.get("rows", [])
-                    if headers or rows:
-                        num_cols = max(len(headers), max((len(r) for r in rows), default=0))
+                    if isinstance(tbl_spec, dict):
+                        tables_to_render.append(tbl_spec)
+
+            has_populated_table = any(tbl.get("rows") for tbl in tables_to_render)
+            if not has_populated_table and raw_content:
+                md_tables = _extract_markdown_tables(raw_content)
+                if md_tables:
+                    tables_to_render.extend(md_tables)
+
+            for tbl_spec in tables_to_render:
+                headers = tbl_spec.get("headers", [])
+                rows = tbl_spec.get("rows", [])
+                if headers or rows:
+                    num_cols = max(len(headers), max((len(r) for r in rows), default=0))
+                    if num_cols > 0:
                         table = doc.add_table(rows=1 if headers else 0, cols=num_cols)
                         table.style = "Table Grid"
 
                         if headers:
                             hdr_cells = table.rows[0].cells
                             for i, h in enumerate(headers):
-                                hdr_cells[i].text = str(h)
+                                if i < num_cols:
+                                    hdr_cells[i].text = str(h)
+                                    for p in hdr_cells[i].paragraphs:
+                                        p.paragraph_format.space_before = Pt(3)
+                                        p.paragraph_format.space_after = Pt(3)
+                                        for run in p.runs:
+                                            run.bold = True
 
                         for r in rows:
                             row_cells = table.add_row().cells
                             for i, cell_val in enumerate(r):
                                 if i < num_cols:
                                     row_cells[i].text = str(cell_val)
+                                    for p in row_cells[i].paragraphs:
+                                        p.paragraph_format.space_before = Pt(2)
+                                        p.paragraph_format.space_after = Pt(2)
 
             # 3. Save to temporary file and replace atomically
             temp_path = target_path.with_suffix(".tmp.docx")

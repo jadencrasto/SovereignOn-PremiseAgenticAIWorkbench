@@ -64,6 +64,8 @@ def create_file_list(upload_dir: Path) -> callable:
         results = []
         for item in sorted(target.iterdir()):
             if item.is_file():
+                if item.name.startswith("."):
+                    continue
                 try:
                     rel = item.relative_to(upload_dir.resolve())
                     clean_name = re.sub(r"^doc_[a-f0-9]{8,32}_", "", item.name)

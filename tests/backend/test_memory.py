@@ -89,3 +89,47 @@ def test_history_for_missing_session():
     m = ConversationMemory()
     history = m.get_history("does-not-exist")
     assert history == []
+
+
+def test_persistence_and_reload(tmp_path):
+    storage_file = tmp_path / "test_memory.json"
+    m1 = ConversationMemory(storage_file=storage_file)
+    sid = m1.create_session(session_id="persisted-sess-1", system_prompt="You are an industrial engineer.")
+    m1.add_user_message(sid, "Check vibration levels on K-101")
+    m1.add_assistant_message(sid, "K-101 vibration was 9.4 mm/s RMS.")
+
+    assert storage_file.exists()
+
+    # Re-initialize second instance from same file (simulating backend restart)
+    m2 = ConversationMemory(storage_file=storage_file)
+    assert m2.session_exists(sid)
+    assert m2.session_count() == 1
+    history = m2.get_history(sid)
+    assert len(history) == 3
+    assert history[0].role == "system"
+    assert history[0].content == "You are an industrial engineer."
+    assert history[1].role == "user"
+    assert history[1].content == "Check vibration levels on K-101"
+    assert history[2].role == "assistant"
+    assert history[2].content == "K-101 vibration was 9.4 mm/s RMS."
+
+
+def test_persistence_delete_and_clear(tmp_path):
+    storage_file = tmp_path / "test_memory_delete.json"
+    m = ConversationMemory(storage_file=storage_file)
+    s1 = m.create_session(session_id="s1")
+    s2 = m.create_session(session_id="s2")
+    m.add_user_message(s1, "Msg 1")
+    m.add_user_message(s2, "Msg 2")
+
+    # Clear s1
+    m.clear_session(s1)
+    m_reloaded = ConversationMemory(storage_file=storage_file)
+    assert len(m_reloaded.get_history(s1)) == 0
+    assert len(m_reloaded.get_history(s2)) == 1
+
+    # Delete s2
+    m.delete_session(s2)
+    m_reloaded2 = ConversationMemory(storage_file=storage_file)
+    assert not m_reloaded2.session_exists(s2)
+    assert m_reloaded2.session_exists(s1)
