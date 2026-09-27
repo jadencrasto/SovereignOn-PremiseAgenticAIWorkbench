@@ -68,3 +68,5 @@ eval/results/*_20*.json
 eval/results/*_20*.md
 
 .freebuff/
+
+data/memory.json
