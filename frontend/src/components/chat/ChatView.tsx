@@ -32,16 +32,12 @@ export const ChatView: React.FC = () => {
   const [sessionCount, setSessionCount] = useState<number>(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
-  const sessionMessagesRef = useRef<Record<string, ChatMessage[]>>({});
   const { selectedModel, addToast } = useWorkbench();
 
   // Conversation contents are owned and persisted by the server.
   const updateSessionCount = useCallback(() => {
     void fetchSessions().then(result => setSessionCount(result.count)).catch(() => {});
   }, []);
-  useEffect(() => {
-    if (messages.length) sessionMessagesRef.current[activeSessionId] = messages;
-  }, [activeSessionId, messages]);
   useEffect(() => {
     updateSessionCount();
     return () => { abortControllerRef.current?.abort(); };
@@ -583,11 +579,10 @@ export const ChatView: React.FC = () => {
 
   // Switch to a previous conversation session from history
   const handleSelectSession = (session: ChatSession) => {
-    if (session.id === activeSessionId) return;
     handleStopStream();
     setActiveSessionId(session.id);
     setSessionTitle(session.title);
-    setMessages(sessionMessagesRef.current[session.id] ?? session.messages);
+    setMessages(session.messages);
     addToast('info', `Resumed session: ${session.title}`);
   };
 
@@ -687,13 +682,13 @@ export const ChatView: React.FC = () => {
       </div>
 
       {/* 2. Persistent Chat History Drawer */}
-      <ChatHistorySidebar
+      {isHistoryOpen && <ChatHistorySidebar
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
         currentSessionId={activeSessionId}
         onSelectSession={handleSelectSession}
         onNewChat={handleStartNewChat}
-      />
+      />}
 
       {/* 3. Message List with Visual Explanations & Mermaid Renderers */}
       <MessageList

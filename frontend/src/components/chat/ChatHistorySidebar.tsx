@@ -32,6 +32,23 @@ export interface ChatSession {
   model: string;
 }
 
+async function loadSession(id: string): Promise<ChatSession> {
+  const record = await fetchSession(id);
+  const messages: ChatMessage[] = record.messages.filter(m => m.role !== 'system').map((m, i) => ({
+    id: m.id || `${id}-${i}`, role: m.role, content: m.content,
+    timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
+    toolEvents: m.tool_events || [],
+  }));
+  for (const task of record.tasks || []) {
+    const taskStatus = task.status.replace(/[^a-zA-Z0-9_-]/g, '');
+    const approvalStates = task.approval_statuses.join(', ') || 'none';
+    messages.push({ id: `task-state-${task.task_id}`, role: 'assistant', timestamp: '',
+      content: `**Task status:** ${taskStatus}. **Approval history:** ${approvalStates}. This is read-only; open Tasks for current state.` });
+  }
+  return { id, messages, title: record.title || messages.find(m => m.role === 'user')?.content.slice(0, 38) || 'Conversation',
+    createdAt: 0, updatedAt: 0, model: '' };
+}
+
 interface ChatHistorySidebarProps {
   isOpen: boolean;
   onClose: () => void;
@@ -65,16 +82,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     }).catch(() => { if (generation.current === current) setCanExportLegacy(false); });
     (async () => {
       try {
-        const records = await loadOwnedHistory(fetchSessions, async (id) => {
-          const record = await fetchSession(id);
-          const messages: ChatMessage[] = record.messages.filter(m => m.role !== 'system').map((m, i) => ({
-            id: m.id || `${id}-${i}`, role: m.role, content: m.content,
-            timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
-            toolEvents: m.tool_events || [],
-          }));
-          return { id, messages, title: record.title || messages.find(m => m.role === 'user')?.content.slice(0, 38) || 'Conversation',
-            createdAt: 0, updatedAt: 0, model: '' };
-        }, () => generation.current === current);
+        const records = await loadOwnedHistory(fetchSessions, loadSession, () => generation.current === current);
         if (records) setSessions(records);
       } catch {
         if (generation.current === current) setError('Unable to load conversation history. Please sign in or try again.');
@@ -241,10 +249,17 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
             return (
               <div
                 key={s.id}
-                onClick={() => {
+                onClick={async () => {
                   if (!isEditing) {
-                    onSelectSession(s);
-                    onClose();
+                    const current = ++generation.current;
+                    try {
+                      const fresh = await loadSession(s.id);
+                      if (generation.current !== current) return;
+                      onSelectSession(fresh);
+                      onClose();
+                    } catch {
+                      if (generation.current === current) setError('Unable to revalidate conversation access.');
+                    }
                   }
                 }}
                 className={`group p-3 rounded-xl border transition-all cursor-pointer relative ${

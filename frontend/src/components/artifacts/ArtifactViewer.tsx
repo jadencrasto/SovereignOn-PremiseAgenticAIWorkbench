@@ -29,7 +29,6 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 
 interface ArtifactItem {
   filename: string;
-  path: string;
   size_bytes: number;
   modified_at: number;
   format: string;

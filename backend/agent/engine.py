@@ -156,7 +156,8 @@ class AgentEngine:
 
         response = await provider.chat(request)
 
-        self._memory.add_assistant_message(session_id, response.content)
+        from backend.security.conversation_access import source_provenance
+        self._memory.add_assistant_message(session_id, response.content, access_provenance=source_provenance(sources))
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -214,7 +215,8 @@ class AgentEngine:
                 break
 
         full_response = "".join(accumulated)
-        self._memory.add_assistant_message(session_id, full_response)
+        from backend.security.conversation_access import source_provenance
+        self._memory.add_assistant_message(session_id, full_response, access_provenance=source_provenance(sources))
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -533,6 +535,7 @@ class AgentEngine:
         user_role: Optional[str] = None,
         user_id: Optional[str] = None,
         tools_enabled: bool = True,
+        attachment_descriptor: Optional[dict] = None,
     ) -> AsyncIterator:
         """
         Two-step multimodal streaming with agentic tool loop.
@@ -554,7 +557,7 @@ class AgentEngine:
         t0 = time.monotonic()
 
         self._ensure_session(session_id)
-        self._memory.add_user_message(session_id, user_message)
+        self._memory.add_user_message(session_id, user_message, attachment=attachment_descriptor)
 
         # ---- Step 1: Vision analysis via LLaVA ----
         yield {"type": "agent_status", "status": "analyzing_image"}
@@ -666,6 +669,7 @@ class AgentEngine:
         working_messages = list(base_messages)
         iteration = 0
         final_text_parts = []
+        history_tool_events = []
         tool_call = None
 
         while iteration < self._max_tool_iterations:
@@ -719,6 +723,9 @@ class AgentEngine:
                         tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id,
                         tools_enabled=tools_enabled,
                     )
+                    if len(history_tool_events) < 32:
+                        history_tool_events.append({'tool': tool_name, 'success': bool(result.success),
+                                                    'invocation_id': str(uuid.uuid4())})
                 else:
                     from backend.tools.registry import ToolResult
                     result = ToolResult(
@@ -756,7 +763,7 @@ class AgentEngine:
         # Store final response in memory
         full_final = "".join(final_text_parts)
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -910,6 +917,7 @@ class AgentEngine:
         else:
             sources = await self._retrieve_context(user_message, user_clearance=user_role or "viewer")
         final_text_parts = []
+        history_tool_events = []
         executed_step_results: List[Dict[str, Any]] = []
 
         for step_idx, step in enumerate(plan.steps):
@@ -1488,6 +1496,9 @@ class AgentEngine:
                     user_id=effective_uid,
                     task_id=task.task_id, step_id=step.id,
                 )
+                if len(history_tool_events) < 32:
+                    history_tool_events.append({'tool': step.tool_name, 'success': bool(result.success),
+                                                'invocation_id': str(uuid.uuid4())})
             else:
                 from backend.tools.registry import ToolResult
                 result = ToolResult(
@@ -1617,7 +1628,7 @@ class AgentEngine:
 
         full_final = "\n".join(final_text_parts) if final_text_parts else ""
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         # Check if task was cancelled concurrently before transitioning
         fresh_task = self._task_manager.get_task(task.task_id)
@@ -1825,6 +1836,7 @@ class AgentEngine:
             raise
 
         session_id = task.session_id
+        history_tool_events = []
 
         yield {
             "type": "tool_start",
@@ -1844,6 +1856,8 @@ class AgentEngine:
                 step_id=awaiting_step.id,
                 approval_id=approval_id,
             )
+            history_tool_events.append({'tool': awaiting_step.tool_name, 'success': bool(result.success),
+                                        'invocation_id': str(uuid.uuid4())})
         else:
             from backend.tools.registry import ToolResult
             result = ToolResult(
@@ -2435,6 +2449,9 @@ class AgentEngine:
                     user_id=effective_step_uid,
                     task_id=task_id, step_id=step.id,
                 )
+                if len(history_tool_events) < 32:
+                    history_tool_events.append({'tool': step.tool_name, 'success': bool(result.success),
+                                                'invocation_id': str(uuid.uuid4())})
             else:
                 from backend.tools.registry import ToolResult
                 result = ToolResult(
@@ -2563,7 +2580,7 @@ class AgentEngine:
 
         full_final = "\n".join(final_text_parts) if final_text_parts else ""
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         all_steps = fresh_task.plan.steps if fresh_task and fresh_task.plan else []
         failed_steps = [s for s in all_steps if s.status == StepStatus.failed.value]
@@ -3187,7 +3204,9 @@ class AgentEngine:
         execution log and grounding instructions so the LLM is strictly grounded in what
         succeeded and what failed.
         """
-        history = self._memory.get_history(session_id)
+        # Assistant text may reflect sources whose clearance has changed.
+        # Exclude prior assistant answers until dependency lineage is tracked.
+        history = [m for m in self._memory.get_history(session_id) if m.role != 'assistant']
 
         # Build execution log
         log_lines = ["STRUCTURED EXECUTION LOG (Steps executed so far in this task):"]
@@ -5554,7 +5573,7 @@ class AgentEngine:
         this model call.  It is explicitly framed as external evidence so
         the model cannot be confused by instructions inside documents.
         """
-        history = self._memory.get_history(session_id)
+        history = [m for m in self._memory.get_history(session_id) if m.role != 'assistant']
 
         if not sources:
             return history

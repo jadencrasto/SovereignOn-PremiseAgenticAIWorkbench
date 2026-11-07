@@ -235,3 +235,7 @@ flowchart TD
 - **Acceptance Criteria Unmet:** Rich source citation recovery, image attachment restoration, artifact chat linkage, approval reload recovery, interrupted stream journaling, multimodal tool history persistence, real browser E2E verification.
 - **Readiness Status:** **PARTIAL (Phase 1.5.1 is incomplete. Phase 2 must not begin).**
 
+
+## Phase 1.5.2 addendum — 2026-11-07
+
+This addendum preserves the preceding audit as historical evidence. Follow-up work added limited final-response tool status persistence in multimodal/planner/resume and read-only owner-scoped task/approval status in history. It did not complete rich recovery, browser testing, model testing or OS isolation. See PHASE152_IMPLEMENTATION_REPORT.md for exact tests and remaining gaps.

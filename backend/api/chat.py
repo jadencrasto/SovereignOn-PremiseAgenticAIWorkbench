@@ -531,7 +531,9 @@ async def _stream_arithmetic_result(
     engine._memory.add_user_message(session_id, user_message)
 
     answer = f"**{result}**"
-    engine._memory.add_assistant_message(session_id, answer)
+    engine._memory.add_assistant_message(session_id, answer, access_provenance={
+        'version': 1, 'kind': 'deterministic_calculation', 'sources': [],
+    })
 
     # Emit calculator tool events for UI consistency
     calc_start = StreamChunk(type="tool_start", content="", tool="calculator", tool_args={"expression": user_message})
@@ -1008,6 +1010,7 @@ async def _stream_sse_multimodal(
         engine_stream = engine.chat_stream_with_tools_multimodal(
             session_id, user_message, image_b64, model_id, user_role=user_role, user_id=user_id,
             tools_enabled=use_tools,
+            attachment_descriptor=attachment_meta.model_dump() if attachment_meta else None,
         )
 
         async for item in engine_stream:
@@ -1266,12 +1269,47 @@ async def read_session(
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
     from backend.agent.memory import safe_tool_history
-    return {"session_id": session_id, "title": title, "messages": [
-        {"id": message.id, "role": message.role, "content": message.content,
-         "created_at": message.created_at,
-         "tool_events": safe_tool_history(message.extra_fields.get('tool_events_v1'))
-         if message.role == 'assistant' else []} for message in messages if message.role != "system"
-    ]}
+    from backend.security.conversation_access import may_read_assistant
+    # Only server-owned task records can contribute read-only recovery state.
+    # Never return approval arguments, hashes or executable authority here.
+    from datetime import datetime, timezone
+    tasks = []
+    manager = getattr(engine, '_task_manager', None)
+    approvals = getattr(engine, '_approval_manager', None)
+    if manager and approvals:
+        for task in manager.list_tasks(limit=200, user_id=current_user.id):
+            if task.session_id != session_id or task.user_id != current_user.id:
+                continue
+            states = []
+            for approval in approvals.get_approvals_for_task(task.task_id):
+                state = approval.status
+                if state in {'pending', 'approved'}:
+                    try:
+                        expiry = datetime.fromisoformat(approval.expires_at)
+                        if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+                            state = 'expired'
+                    except (ValueError, TypeError):
+                        state = 'expired'
+                if state in {'pending', 'approved', 'consumed', 'rejected', 'expired'}:
+                    states.append(state)
+            tasks.append({'task_id': task.task_id, 'status': getattr(task.status, 'value', task.status),
+                          'approval_statuses': states[:32]})
+    clearance = resolve_user_clearance(current_user)
+    doc_service = getattr(engine, '_doc_service', None)
+    visible_messages = []
+    for message in messages:
+        if message.role == 'system':
+            continue
+        allowed = message.role != 'assistant' or may_read_assistant(message, doc_service, clearance)
+        visible_messages.append({
+            "id": message.id, "role": message.role,
+            "content": message.content if allowed else '[Response withheld: source access cannot be verified.]',
+            "created_at": message.created_at,
+            "tool_events": safe_tool_history(message.extra_fields.get('tool_events_v1'))
+            if message.role == 'assistant' and allowed else [],
+            "withheld": not allowed,
+        })
+    return {"session_id": session_id, "title": title, "tasks": tasks, "messages": visible_messages}
 
 
 @router.patch("/sessions/{session_id}/title", summary="Rename an owned conversation")

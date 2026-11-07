@@ -254,6 +254,12 @@ class ConversationMemory:
         return session_id in self._store
 
     @_synchronized
+    def is_owned_by(self, session_id: str, owner_id: str) -> bool:
+        """Check a persisted relationship without claiming a legacy conversation."""
+        conv = self._store.get(session_id)
+        return bool(conv and conv.owner_id and conv.owner_id == owner_id)
+
+    @_synchronized
     def delete_session(self, session_id: str) -> bool:
         """Delete a session.  Returns True if it existed."""
         self._authorize(session_id)
@@ -269,19 +275,35 @@ class ConversationMemory:
     # ------------------------------------------------------------------
 
     @_synchronized
-    def add_user_message(self, session_id: str, content: str) -> Message:
+    def add_user_message(self, session_id: str, content: str, attachment=None) -> Message:
         """Append a user message to the session."""
+        descriptor = None
+        if attachment is not None:
+            # This descriptor is server-produced; bytes and filesystem paths never enter history.
+            identifier = str(uuid.UUID(str(attachment['attachment_id'])))
+            filename = attachment['filename']
+            if not isinstance(filename, str) or not filename or len(filename) > 255 or '/' in filename or '\\' in filename:
+                raise ValueError('Invalid attachment filename')
+            mime = attachment['mime_type']
+            size = attachment['size_bytes']
+            if mime not in {'image/png', 'image/jpeg', 'image/webp'} or not isinstance(size, int) or size <= 0 or size > 20 * 1024 * 1024:
+                raise ValueError('Invalid attachment metadata')
+            descriptor = {'attachment_id': identifier, 'filename': filename, 'mime_type': mime, 'size_bytes': size}
         msg = self._get_or_create(session_id).add_message("user", content)
+        if descriptor:
+            msg.extra_fields['attachments_v1'] = [descriptor]
         self._save()
         return msg
 
     @_synchronized
-    def add_assistant_message(self, session_id: str, content: str, tool_events=None) -> Message:
+    def add_assistant_message(self, session_id: str, content: str, tool_events=None, access_provenance=None) -> Message:
         """Append an assistant message to the session."""
         msg = self._get_or_create(session_id).add_message("assistant", content)
         safe_events = safe_tool_history(tool_events)
         if safe_events:
             msg.extra_fields['tool_events_v1'] = safe_events
+        if access_provenance is not None:
+            msg.extra_fields['access_provenance_v1'] = access_provenance
         self._save()
         return msg
 

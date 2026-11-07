@@ -134,8 +134,23 @@ def test_actual_auth_sessions_isolate_conversations_and_tasks(tmp_path, monkeypa
             owned_history = client.get('/api/chat/sessions/fixture-a', headers=headers_a)
             assert owned_history.status_code == 200
             assert any(message['content'] == '2 + 2' for message in owned_history.json()['messages'])
-            event = owned_history.json()['messages'][-1]['tool_events'][0]
-            assert event['tool'] == 'calculator' and 'summary' not in event
+            assert owned_history.json()['messages'][-1]['withheld'] is True
+            assert owned_history.json()['messages'][-1]['tool_events'] == []
+            owner_token = effective_owner.set('user_a')
+            try:
+                app.state.engine._memory.add_assistant_message('fixture-a', 'Synthetic classified answer', access_provenance={
+                    'version': 1, 'kind': 'plain_chat', 'sources': [{'document_id': 'd1', 'chunk_id': 'c1'}],
+                })
+            finally:
+                effective_owner.reset(owner_token)
+            def allowed_document(document_id, user_clearance):
+                return {'document_id':'d1', 'chunks':[{'chunk_id':'c1'}]} if user_clearance == 'operator' else None
+            with patch.object(app.state.engine._doc_service, 'get_document_details', side_effect=allowed_document):
+                assert client.get('/api/chat/sessions/fixture-a', headers=headers_a).json()['messages'][-1]['content'] == 'Synthetic classified answer'
+                app.state.auth_store.update_user('user_a', clearance='L1')
+                downgraded = client.get('/api/chat/sessions/fixture-a', headers=headers_a).json()['messages'][-1]
+                assert downgraded['withheld'] is True and 'Synthetic classified answer' not in downgraded['content']
+                app.state.auth_store.update_user('user_a', clearance='L2')
             assert client.get('/api/chat/sessions/fixture-a', headers=headers_b).status_code == 404
             assert client.patch('/api/chat/sessions/fixture-a/title', json={'title': 'Private title'}, headers=headers_b).status_code == 404
             assert client.patch('/api/chat/sessions/fixture-a/title', json={'title': 'Private title'}, headers=headers_a).status_code == 200
@@ -158,11 +173,24 @@ def test_actual_auth_sessions_isolate_conversations_and_tasks(tmp_path, monkeypa
             manager.update_step_status(task.task_id, 's1', 'awaiting_approval')
             manager.update_status(task.task_id, TaskStatus.AWAITING_APPROVAL)
             approval = app.state.approval_manager.request_approval(task.task_id, 's1', 'fixture_calc', {'expression': '2+3'})
+            restored = client.get('/api/chat/sessions/fixture-a', headers=headers_a).json()
+            assert restored['tasks'][0]['task_id'] == task.task_id
+            assert restored['tasks'][0]['approval_statuses'] == ['pending']
+            assert 'approval_id' not in str(restored['tasks']) and 'expression' not in str(restored['tasks'])
+            assert client.get('/api/chat/sessions/fixture-a', headers=headers_b).status_code == 404
             assert client.post(f'/api/tasks/{task.task_id}/approve', json={'action': 'approve'}, headers=headers_b).status_code == 404
             response = client.post(f'/api/tasks/{task.task_id}/approve', json={'action': 'approve'}, headers=headers_a)
             assert response.status_code == 200
             assert 'tool_result' in response.text and '"success": true' in response.text
             assert app.state.task_store.get_approval(approval.approval_id)['status'] == 'consumed'
+            after_approval = client.get('/api/chat/sessions/fixture-a', headers=headers_a).json()
+            assert after_approval['tasks'][0]['approval_statuses'] == ['consumed']
+            assert any(message['withheld'] for message in after_approval['messages'])
+            expired = app.state.approval_manager.request_approval(task.task_id, 's2', 'fixture_calc', {'expression': '1'})
+            expired.expires_at = '2001-01-01T00:00:00+00:00'
+            app.state.task_store.save_approval(expired.model_dump())
+            statuses = client.get('/api/chat/sessions/fixture-a', headers=headers_a).json()['tasks'][0]['approval_statuses']
+            assert statuses == ['consumed', 'expired']
             assert client.post(f'/api/tasks/{task.task_id}/approve', json={'action': 'approve'}, headers=headers_a).status_code in (400, 404)
             assert client.delete('/api/chat/sessions/fixture-a', headers=headers_b).status_code == 404
             assert client.get('/api/chat/sessions/fixture-a', headers=headers_a).status_code == 200
