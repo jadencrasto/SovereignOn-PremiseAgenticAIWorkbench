@@ -20,6 +20,7 @@ from functools import wraps
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from pathlib import Path
+from datetime import datetime, timezone
 
 from backend.models.base import Message
 from backend.config import PROJECT_ROOT
@@ -73,9 +74,12 @@ class Conversation:
     session_id: str
     messages: List[Message] = field(default_factory=list)
     owner_id: Optional[str] = None
+    extra_fields: dict = field(default_factory=dict, repr=False)
+    stored_as_object: bool = False
 
     def add_message(self, role: str, content: str) -> Message:
-        msg = Message(role=role, content=content)
+        msg = Message(role=role, content=content, id=str(uuid.uuid4()),
+                      created_at=datetime.now(timezone.utc).isoformat())
         self.messages.append(msg)
         return msg
 
@@ -134,14 +138,16 @@ class ConversationMemory:
             data = {}
             for sid, conv in self._store.items():
                 messages = [
-                    {
+                    {**msg.extra_fields,
                         "role": msg.role,
                         "content": msg.content,
                         "images": getattr(msg, "images", []),
+                        "id": msg.id,
+                        "created_at": msg.created_at,
                     }
                     for msg in conv.messages
                 ]
-                data[sid] = {'owner_id': conv.owner_id, 'messages': messages} if conv.owner_id else messages
+                data[sid] = {**conv.extra_fields, 'owner_id': conv.owner_id, 'messages': messages} if conv.owner_id or conv.stored_as_object else messages
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self._storage_file.parent,
                                              prefix=".memory-", suffix=".tmp", delete=False) as f:
                 tmp_name = f.name
@@ -164,12 +170,19 @@ class ConversationMemory:
                 data = json.load(f)
             for sid, msg_dicts in data.items():
                 owner_id = None
-                if isinstance(msg_dicts, dict):
+                extra_fields = {}
+                stored_as_object = isinstance(msg_dicts, dict)
+                if stored_as_object:
                     owner_id = msg_dicts['owner_id']
+                    extra_fields = {k: v for k, v in msg_dicts.items() if k not in {'owner_id', 'messages'}}
                     msg_dicts = msg_dicts['messages']
-                conv = Conversation(session_id=sid, owner_id=owner_id)
-                for msg_dict in msg_dicts:
-                    conv.messages.append(Message(**msg_dict))
+                conv = Conversation(session_id=sid, owner_id=owner_id, extra_fields=extra_fields, stored_as_object=stored_as_object)
+                for index, msg_dict in enumerate(msg_dicts):
+                    known = {k: msg_dict[k] for k in ('role', 'content', 'images', 'id', 'created_at') if k in msg_dict}
+                    if not known.get('id'):
+                        known['id'] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"sovereign-conversation:{sid}:{index}"))
+                    known['extra_fields'] = {k: v for k, v in msg_dict.items() if k not in {'role', 'content', 'images', 'id', 'created_at'}}
+                    conv.messages.append(Message(**known))
                 self._store[sid] = conv
             logger.info(f"Loaded {len(self._store)} sessions from {self._storage_file}")
         except Exception as e:
@@ -205,7 +218,8 @@ class ConversationMemory:
             logger.debug("Reusing existing session %s", sid)
             return sid
 
-        conv = Conversation(session_id=sid, owner_id=self._current_owner())
+        conv = Conversation(session_id=sid, owner_id=self._current_owner(),
+                            extra_fields={'schema_version': 2}, stored_as_object=True)
         if system_prompt:
             conv.add_message("system", system_prompt)
             logger.debug("Created session %s with system prompt (%d chars)", sid, len(system_prompt))
@@ -266,6 +280,24 @@ class ConversationMemory:
         return self._store[session_id].get_history()
 
     @_synchronized
+    def get_title(self, session_id: str) -> Optional[str]:
+        self._authorize(session_id)
+        if session_id not in self._store:
+            raise KeyError(session_id)
+        title = self._store[session_id].extra_fields.get('title')
+        return title if isinstance(title, str) else None
+
+    @_synchronized
+    def set_title(self, session_id: str, title: str) -> None:
+        self._authorize(session_id)
+        if session_id not in self._store:
+            raise KeyError(session_id)
+        conv = self._store[session_id]
+        conv.stored_as_object = True
+        conv.extra_fields['title'] = title
+        self._save()
+
+    @_synchronized
     def clear_session(self, session_id: str) -> None:
         """Clear messages but keep the session entry."""
         self._authorize(session_id)
@@ -298,7 +330,8 @@ class ConversationMemory:
         self._authorize(session_id)
         if session_id not in self._store:
             logger.debug("Auto-creating session %s", session_id)
-            self._store[session_id] = Conversation(session_id=session_id, owner_id=self._current_owner())
+            self._store[session_id] = Conversation(session_id=session_id, owner_id=self._current_owner(),
+                                                   extra_fields={'schema_version': 2}, stored_as_object=True)
             self._save()
         return self._store[session_id]
 

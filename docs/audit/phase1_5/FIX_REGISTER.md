@@ -34,3 +34,15 @@ Checkpoint is branch `phase1-5-recovery-security`, commit `5dc673f55a02e1c689af6
 | ISS-007 | No change | Not verified. | Propagate authenticated clearance across all paths. |
 
 Do not assume partial fixes close the associated issues until the remaining verification and integration tests pass.
+
+## Final integration verification, 2026-11-07
+
+Fixed a tools-disabled arithmetic shortcut in `backend/api/chat.py:195`; real-route synthetic regression included in `test_phase15_app_integration.py`. Open: browser localStorage history is shared across users of the same browser profile (`frontend/src/components/chat/ChatHistorySidebar.tsx:34`), and sidebar deletion does not invoke the server delete helper (`frontend/src/api/chat.ts:102`). See FINAL_INTEGRATION_REPORT.md.
+
+## Browser history synchronization, 2026-11-07
+
+Implemented server-owned list/read and confirmed server deletion, with account-keyed chat remount, stream abort, stale-request invalidation and cross-tab auth-change notification. Legacy `sovereign_chat_sessions_v2` remains untouched and is never read or assigned. The earlier browser-history and sidebar-delete findings are addressed in code but browser verification is outstanding. Server history currently contains message role/content only: after reload titles are inferred, timestamps, rich tool/source/approval state and display renames are not restored. Browser-only legacy conversations remain quarantined, including in local mode; safe recovery needs a separate explicit attribution design.
+
+## Phase 1.5.1 conversation recovery
+
+Partial implementation: stable message IDs/timestamps, server-owned title, unknown-field preservation, local-only explicit legacy export. Rich events, browser verification and approval revalidation remain open. See CONVERSATION_RECOVERY_REPORT.md.

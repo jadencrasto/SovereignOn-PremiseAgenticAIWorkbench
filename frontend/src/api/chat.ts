@@ -105,3 +105,17 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
   });
 }
 
+
+export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; messages: {id?: string | null; role: 'system' | 'user' | 'assistant'; content: string; created_at?: string | null}[]}> {
+  return apiRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}`);
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<{ title: string }> {
+  return apiRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/title`, {
+    method: 'PATCH', body: JSON.stringify({ title }),
+  });
+}
+
+export async function legacyExportAllowed(): Promise<{ allowed: boolean }> {
+  return apiRequest('/api/chat/legacy-export-policy');
+}

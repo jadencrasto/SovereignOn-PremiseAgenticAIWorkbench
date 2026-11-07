@@ -19,3 +19,15 @@ An initial older RBAC/tool run produced 8 failures and 91 passes: its tests assu
 Isolated synchronous tests in `tests/backend/test_phase15_targeted.py`: 8 passed, 3 deselected, 2 warnings. These cover config binding/auth, production auth override, external font references and evaluation reporting. Async tests for upload size and multimodal dispatch were deselected because the environment cannot complete a minimal asyncio event loop; no result is claimed for those cases. Tests use mocks for some boundaries and do not establish end-to-end security.
 
 Outstanding: session ownership, cross-user guessed IDs, legacy-data migration, concurrent writes, exact-limit and interrupted upload, multipart ingress limits, all-path clearance, registry-level tool disable, approval-to-action binding and live browser network capture. All remain unverified or unimplemented.
+
+## Final integration verification, 2026-11-07
+
+Current targeted run: 81 passed, 0 failed, 0 skipped; real-route synthetic integration: 2 passed, 0 failed, 0 skipped. Actual authentication, SQLite and conversation files were used with fake Chroma and inference; see FINAL_INTEGRATION_REPORT.md for exact commands and boundaries. Browser localStorage is not account-scoped, a remaining confidentiality issue. Full-suite and OS isolation are still BLOCKED.
+
+## Browser history synchronization, 2026-11-07
+
+`node --experimental-strip-types --test tests/historyRequests.test.mjs` (frontend): 4 passed, 0 failed, 0 skipped. Unit tests exercise server-authorized account lists, stale list/read invalidation, local-principal behavior, delete success and error propagation using fakes; they do not mount React or verify real browser storage, cookies, cross-tab messaging or logout. Isolated archive with current `backend/api/chat.py` and `tests/backend/test_phase15_app_integration.py` overlaid: `python -m pytest -p pytest_asyncio.plugin tests/backend/test_phase15_app_integration.py -q -p no:cacheprovider --tb=short`: 2 passed, 0 failed, 0 skipped, 12.36s. Actual FastAPI routes/auth/temporary persistence, simulated models and Chroma; tests include authorized read, guessed/missing ID denial, denied deletion and successful deletion. Full suite and OS-level egress proof remain BLOCKED.
+
+## Phase 1.5.1 conversation recovery
+
+Isolated targeted Python run: 20 passed, 0 failed, 0 skipped; frontend helper tests: 4 passed, 0 failed, 0 skipped. Initial targeted run: 19 passed, 1 failed due to an incorrect expectation for an invalid-token response (actual 401); the test was corrected. Models and Chroma are fake in integration tests. Browser and OS-level network isolation remain unverified; details in CONVERSATION_RECOVERY_REPORT.md.

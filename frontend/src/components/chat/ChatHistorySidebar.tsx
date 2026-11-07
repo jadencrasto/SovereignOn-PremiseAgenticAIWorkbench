@@ -1,12 +1,13 @@
 /**
  * frontend/src/components/chat/ChatHistorySidebar.tsx
  * ---------------------------------------------------
- * Full Persistent Chat History Management Drawer.
- * Stores multi-turn conversations in local storage, allows switching between past sessions,
- * continuing any chat anytime, searching history, renaming titles, and exporting transcripts.
+ * Server-authorized conversation history drawer. Legacy browser records are
+ * deliberately not read because their ownership cannot be established.
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { clearSession, fetchSessions, fetchSession, legacyExportAllowed, renameSession } from '../../api/chat';
+import { loadOwnedHistory, deleteOwnedHistory } from './historyRequests';
 import type { ChatMessage } from '../../types';
 import {
   MessageSquare,
@@ -31,46 +32,6 @@ export interface ChatSession {
   model: string;
 }
 
-const STORAGE_KEY = 'sovereign_chat_sessions_v2';
-
-export function loadAllSessions(): ChatSession[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.error('Failed to load chat history from localStorage', err);
-    return [];
-  }
-}
-
-export function saveSessionToStorage(session: ChatSession) {
-  try {
-    const existing = loadAllSessions();
-    const index = existing.findIndex((s) => s.id === session.id);
-    if (index >= 0) {
-      existing[index] = session;
-    } else {
-      existing.unshift(session);
-    }
-    // Limit to last 50 sessions
-    const trimmed = existing.slice(0, 50);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
-  } catch (err) {
-    console.error('Failed to save chat session', err);
-  }
-}
-
-export function deleteSessionFromStorage(sessionId: string) {
-  try {
-    const existing = loadAllSessions().filter((s) => s.id !== sessionId);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
-  } catch (err) {
-    console.error('Failed to delete chat session', err);
-  }
-}
-
 interface ChatHistorySidebarProps {
   isOpen: boolean;
   onClose: () => void;
@@ -90,15 +51,35 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState<string>('');
-
-  const reloadSessions = () => {
-    setSessions(loadAllSessions());
-  };
+  const [error, setError] = useState<string>('');
+  const [deleting, setDeleting] = useState(false);
+  const [canExportLegacy, setCanExportLegacy] = useState(false);
+  const generation = useRef(0);
 
   useEffect(() => {
-    if (isOpen) {
-      reloadSessions();
-    }
+    if (!isOpen) return;
+    const current = ++generation.current;
+    setError('');
+    void legacyExportAllowed().then(policy => {
+      if (generation.current === current) setCanExportLegacy(policy.allowed);
+    }).catch(() => { if (generation.current === current) setCanExportLegacy(false); });
+    (async () => {
+      try {
+        const records = await loadOwnedHistory(fetchSessions, async (id) => {
+          const record = await fetchSession(id);
+          const messages: ChatMessage[] = record.messages.filter(m => m.role !== 'system').map((m, i) => ({
+            id: m.id || `${id}-${i}`, role: m.role, content: m.content,
+            timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
+          }));
+          return { id, messages, title: record.title || messages.find(m => m.role === 'user')?.content.slice(0, 38) || 'Conversation',
+            createdAt: 0, updatedAt: 0, model: '' };
+        }, () => generation.current === current);
+        if (records) setSessions(records);
+      } catch {
+        if (generation.current === current) setError('Unable to load conversation history. Please sign in or try again.');
+      }
+    })();
+    return () => { generation.current++; };
   }, [isOpen]);
 
   const filteredSessions = useMemo(() => {
@@ -111,13 +92,24 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     });
   }, [sessions, searchQuery]);
 
+  const removeSession = async (id: string) => {
+    const current = ++generation.current;
+    setDeleting(true);
+    setError('');
+    try {
+      if (!await deleteOwnedHistory(id, clearSession, () => generation.current === current)) return;
+      setSessions(prev => prev.filter(s => s.id !== id));
+      if (id === currentSessionId) onNewChat();
+    } catch {
+      setError('Conversation was not deleted. Check your session and connection, then try again.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    deleteSessionFromStorage(id);
-    setSessions((prev) => prev.filter((s) => s.id !== id));
-    if (id === currentSessionId) {
-      onNewChat();
-    }
+    if (!deleting) void removeSession(id);
   };
 
   const handleStartRename = (e: React.MouseEvent, s: ChatSession) => {
@@ -126,14 +118,15 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     setEditTitle(s.title);
   };
 
-  const handleSaveRename = (e: React.MouseEvent, id: string) => {
+  const handleSaveRename = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (editTitle.trim()) {
-      const updated = sessions.map((s) =>
-        s.id === id ? { ...s, title: editTitle.trim(), updatedAt: Date.now() } : s
-      );
-      setSessions(updated);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      const current = ++generation.current;
+      try {
+        const result = await renameSession(id, editTitle.trim());
+        if (generation.current === current) setSessions(prev => prev.map(s =>
+          s.id === id ? { ...s, title: result.title } : s));
+      } catch { if (generation.current === current) setError('Conversation could not be renamed.'); }
     }
     setEditingId(null);
   };
@@ -167,6 +160,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   };
 
   const formatRelativeTime = (timestamp: number) => {
+    if (!timestamp) return 'Date unavailable';
     const now = Date.now();
     const diff = Math.floor((now - timestamp) / 1000);
     if (diff < 60) return 'Just now';
@@ -227,6 +221,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
         </div>
       </div>
 
+      {error && <p role="alert" className="px-3 text-sm text-red-700">{error}</p>}
       {/* Session List */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {filteredSessions.length === 0 ? (
@@ -312,6 +307,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                       </button>
                       <button
                         onClick={(e) => handleDelete(e, s.id)}
+                        disabled={deleting}
                         className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded"
                         title="Delete"
                       >
@@ -337,21 +333,47 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
         )}
       </div>
 
-      {/* Footer Clear All */}
+      {canExportLegacy && (
+        <button className="p-3 text-sm text-slate-500" onClick={async () => {
+          if (!confirm('Export unverified old browser history? It may contain another person’s private data. Save it only to a trusted location.')) return;
+          const current = generation.current;
+          try {
+            const policy = await legacyExportAllowed();
+            if (!policy.allowed || generation.current !== current) return;
+            const raw = localStorage.getItem('sovereign_chat_sessions_v2');
+            if (raw === null) { setError('No legacy browser history was found.'); return; }
+            const url = URL.createObjectURL(new Blob([raw], { type: 'application/json' }));
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'sovereign-unverified-legacy-history.json';
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          } catch { setError('Legacy history export is unavailable.'); }
+        }}>Export unverified legacy history</button>
+      )}
+
       {sessions.length > 0 && (
-        <div className="p-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs rounded-b-xl">
-          <button
-            onClick={() => {
-              if (confirm('Clear all conversation history? This cannot be undone.')) {
-                localStorage.removeItem(STORAGE_KEY);
-                setSessions([]);
-                onNewChat();
+        <div className="p-4 border-t border-slate-200">
+          <button disabled={deleting} className="text-sm text-slate-500 hover:text-rose-600"
+            onClick={async () => {
+              if (!confirm('Delete all listed conversations from the server?')) return;
+              const current = ++generation.current;
+              setDeleting(true);
+              setError('');
+              let failed = false;
+              for (const session of sessions) {
+                if (generation.current !== current) break;
+                try {
+                  await clearSession(session.id);
+                  if (generation.current !== current) break;
+                  setSessions(prev => prev.filter(item => item.id !== session.id));
+                  if (session.id === currentSessionId) onNewChat();
+                } catch { failed = true; }
               }
-            }}
-            className="text-sm font-medium text-slate-500 hover:text-rose-600 transition-colors flex items-center gap-1.5"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Clear All History</span>
+              if (failed) setError('Some conversations could not be deleted. They remain in the list.');
+              setDeleting(false);
+            }}>
+            Clear All History
           </button>
         </div>
       )}

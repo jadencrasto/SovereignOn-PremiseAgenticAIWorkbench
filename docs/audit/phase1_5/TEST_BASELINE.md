@@ -38,3 +38,11 @@ Environment: Windows, Python 3.13.7, Node 22.20.0; isolated Git-archive copy wit
 - `git diff --check`: exit 0, line-ending warnings only.
 
 Full Python suite, browser tests, evaluation runner and local-model tests are blocked/not run, not passed. In a permissive local Windows environment, rerun with isolated data, normal pytest plugins and bounded timeouts. Do not use production uploads or tracked evaluation results. Pin a verified Windows Python/dependency set and archive offline wheels with hashes after compatibility and licensing review; no dependency lock or wheelhouse was generated here.
+
+## Final integration verification, 2026-11-07
+
+Current isolated targeted tests: 81 passed, 0 failed, 0 skipped; app lifespan/route tests with fake Chroma and inference: 2 passed, 0 failed, 0 skipped. Frontend lint, both TypeScript checks and isolated Vite build exited 0, with lint/build warnings. Exact commands, durations, coverage and limitations: FINAL_INTEGRATION_REPORT.md. Full suite was not retried and remains BLOCKED; no OS-level network isolation was verified.
+
+## Phase 1.5.1 conversation recovery
+
+20 targeted Python tests and 4 existing frontend helper tests passed; frontend lint, both TypeScript checks and temporary Vite build succeeded with warnings. Exact command, initial test failure and boundaries are in CONVERSATION_RECOVERY_REPORT.md. Full-suite retry remains blocked.

@@ -55,7 +55,7 @@ interface TabItem {
 
 export const AppLayout: React.FC = () => {
   const { activeTab, setActiveTab, isBackendConnected, documents, selectedModel } = useWorkbench();
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
   // Check URL pathname on mount and on history changes (/admin, /manager, /user)
@@ -208,7 +208,7 @@ export const AppLayout: React.FC = () => {
       {/* Main Full-Screen Native Studio Workspace */}
       <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[#f0f7ff]">
         {activeTab === 'demo' && <DemoScenarioLauncher />}
-        {activeTab === 'chat' && <ChatView />}
+        {activeTab === 'chat' && !isLoading && user && <ChatView key={user.id} />}
         {activeTab === 'tasks' && <TaskHistoryView />}
         {activeTab === 'artifacts' && <ArtifactViewer />}
         {activeTab === 'documents' && <DocumentsView />}

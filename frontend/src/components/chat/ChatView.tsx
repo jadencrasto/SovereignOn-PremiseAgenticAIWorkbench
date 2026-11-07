@@ -10,12 +10,10 @@ import type { ChatMessage, ImageAttachment, SourceReference, ToolEvent } from '.
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { useWorkbench } from '../../context/WorkbenchContext';
-import { streamChat, streamChatMultimodal } from '../../api/chat';
+import { fetchSessions, streamChat, streamChatMultimodal } from '../../api/chat';
 import { approveTaskStep, rejectTaskStep } from '../../api/tasks';
 import {
   ChatHistorySidebar,
-  loadAllSessions,
-  saveSessionToStorage,
   type ChatSession,
 } from './ChatHistorySidebar';
 import {
@@ -34,43 +32,23 @@ export const ChatView: React.FC = () => {
   const [sessionCount, setSessionCount] = useState<number>(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const sessionMessagesRef = useRef<Record<string, ChatMessage[]>>({});
   const { selectedModel, addToast } = useWorkbench();
 
-  // Load last active session on initial mount if available
-  useEffect(() => {
-    const all = loadAllSessions();
-    setSessionCount(all.length);
-    if (all.length > 0 && messages.length === 0) {
-      const latest = all[0];
-      setActiveSessionId(latest.id);
-      setSessionTitle(latest.title);
-      setMessages(latest.messages);
-    }
-  }, []);
-
-  // Sync session count whenever history is loaded
+  // Conversation contents are owned and persisted by the server.
   const updateSessionCount = useCallback(() => {
-    setSessionCount(loadAllSessions().length);
+    void fetchSessions().then(result => setSessionCount(result.count)).catch(() => {});
   }, []);
-
-  // Helper to persist current conversation to storage
-  const persistSession = useCallback(
-    (newMessages: ChatMessage[], customTitle?: string) => {
-      if (newMessages.length === 0) return;
-      const titleToSave = customTitle || sessionTitle;
-      const sessionObj: ChatSession = {
-        id: activeSessionId,
-        title: titleToSave,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messages: newMessages,
-        model: selectedModel,
-      };
-      saveSessionToStorage(sessionObj);
-      updateSessionCount();
-    },
-    [activeSessionId, sessionTitle, selectedModel, updateSessionCount]
-  );
+  useEffect(() => {
+    if (messages.length) sessionMessagesRef.current[activeSessionId] = messages;
+  }, [activeSessionId, messages]);
+  useEffect(() => {
+    updateSessionCount();
+    return () => { abortControllerRef.current?.abort(); };
+  }, [updateSessionCount]);
+  const persistSession = useCallback((_messages: ChatMessage[], _title?: string) => {
+    // Server-side chat handling persists messages; browser history is quarantined.
+  }, []);
 
   const handleApproveRef = useRef<(taskId: string) => Promise<void>>(async () => {});
   const handleRejectRef = useRef<(taskId: string) => Promise<void>>(async () => {});
@@ -322,6 +300,7 @@ export const ChatView: React.FC = () => {
             return next;
           });
           setIsStreaming(false);
+          updateSessionCount();
         },
         onError: (errorText: string) => {
           setMessages((prev) => {
@@ -385,7 +364,7 @@ export const ChatView: React.FC = () => {
         abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, isStreaming, addToast, sessionTitle, messages, persistSession]
+    [activeSessionId, selectedModel, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount]
   );
 
   /**
@@ -604,10 +583,11 @@ export const ChatView: React.FC = () => {
 
   // Switch to a previous conversation session from history
   const handleSelectSession = (session: ChatSession) => {
+    if (session.id === activeSessionId) return;
     handleStopStream();
     setActiveSessionId(session.id);
     setSessionTitle(session.title);
-    setMessages(session.messages);
+    setMessages(sessionMessagesRef.current[session.id] ?? session.messages);
     addToast('info', `Resumed session: ${session.title}`);
   };
 

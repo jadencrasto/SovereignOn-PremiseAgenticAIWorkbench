@@ -34,3 +34,11 @@ No live model workflow was verified: the environment denied loopback access to O
 | Conversation restart and recovery | NOT RUN | Ownership migration not implemented |
 
 No mock-only test is counted as a live workflow.
+
+## Final integration verification, 2026-11-07
+
+Actual app routes with isolated persistence and fake models/vector services covered local sessions, legacy claim/restart, two-user session/task isolation, approval/replay and upload rejection. No live Qwen, Nomic, LLaVA, real RAG, artifact generation, full agent or verified sandbox workflow was run in this verification. See FINAL_INTEGRATION_REPORT.md; prior live-model records remain historical.
+
+## Phase 1.5.1 conversation recovery
+
+Synthetic actual-route coverage exercises ownership, title, legacy export policy and persistence with mocked model/vector services. No real browser, real model or rich-workflow reload was run. See CONVERSATION_RECOVERY_REPORT.md.

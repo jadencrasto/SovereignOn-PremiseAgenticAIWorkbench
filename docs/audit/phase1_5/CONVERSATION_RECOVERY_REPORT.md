@@ -1,0 +1,36 @@
+# Conversation recovery: Phase 1.5.1
+
+Status: **PARTIAL**, 2026-11-07. Branch `phase1-5-recovery-security`, baseline `ec4839c4b05d27132985908908886df916b38dc5`. Existing uncommitted Phase 1.5 changes were retained. No real user conversation store was opened or modified by tests.
+
+## Data flow before this change
+
+The engine records user and completed assistant text in `ConversationMemory`, a JSON store with atomic replacement and cooperative locks. Streaming deltas, tool and source events enter React state; task and approval state are persisted separately in the existing task store. The history endpoint returns owned messages and the sidebar hydrates them. Earlier browser-local history at `sovereign_chat_sessions_v2` is unattributed and remains quarantined. The current persisted conversation data cannot safely reconstruct authorized citations, artifacts, image references, in-progress streams or actionable approvals.
+
+## Implemented subset
+
+- Extend the existing store, not a second conversation system. Newly created conversation objects use `schema_version: 2`; new messages carry UUIDs and UTC creation timestamps. Existing unversioned records remain accepted; missing IDs are deterministically derived from session ID and message position, and unknown timestamps remain absent. Reads alone do not write or claim ownership.
+- Existing unknown conversation and message fields are retained when the JSON file is next written, including object-shaped unowned records. Existing owners and message ordering are retained. This is a compatibility strategy, not validation of arbitrary future schemas; malformed records and unsupported version semantics need further work.
+- History reads expose stable message IDs, timestamps and user-defined title, omit system messages, and remain scoped by server identity. Rename is an owner-checked, length-bounded server operation. The frontend hydrates these fields. Streaming, model inputs and approval authorization do not consume the new fields.
+- Local-only, explicit legacy export: in unauthenticated local mode, and only for the server-recognized local principal without presented credentials, the history drawer offers an explicit warning and download of the raw browser record. The server policy is checked again after confirmation. It neither imports nor deletes the record. The export is unverified, may contain someone else's data and must be saved privately. In authenticated mode the export policy denies this path; no historical ownership is asserted. Browser-level verification remains outstanding.
+
+## Migration, backup and rollback
+
+No real data migration was performed during this work. Existing data is parsed in memory; legacy deterministic IDs become persisted when an ordinary write atomically rewrites the store, including writes to other sessions. Existing locks and temporary-file replacement apply; an injected replace failure preserved the original synthetic file in a test. Automatic backups are not implemented. Before deploying this change, stop all writers, make a separate access-controlled backup of the conversation file and associated task database, and verify the copy. For rollback, stop all writers, preserve a copy of the newer data, then restore the verified pre-upgrade backup and compatible code; work added since the backup would otherwise be lost. Restoring to an older binary may discard new or unknown fields on later writes, so do not assume backwards write compatibility. Windows cooperative locks do not protect non-cooperating processes or sync tools.
+
+## Still missing or unverified
+
+No canonical persistence for tool events, source references, artifacts, attachments, interrupted-stream status, workflow links, or current approval state was added. This work does not restore, authorize, replay or automatically execute an approval or tool. Displayed pending approvals after reload require future server-side revalidation. Size bounds, retention, duplicate-reconnect handling, complete schema validation and an idempotent import are not implemented. Legacy export is unavailable to authenticated accounts; its usability and cross-tab security were not tested in a real browser. Conversation timestamps and titles for older records may remain unavailable. No real-model, browser E2E, artifact or classified-source tests were performed.
+
+Acceptance criteria 1, 3 and 8 are **PARTIAL** (text/IDs and old records covered in synthetic tests); 2 is **PARTIAL** (backend owner tests pass, real-browser account isolation not verified); 4–6 are **BLOCKED/NOT IMPLEMENTED** for rich data and approval restoration; 7 is **PARTIAL** (explicit local-only export implemented, real browser unverified); 9 is **PARTIAL** (existing targeted cooperative-writer tests pass; non-cooperating processes not covered); 10 is **UNVERIFIED** for live streaming/task workflows; 11 is **PARTIAL** (targeted tests pass); 12 is met by this report. This is not release ready and Phase 2 should not begin.
+
+## Verification
+
+With `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `PYTHONDONTWRITEBYTECODE=1`, isolated archive of HEAD and the current backend/test files overlaid, the following targeted command passed **20 tests, 0 failed, 0 skipped, 12.30s**:
+
+```text
+python -m pytest -p pytest_asyncio.plugin tests/backend/test_phase151_conversation_records.py tests/backend/test_phase15_app_integration.py tests/backend/test_phase15_memory_continuation.py tests/backend/test_memory.py -q -p no:cacheprovider --tb=short
+```
+
+It covers legacy read/restart, owner isolation, atomic replacement failure, existing cooperative writes and actual app routes with synthetic data and fake model/vector services. An earlier run of the same set reported 19 passed and 1 failed because the new test expected a policy JSON response for an invalid token; the authentication layer correctly returned 401. The expectation was corrected without weakening authentication. These are not live model or OS isolation tests.
+
+Frontend: `node --experimental-strip-types --test tests/historyRequests.test.mjs` **4 passed, 0 failed, 0 skipped** (pre-existing helper tests; not React/browser tests); `npm run lint` exit 0 with warnings; `tsc.cmd --noEmit --incremental false -p tsconfig.app.json` and corresponding `tsconfig.node.json` exit 0; `vite.cmd build --outDir <new temporary directory> --logLevel warn` exit 0 with a large-chunk warning. Full Python suite remains BLOCKED after the automatic review rejected a prior unidentified telemetry request; it was not retried. No OS-level egress isolation was demonstrated.

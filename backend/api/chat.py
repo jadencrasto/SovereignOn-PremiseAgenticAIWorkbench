@@ -34,6 +34,7 @@ from typing import AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from backend.schemas.chat import (
     ChatRequest,
@@ -50,6 +51,9 @@ from backend.auth.models import Permission, User, resolve_user_clearance
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+class ConversationTitle(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +196,7 @@ async def chat(
         )
 
         # 1. Arithmetic auto-detection
-        arith_result = _try_arithmetic(body.message)
+        arith_result = _try_arithmetic(body.message) if body.tools_enabled else None
         if arith_result is not None:
             logger.info("arithmetic_shortcut | session=%s result=%s", session_id, arith_result)
             return StreamingResponse(
@@ -1234,6 +1238,50 @@ async def list_sessions(
         "sessions": memory.list_sessions(),
         "count": memory.session_count(),
     }
+
+
+@router.get("/legacy-export-policy", summary="Check local legacy export availability")
+async def legacy_export_policy(
+    request: Request,
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
+    # Browser records have no verifiable owner. Only the unauthenticated local
+    # principal may offer an explicit export; no account receives an import.
+    local_mode = not request.app.state.settings.auth_enabled
+    has_credentials = bool(request.headers.get('authorization') or request.cookies.get('session_token'))
+    return {"allowed": bool(local_mode and current_user.id == 'user_dev_admin' and not has_credentials)}
+
+
+@router.get("/sessions/{session_id}", summary="Read an owned conversation")
+async def read_session(
+    session_id: str,
+    engine=Depends(get_engine),
+    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+):
+    try:
+        if session_id not in engine._memory.list_sessions():
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        messages = engine._memory.get_history(session_id)
+        title = engine._memory.get_title(session_id)
+    except (PermissionError, KeyError):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"session_id": session_id, "title": title, "messages": [
+        {"id": message.id, "role": message.role, "content": message.content,
+         "created_at": message.created_at} for message in messages if message.role != "system"
+    ]}
+
+
+@router.patch("/sessions/{session_id}/title", summary="Rename an owned conversation")
+async def rename_session(session_id: str, body: ConversationTitle, engine=Depends(get_engine),
+                         current_user: User = Depends(require_permission(Permission.VIEW_DATA))):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Title cannot be blank")
+    try:
+        engine._memory.set_title(session_id, title)
+    except (PermissionError, KeyError):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"session_id": session_id, "title": title}
 
 
 @router.delete("/sessions/{session_id}", summary="Clear a conversation session")

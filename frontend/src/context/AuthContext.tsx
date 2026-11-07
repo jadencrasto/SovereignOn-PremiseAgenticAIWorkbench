@@ -5,7 +5,7 @@
  * login, logout, and permission checks.
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type { User, UserRole } from '../types';
 import { getMeApi, loginApi, logoutApi } from '../api/auth';
@@ -32,39 +32,64 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const authEpoch = useRef(0);
+  const authChannel = useRef<BroadcastChannel | null>(null);
 
   const refreshUser = async () => {
+    const epoch = ++authEpoch.current;
     try {
       const u = await getMeApi();
-      setUser(u);
+      if (epoch === authEpoch.current) setUser(u);
     } catch {
-      setUser(null);
+      if (epoch === authEpoch.current) setUser(null);
     } finally {
-      setIsLoading(false);
+      if (epoch === authEpoch.current) setIsLoading(false);
     }
   };
 
   useEffect(() => {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const channel = new BroadcastChannel('sovereign-auth-changes');
+      authChannel.current = channel;
+      channel.onmessage = (event) => {
+        if (event.data === 'changing') {
+          authEpoch.current++;
+          setIsLoading(true);
+          setUser(null);
+        } else if (event.data === 'changed') {
+          void refreshUser();
+        }
+      };
+      refreshUser();
+      return () => { authChannel.current = null; channel.close(); };
+    }
     refreshUser();
   }, []);
 
   const login = async (username: string, password: string) => {
+    const epoch = ++authEpoch.current;
+    authChannel.current?.postMessage('changing');
     setIsLoading(true);
+    setUser(null);
     try {
       const res = await loginApi(username, password);
-      setUser(res.user);
+      if (epoch === authEpoch.current) setUser(res.user);
     } finally {
-      setIsLoading(false);
+      if (epoch === authEpoch.current) setIsLoading(false);
+      authChannel.current?.postMessage('changed');
     }
   };
 
   const logout = async () => {
+    const epoch = ++authEpoch.current;
+    authChannel.current?.postMessage('changing');
     setIsLoading(true);
+    setUser(null);
     try {
       await logoutApi();
-      setUser(null);
     } finally {
-      setIsLoading(false);
+      if (epoch === authEpoch.current) setIsLoading(false);
+      authChannel.current?.postMessage('changed');
     }
   };
 
