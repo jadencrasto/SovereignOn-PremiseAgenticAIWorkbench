@@ -39,3 +39,7 @@ The sets overlap. An earlier development run returned 17 passed and 1 failed bec
 4. Perform browser, real-model and Chroma checks in an approved independently isolated environment. Full-suite retry and OS isolation are still BLOCKED under the prior automatic review decision and must not be bypassed.
 
 A final focused rerun after adding the admin/inconsistent-task regression used the same isolated overlay and `python -m pytest -p pytest_asyncio.plugin tests/backend/test_phase153_security.py -q -p no:cacheprovider --tb=short`: **4 passed, 0 failed, 0 skipped in 1.22s**. This is a subset of the larger run and must not be added as unique coverage.
+
+## Phase 1.5.3 stabilization addendum — 2026-11-07
+
+NO-GO for Phase 1.5.4. Empty-source plain-chat provenance now fails closed. Synthetic tests confirmed that task detail can return a prior higher-clearance result to its downgraded owner, artifact registration can reassign a filename owner, and safe prior assistant messages are excluded from model context. Targeted Python result: 13 passed, 3 xfailed; a `--runxfail` confirmation produced the intended 3 failures. A cross-subsystem provenance and lifecycle design is needed. See PHASE153_STABILIZATION_REPORT.md.

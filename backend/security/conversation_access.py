@@ -3,7 +3,9 @@
 
 def source_provenance(sources):
     """Only used by plain chat, where prior assistant messages are excluded."""
-    if not isinstance(sources, list) or len(sources) > 64:
+    # An empty retrieval result also represents skipped, failed or timed-out
+    # retrieval; it is not evidence of source independence.
+    if not isinstance(sources, list) or not sources or len(sources) > 64:
         return None
     refs = []
     for source in sources:
@@ -23,6 +25,8 @@ def may_read_assistant(message, doc_service, clearance):
         return False
     refs = provenance.get('sources')
     if not isinstance(refs, list) or len(refs) > 64:
+        return False
+    if provenance['kind'] == 'plain_chat' and not refs:
         return False
     if provenance['kind'] == 'deterministic_calculation' and refs:
         return False

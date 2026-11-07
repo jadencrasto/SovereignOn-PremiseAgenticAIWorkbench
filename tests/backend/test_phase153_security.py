@@ -84,7 +84,9 @@ def test_source_policy_clearance_reclassification_and_missing(tmp_path):
         legacy = memory.add_assistant_message('s', 'unknown legacy')
         assert not may_read_assistant(legacy, service, 'admin')
         ordinary = memory.add_assistant_message('s', 'ordinary', access_provenance=source_provenance([]))
-        assert may_read_assistant(ordinary, None, 'viewer')
+        assert not may_read_assistant(ordinary, None, 'viewer')
+        ordinary.extra_fields['access_provenance_v1'] = {'version': 1, 'kind': 'plain_chat', 'sources': []}
+        assert not may_read_assistant(ordinary, None, 'viewer')
     finally:
         effective_owner.reset(token)
 

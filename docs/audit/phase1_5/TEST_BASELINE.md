@@ -62,3 +62,7 @@ Partial: multimodal, planned and resumed registry tool statuses persist only wit
 ## Phase 1.5.3 security addendum — 2026-11-07
 
 Partial: owner-bound artifact policy, conservative provenance-gated assistant history and owner-bound image descriptors were added. Unprovenanced assistant history is withheld and prior assistant turns are excluded from model context; attachment retrieval is not exposed. Synthetic targeted Python runs: 19 passed and 31 passed (overlapping); frontend helpers 4 passed; lint/typechecks/build passed with warnings. Task/step clearance revalidation, complete provenance, artifact lifecycle and authorized attachment retrieval remain open; full suite and OS isolation remain blocked. See PHASE153_SECURITY_REPORT.md for exact commands, initial test failure, compatibility impact and limitations.
+
+## Phase 1.5.3 stabilization addendum — 2026-11-07
+
+NO-GO for Phase 1.5.4. Empty-source plain-chat provenance now fails closed. Synthetic tests confirmed that task detail can return a prior higher-clearance result to its downgraded owner, artifact registration can reassign a filename owner, and safe prior assistant messages are excluded from model context. Targeted Python result: 13 passed, 3 xfailed; a `--runxfail` confirmation produced the intended 3 failures. A cross-subsystem provenance and lifecycle design is needed. See PHASE153_STABILIZATION_REPORT.md.
