@@ -844,6 +844,10 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    from backend.auth.request_context import ClearanceContextMiddleware
+    app.add_middleware(ClearanceContextMiddleware)
+    from backend.security.request_limits import MultipartBodyLimitMiddleware
+    app.add_middleware(MultipartBodyLimitMiddleware, max_file_bytes=active_settings.max_file_size_mb * 1024 * 1024)
 
     # ---- Routes ----
     app.include_router(chat_router)

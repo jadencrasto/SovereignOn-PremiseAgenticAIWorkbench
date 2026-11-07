@@ -90,6 +90,9 @@ def create_document_search(retriever) -> callable:
         else:
             user_clearance = "viewer"
 
+        from backend.auth.request_context import cap_clearance
+        user_clearance = cap_clearance(user_clearance)
+
         # Enforce explicit hard RAG timeout (Test B)
         from backend.config import settings
         timeout_s = getattr(retriever, "timeout", None) or getattr(settings, "rag_retrieval_timeout", 25)

@@ -97,7 +97,7 @@ class TestToolRegistryRBACBoundary:
 
         res_write = await registry.execute("write_tool", {"arg": "x"}, user_role="viewer")
         assert res_write.success is False
-        assert "Permission denied" in res_write.error
+        assert "approval" in res_write.error.lower()
 
     @pytest.mark.asyncio
     async def test_operator_allowed_read_and_write_tools(self, registry):
@@ -105,7 +105,8 @@ class TestToolRegistryRBACBoundary:
         assert res_read.success is True
 
         res_write = await registry.execute("write_tool", {"arg": "x"}, user_role="operator")
-        assert res_write.success is True
+        assert res_write.success is False
+        assert "approval" in res_write.error.lower()
 
     @pytest.mark.asyncio
     async def test_admin_allowed_all_tools(self, registry):
@@ -113,9 +114,11 @@ class TestToolRegistryRBACBoundary:
         assert res_read.success is True
 
         res_write = await registry.execute("write_tool", {"arg": "x"}, user_role="admin")
-        assert res_write.success is True
+        assert res_write.success is False
+        assert "approval" in res_write.error.lower()
 
     @pytest.mark.asyncio
-    async def test_unspecified_role_preserves_compatibility(self, registry):
+    async def test_unspecified_role_is_denied(self, registry):
         res = await registry.execute("read_tool", {"arg": "x"})
-        assert res.success is True
+        assert res.success is False
+        assert "role" in res.error.lower()

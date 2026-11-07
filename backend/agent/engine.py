@@ -124,6 +124,7 @@ class AgentEngine:
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
+        user_clearance: str = "viewer",
     ) -> Tuple[str, List]:
         """
         Non-streaming chat.
@@ -139,7 +140,7 @@ class AgentEngine:
         provider, model_name = self._router.get_provider_for_model(model_id)
 
         # RAG: retrieve relevant chunks
-        sources = await self._retrieve_context(user_message)
+        sources = await self._retrieve_context(user_message, user_clearance=user_clearance)
 
         # Build messages for this turn (history + optional RAG context)
         messages = self._build_messages(session_id, user_message, sources)
@@ -169,6 +170,7 @@ class AgentEngine:
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
+        user_clearance: str = "viewer",
     ) -> AsyncIterator:
         """
         Streaming chat (no tools).
@@ -184,7 +186,7 @@ class AgentEngine:
         provider, model_name = self._router.get_provider_for_model(model_id)
 
         # RAG: retrieve relevant chunks
-        sources = await self._retrieve_context(user_message)
+        sources = await self._retrieve_context(user_message, user_clearance=user_clearance)
 
         # Build messages for this turn
         messages = self._build_messages(session_id, user_message, sources)
@@ -405,7 +407,8 @@ class AgentEngine:
                 # Execute the tool with user_role authorization check
                 if self._tool_registry:
                     result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
+                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id,
+                        tools_enabled=True,
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -706,7 +709,8 @@ class AgentEngine:
 
                 if tools_enabled and self._tool_registry:
                     result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
+                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id,
+                        tools_enabled=tools_enabled,
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -1831,6 +1835,7 @@ class AgentEngine:
                 user_id=effective_user_id,
                 task_id=task_id,
                 step_id=awaiting_step.id,
+                approval_id=approval_id,
             )
         else:
             from backend.tools.registry import ToolResult
@@ -4872,6 +4877,8 @@ class AgentEngine:
     def set_approval_manager(self, manager) -> None:
         """Wire in the ApprovalManager for Phase 6."""
         self._approval_manager = manager
+        if self._tool_registry is not None and hasattr(self._tool_registry, "set_approval_manager"):
+            self._tool_registry.set_approval_manager(manager)
         if hasattr(self, "_task_manager") and hasattr(self._task_manager, "set_approval_manager"):
             self._task_manager.set_approval_manager(manager)
         logger.info("AgentEngine: ApprovalManager wired — Phase 6 approvals enabled")
@@ -5409,6 +5416,8 @@ class AgentEngine:
 
         The agent continues normally in all cases.
         """
+        from backend.auth.request_context import cap_clearance
+        user_clearance = cap_clearance(user_clearance)
         if self._doc_service is None:
             return []
         if not self._doc_service.has_documents():

@@ -14,6 +14,9 @@ import json
 import logging
 import uuid
 import os
+import tempfile
+import threading
+from functools import wraps
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -25,6 +28,40 @@ logger = logging.getLogger(__name__)
 
 MEMORY_FILE = PROJECT_ROOT / "data" / "memory.json"
 
+
+def _synchronized(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            if self._storage_file is None or self._lock_depth:
+                return method(self, *args, **kwargs)
+            self._storage_file.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self._storage_file.with_name(self._storage_file.name + '.lock')
+            with open(lock_path, 'a+b') as lock_file:
+                if lock_file.tell() == 0:
+                    lock_file.write(b'0')
+                    lock_file.flush()
+                lock_file.seek(0)
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                self._lock_depth += 1
+                try:
+                    self._store.clear()
+                    self._load()
+                    return method(self, *args, **kwargs)
+                finally:
+                    self._lock_depth -= 1
+                    lock_file.seek(0)
+                    if os.name == 'nt':
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return wrapper
+
 @dataclass
 class Conversation:
     """
@@ -35,6 +72,7 @@ class Conversation:
     """
     session_id: str
     messages: List[Message] = field(default_factory=list)
+    owner_id: Optional[str] = None
 
     def add_message(self, role: str, content: str) -> Message:
         msg = Message(role=role, content=content)
@@ -70,6 +108,8 @@ class ConversationMemory:
         persist: Optional[bool] = None,
     ) -> None:
         self._store: Dict[str, Conversation] = {}
+        self._lock = threading.RLock()
+        self._lock_depth = 0
         # Isolate tests: in test environments (e.g. pytest), do not load/save disk state unless explicitly requested
         is_test_env = "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("ENVIRONMENT") == "test"
         if persist is None:
@@ -88,11 +128,12 @@ class ConversationMemory:
     def _save(self) -> None:
         if not self._storage_file:
             return
+        tmp_name = None
         try:
             self._storage_file.parent.mkdir(parents=True, exist_ok=True)
             data = {}
             for sid, conv in self._store.items():
-                data[sid] = [
+                messages = [
                     {
                         "role": msg.role,
                         "content": msg.content,
@@ -100,10 +141,20 @@ class ConversationMemory:
                     }
                     for msg in conv.messages
                 ]
-            with open(self._storage_file, "w", encoding="utf-8") as f:
+                data[sid] = {'owner_id': conv.owner_id, 'messages': messages} if conv.owner_id else messages
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self._storage_file.parent,
+                                             prefix=".memory-", suffix=".tmp", delete=False) as f:
+                tmp_name = f.name
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, self._storage_file)
         except Exception as e:
             logger.error(f"Failed to save memory: {e}")
+            raise
+        finally:
+            if tmp_name and os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def _load(self) -> None:
         if not self._storage_file or not self._storage_file.exists():
@@ -112,18 +163,24 @@ class ConversationMemory:
             with open(self._storage_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for sid, msg_dicts in data.items():
-                conv = Conversation(session_id=sid)
+                owner_id = None
+                if isinstance(msg_dicts, dict):
+                    owner_id = msg_dicts['owner_id']
+                    msg_dicts = msg_dicts['messages']
+                conv = Conversation(session_id=sid, owner_id=owner_id)
                 for msg_dict in msg_dicts:
                     conv.messages.append(Message(**msg_dict))
                 self._store[sid] = conv
             logger.info(f"Loaded {len(self._store)} sessions from {self._storage_file}")
         except Exception as e:
             logger.error(f"Failed to load memory: {e}")
+            raise
 
     # ------------------------------------------------------------------
     # Session lifecycle
     # ------------------------------------------------------------------
 
+    @_synchronized
     def create_session(
         self,
         system_prompt: Optional[str] = None,
@@ -142,12 +199,13 @@ class ConversationMemory:
             The session_id string.
         """
         sid = session_id or str(uuid.uuid4())
+        self._authorize(sid)
         if sid in self._store:
             # Session already exists — return it unchanged
             logger.debug("Reusing existing session %s", sid)
             return sid
 
-        conv = Conversation(session_id=sid)
+        conv = Conversation(session_id=sid, owner_id=self._current_owner())
         if system_prompt:
             conv.add_message("system", system_prompt)
             logger.debug("Created session %s with system prompt (%d chars)", sid, len(system_prompt))
@@ -158,11 +216,15 @@ class ConversationMemory:
         self._save()
         return sid
 
+    @_synchronized
     def session_exists(self, session_id: str) -> bool:
+        self._authorize(session_id)
         return session_id in self._store
 
+    @_synchronized
     def delete_session(self, session_id: str) -> bool:
         """Delete a session.  Returns True if it existed."""
+        self._authorize(session_id)
         existed = session_id in self._store
         self._store.pop(session_id, None)
         if existed:
@@ -174,32 +236,39 @@ class ConversationMemory:
     # Message operations
     # ------------------------------------------------------------------
 
+    @_synchronized
     def add_user_message(self, session_id: str, content: str) -> Message:
         """Append a user message to the session."""
         msg = self._get_or_create(session_id).add_message("user", content)
         self._save()
         return msg
 
+    @_synchronized
     def add_assistant_message(self, session_id: str, content: str) -> Message:
         """Append an assistant message to the session."""
         msg = self._get_or_create(session_id).add_message("assistant", content)
         self._save()
         return msg
 
+    @_synchronized
     def add_system_message(self, session_id: str, content: str) -> Message:
         """Prepend or append a system message (for mid-session injection)."""
         msg = self._get_or_create(session_id).add_message("system", content)
         self._save()
         return msg
 
+    @_synchronized
     def get_history(self, session_id: str) -> List[Message]:
         """Return the full message history for a session."""
+        self._authorize(session_id)
         if session_id not in self._store:
             return []
         return self._store[session_id].get_history()
 
+    @_synchronized
     def clear_session(self, session_id: str) -> None:
         """Clear messages but keep the session entry."""
+        self._authorize(session_id)
         if session_id in self._store:
             self._store[session_id].clear()
             self._save()
@@ -208,20 +277,45 @@ class ConversationMemory:
     # Introspection
     # ------------------------------------------------------------------
 
+    @_synchronized
     def list_sessions(self) -> List[str]:
-        return list(self._store.keys())
+        owner = self._current_owner()
+        if owner is None:
+            return list(self._store.keys())
+        from backend.auth.request_context import local_legacy_access
+        return [sid for sid, conv in self._store.items()
+                if conv.owner_id == owner or (conv.owner_id is None and local_legacy_access.get() and owner == 'user_dev_admin')]
 
+    @_synchronized
     def session_count(self) -> int:
-        return len(self._store)
+        return len(self.list_sessions())
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     def _get_or_create(self, session_id: str) -> Conversation:
+        self._authorize(session_id)
         if session_id not in self._store:
             logger.debug("Auto-creating session %s", session_id)
-            self._store[session_id] = Conversation(session_id=session_id)
+            self._store[session_id] = Conversation(session_id=session_id, owner_id=self._current_owner())
             self._save()
         return self._store[session_id]
+
+    def _authorize(self, session_id: str) -> None:
+        from backend.auth.request_context import effective_owner, local_legacy_access
+        owner = effective_owner.get()
+        conv = self._store.get(session_id)
+        if not owner or not conv:
+            return
+        if conv.owner_id is None and local_legacy_access.get() and owner == 'user_dev_admin':
+            conv.owner_id = owner
+            self._save()
+        if conv.owner_id != owner:
+            raise PermissionError('Conversation not found')
+
+    @staticmethod
+    def _current_owner() -> Optional[str]:
+        from backend.auth.request_context import effective_owner
+        return effective_owner.get()
 

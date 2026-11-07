@@ -45,7 +45,7 @@ from backend.schemas.chat import (
     _SourceRef,
 )
 from backend.auth.dependencies import get_current_user, require_permission
-from backend.auth.models import Permission, User
+from backend.auth.models import Permission, User, resolve_user_clearance
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,12 @@ def get_engine(request: Request):
 
 def get_router_obj(request: Request):
     return request.app.state.model_router
+
+
+def _task_belongs_to_user(task, user: User) -> bool:
+    """Chat-based task actions must not cross conversation owners."""
+    owner = getattr(task, 'user_id', None)
+    return bool(owner and owner in {getattr(user, 'id', None), getattr(user, 'username', None)})
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +90,12 @@ async def chat(
     - If `tools_enabled=true` (default): agent may use local tools.
     """
     session_id = body.session_id or str(uuid.uuid4())
+    from backend.auth.request_context import request_tools_enabled
+    request_tools_enabled.set(bool(body.tools_enabled))
+    try:
+        engine._memory.session_exists(session_id)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     provider_name, model_name = model_router.resolve_model(body.model)
     model_used = f"{provider_name}/{model_name}"
@@ -109,7 +121,7 @@ async def chat(
             if is_nlp_approval or is_nlp_rejection:
                 pending_task = None
                 for t in engine._task_manager.list_tasks(status=TaskStatus.AWAITING_APPROVAL):
-                    if t.session_id == session_id:
+                    if t.session_id == session_id and _task_belongs_to_user(t, current_user):
                         pending_task = t
                         break
                 if pending_task:
@@ -198,7 +210,7 @@ async def chat(
         if is_short_conversational_followup(body.message):
             logger.info("conversational_followup | session=%s msg=%s", session_id, body.message[:50])
             return StreamingResponse(
-                _stream_sse(engine, session_id, body.message, body.model, model_used),
+                _stream_sse(engine, session_id, body.message, body.model, model_used, resolve_user_clearance(current_user)),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -256,7 +268,7 @@ async def chat(
             )
         else:
             return StreamingResponse(
-                _stream_sse(engine, session_id, body.message, body.model, model_used),
+                _stream_sse(engine, session_id, body.message, body.model, model_used, resolve_user_clearance(current_user)),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -267,7 +279,7 @@ async def chat(
 
     # Non-streaming path
     try:
-        content, sources = await engine.chat(session_id, body.message, body.model)
+        content, sources = await engine.chat(session_id, body.message, body.model, user_clearance=resolve_user_clearance(current_user))
     except RuntimeError as exc:
         logger.error("chat error: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc))
@@ -314,6 +326,12 @@ async def chat_multimodal(
     from backend.multimodal.image_processor import ImageProcessor, ImageValidationError
 
     resolved_session_id = session_id or str(uuid.uuid4())
+    from backend.auth.request_context import request_tools_enabled
+    request_tools_enabled.set(bool(tools_enabled))
+    try:
+        engine._memory.session_exists(resolved_session_id)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     provider_name, model_name = model_router.resolve_model(model)
     model_used = f"{provider_name}/{model_name}"
@@ -402,7 +420,7 @@ async def chat_multimodal(
             )
         else:
             return StreamingResponse(
-                _stream_sse(engine, resolved_session_id, message, model, model_used),
+                _stream_sse(engine, resolved_session_id, message, model, model_used, resolve_user_clearance(current_user)),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -542,6 +560,7 @@ async def _stream_sse(
     user_message: str,
     model_id,
     model_used: str,
+    user_clearance: str = "viewer",
 ) -> AsyncGenerator[str, None]:
     """
     Wrap the agent engine stream in SSE format.
@@ -550,7 +569,7 @@ async def _stream_sse(
     """
     try:
         sources = []
-        async for item in engine.chat_stream(session_id, user_message, model_id):
+        async for item in engine.chat_stream(session_id, user_message, model_id, user_clearance=user_clearance):
             if isinstance(item, str):
                 # Text delta
                 chunk = StreamChunk(type="delta", content=item)
@@ -1225,7 +1244,10 @@ async def clear_session(
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     memory = engine._memory
-    deleted = memory.delete_session(session_id)
+    try:
+        deleted = memory.delete_session(session_id)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return {"deleted": session_id}

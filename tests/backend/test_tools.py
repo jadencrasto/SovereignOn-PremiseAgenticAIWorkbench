@@ -283,14 +283,14 @@ class TestToolRegistry:
     @pytest.mark.asyncio
     async def test_execute_invalid_args(self):
         registry = self._make_registry()
-        result = await registry.execute("test_tool", {"expression": ""})
+        result = await registry.execute("test_tool", {"expression": ""}, user_role="admin")
         assert not result.success
         assert "Invalid arguments" in result.error
 
     @pytest.mark.asyncio
     async def test_execute_success(self):
         registry = self._make_registry()
-        result = await registry.execute("test_tool", {"expression": "2 + 3"})
+        result = await registry.execute("test_tool", {"expression": "2 + 3"}, user_role="admin")
         assert result.success
         assert result.result == {"expression": "2 + 3", "result": 5}
         assert result.duration_ms >= 0
@@ -308,7 +308,7 @@ class TestToolRegistry:
             execute_fn=failing_fn,
             category="test",
         ))
-        result = await registry.execute("failing", {"expression": "2+2"})
+        result = await registry.execute("failing", {"expression": "2+2"}, user_role="admin")
         assert not result.success
         assert "crashed" in result.error
 
@@ -648,7 +648,7 @@ class TestToolsAPI:
             execute_fn=create_knowledge_graph_query(service),
         ))
 
-        res = await registry.execute("knowledge_graph_query", {"query": "UNIT_HC04", "max_depth": 1})
+        res = await registry.execute("knowledge_graph_query", {"query": "UNIT_HC04", "max_depth": 1}, user_role="admin")
         assert res.success is True
         assert res.result["found"] is True
         assert res.result["query"] == "UNIT_HC04"

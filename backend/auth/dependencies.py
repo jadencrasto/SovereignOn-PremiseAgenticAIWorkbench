@@ -31,8 +31,15 @@ from backend.auth.models import (
     parse_clearance,
 )
 from backend.config import settings
+from backend.auth.request_context import effective_clearance, effective_owner, local_legacy_access
+from backend.auth.models import resolve_user_clearance
 
 logger = logging.getLogger(__name__)
+
+
+def _bind_conversation_identity(user, active_settings):
+    effective_owner.set(str(user.id))
+    local_legacy_access.set(not active_settings.auth_enabled and user.id == 'user_dev_admin')
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -133,6 +140,8 @@ async def get_current_user(
                 user = auth_store.get_user_by_id(session.user_id)
                 if user and user.is_active:
                     request.state.user = user
+                    effective_clearance.set(resolve_user_clearance(user))
+                    _bind_conversation_identity(user, active_settings)
                     return user
                 elif user and not user.is_active:
                     raise HTTPException(
@@ -146,7 +155,7 @@ async def get_current_user(
             )
 
         # Check explicit dev-mode role header for simulation & automated RBAC tests
-        if x_user_role is not None:
+        if x_user_role is not None and getattr(active_settings, "allow_dev_clearance_simulation", False):
             clean_role = x_user_role.strip().lower()
             try:
                 role_enum = UserRole(clean_role)
@@ -155,13 +164,19 @@ async def get_current_user(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid X-User-Role header: '{x_user_role}'",
                 )
-            user = _get_synthetic_dev_user(role_enum.value, x_clearance)
+            # Role simulation is an explicit local-development option; client
+            # clearance headers must never alter retrieval authorization.
+            user = _get_synthetic_dev_user(role_enum.value)
             request.state.user = user
+            effective_clearance.set(resolve_user_clearance(user))
+            _bind_conversation_identity(user, active_settings)
             return user
 
         # Fallback to synthetic dev admin in dev mode (preserves existing developer workflows)
         user = _get_synthetic_dev_admin()
         request.state.user = user
+        effective_clearance.set(resolve_user_clearance(user))
+        _bind_conversation_identity(user, active_settings)
         return user
 
     # 2. Production mode resolution (strictly authenticated, client role headers ignored)
@@ -223,6 +238,8 @@ async def get_current_user(
 
     # Attach to request state for downstream handlers
     request.state.user = user
+    effective_clearance.set(resolve_user_clearance(user))
+    _bind_conversation_identity(user, active_settings)
     return user
 
 

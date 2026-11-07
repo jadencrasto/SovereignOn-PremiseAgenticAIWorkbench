@@ -10,7 +10,7 @@ Write-Host "`n=== Sovereign AI Workbench — Dev Servers ===" -ForegroundColor C
 Write-Host "`n--- Starting Backend (FastAPI) on port 8000 ---" -ForegroundColor Cyan
 $backendJob = Start-Job -ScriptBlock {
     Set-Location $using:PWD
-    & backend\venv\Scripts\python -m uvicorn backend.main:app --reload --port 8000
+    & backend\venv\Scripts\python -m backend --reload
 }
 Write-Host "[OK] Backend started (Job ID: $($backendJob.Id))" -ForegroundColor Green
 

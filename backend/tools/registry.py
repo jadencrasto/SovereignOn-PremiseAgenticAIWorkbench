@@ -71,6 +71,10 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: Dict[str, ToolDefinition] = {}
+        self._approval_manager = None
+
+    def set_approval_manager(self, manager: Any) -> None:
+        self._approval_manager = manager
 
     # ------------------------------------------------------------------
     # Registration
@@ -138,6 +142,8 @@ class ToolRegistry:
         task_id: Optional[str] = None,
         step_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        approval_id: Optional[str] = None,
+        tools_enabled: bool = True,
     ) -> ToolResult:
         """
         Validate arguments, enforce RBAC permissions, and execute a tool.
@@ -157,6 +163,10 @@ class ToolRegistry:
         """
         t0 = time.monotonic()
 
+        from backend.auth.request_context import request_tools_enabled
+        if not tools_enabled or request_tools_enabled.get() is False:
+            return ToolResult(tool=name, success=False, error="Tools are disabled for this request.")
+
         # --- Check existence ---
         tool = self._tools.get(name)
         if tool is None:
@@ -171,6 +181,25 @@ class ToolRegistry:
                 tool=name, success=False,
                 error=f"Tool '{name}' is currently disabled.",
             )
+
+        # Approval is enforced at dispatch, including for direct or multimodal calls.
+        if tool.requires_approval:
+            if not (self._approval_manager and approval_id and task_id and step_id):
+                return ToolResult(tool=name, success=False, error="A verified task approval is required.")
+            try:
+                approved = self._approval_manager.verify_approval_for_execution(
+                    approval_id=approval_id, task_id=task_id, step_id=step_id,
+                    tool_name=name, arguments=arguments, tool_registry=self,
+                )
+            except Exception:
+                logger.exception("Approval verification failed for tool %s", name)
+                approved = False
+            if not approved:
+                return ToolResult(tool=name, success=False, error="Task approval verification failed.")
+
+        # Callers must provide the server-resolved role; absence is not authority.
+        if user_role is None:
+            return ToolResult(tool=name, success=False, error="Permission denied: authenticated role is required.")
 
         # --- Enforce RBAC (Phase 7 & Phase B) ---
         if user_role is not None:
@@ -323,6 +352,19 @@ class ToolRegistry:
                 tool=name, success=False,
                 error=f"Argument validation error for '{name}': {exc}",
             )
+
+        # Consume only after authorization and validation, and before side effects.
+        if tool.requires_approval:
+            try:
+                consumed = self._approval_manager.consume_approval_for_execution(
+                    approval_id=approval_id, task_id=task_id, step_id=step_id,
+                    tool_name=name, arguments=arguments, tool_registry=self,
+                )
+            except Exception:
+                logger.exception("Approval consumption failed for tool %s", name)
+                consumed = False
+            if not consumed:
+                return ToolResult(tool=name, success=False, error="Approval is expired, invalid or already used.")
 
         # --- Execute ---
         try:

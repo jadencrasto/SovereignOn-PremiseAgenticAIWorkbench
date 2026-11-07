@@ -18,12 +18,39 @@ Collection schema:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "workbench_documents"
+
+
+def _create_local_chroma_client(persist_dir: Path):
+    """Configure Chroma's own telemetry before loading its client library.
+
+    This does not enforce a network boundary for dependencies or native code.
+    """
+    os.environ["ANONYMIZED_TELEMETRY"] = "False"
+    os.environ["CHROMA_OTEL_GRANULARITY"] = "none"
+    os.environ["CHROMA_OTEL_COLLECTION_ENDPOINT"] = ""
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
+
+    try:
+        settings = ChromaSettings(
+            anonymized_telemetry=False,
+            chroma_otel_granularity="none",
+            chroma_otel_collection_endpoint="",
+        )
+    except (TypeError, ValueError) as exc:
+        raise ChromaTelemetryConfigurationError("Chroma telemetry configuration was rejected") from exc
+    return chromadb.PersistentClient(path=str(persist_dir), settings=settings)
+
+
+class ChromaTelemetryConfigurationError(RuntimeError):
+    """Do not silently fall back when a telemetry control cannot be applied."""
 
 
 class _InMemoryFallbackCollection:
@@ -90,16 +117,18 @@ class VectorStore:
     def __init__(self, persist_dir: Path) -> None:
         persist_dir.mkdir(parents=True, exist_ok=True)
         try:
-            import chromadb
-            self._client = chromadb.PersistentClient(path=str(persist_dir))
+            self._client = _create_local_chroma_client(persist_dir)
             self._collection = self._client.get_or_create_collection(
                 name=COLLECTION_NAME,
                 metadata={"hnsw:space": "cosine"},   # cosine similarity
+                embedding_function=None,  # The workbench always supplies Ollama embeddings.
             )
             logger.info(
                 "VectorStore ready | collection=%s persist=%s count=%d",
                 COLLECTION_NAME, persist_dir, self._collection.count(),
             )
+        except ChromaTelemetryConfigurationError:
+            raise
         except Exception as exc:
             logger.warning("ChromaDB persistent client unavailable (%s). Using in-memory fallback store.", exc)
             self._client = None
@@ -173,6 +202,7 @@ class VectorStore:
             self._collection = self._client.get_or_create_collection(
                 name=COLLECTION_NAME,
                 metadata={"hnsw:space": "cosine"},
+                embedding_function=None,
             )
         else:
             self._collection = _InMemoryFallbackCollection()

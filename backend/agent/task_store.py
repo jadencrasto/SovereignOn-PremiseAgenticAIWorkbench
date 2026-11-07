@@ -418,6 +418,22 @@ class TaskStore:
             finally:
                 conn.close()
 
+    def consume_approved_approval(self, approval_id: str) -> bool:
+        """Atomically consume an unexpired approved action across processes."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                cursor = conn.execute(
+                    "UPDATE approvals SET status = 'consumed' "
+                    "WHERE approval_id = ? AND status = 'approved' AND expires_at > ?",
+                    (approval_id, now),
+                )
+                conn.commit()
+                return cursor.rowcount == 1
+            finally:
+                conn.close()
+
     # ------------------------------------------------------------------
     # Task events (audit log)
     # ------------------------------------------------------------------
