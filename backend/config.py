@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Backend server
     # ------------------------------------------------------------------
-    backend_host: str = Field(default="0.0.0.0")
+    backend_host: str = Field(default="127.0.0.1")
     backend_port: int = Field(default=8000)
 
     # ------------------------------------------------------------------

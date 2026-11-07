@@ -44,19 +44,20 @@ class ConfigValidator:
         auth_on = getattr(self._cfg, "auth_enabled", True)
         dev_override = getattr(self._cfg, "auth_dev_override", False)
 
+        host = self._cfg.backend_host.strip().lower()
+        loopback = host in ("127.0.0.1", "::1", "localhost")
+        results.append({
+            "rule": "external_binding_auth",
+            "status": "PASS" if loopback or (auth_on and not dev_override) else "FAIL",
+            "message": "Non-loopback binding requires authentication without a development override.",
+        })
+
         if is_prod and not auth_on:
-            if dev_override:
-                results.append({
-                    "rule": "prod_auth_enabled",
-                    "status": "WARN",
-                    "message": "Explicit development override active: authentication is disabled in production environment.",
-                })
-            else:
-                results.append({
-                    "rule": "prod_auth_enabled",
-                    "status": "FAIL",
-                    "message": "Authentication cannot be disabled (auth_enabled=false) in production environment without explicit development override (auth_dev_override=true).",
-                })
+            results.append({
+                "rule": "prod_auth_enabled",
+                "status": "FAIL",
+                "message": "Authentication cannot be disabled in production, including with a development override.",
+            })
         else:
             results.append({
                 "rule": "prod_auth_enabled",

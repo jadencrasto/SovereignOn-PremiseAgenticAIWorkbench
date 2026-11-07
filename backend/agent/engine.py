@@ -522,6 +522,7 @@ class AgentEngine:
         model_id: Optional[str] = None,
         user_role: Optional[str] = None,
         user_id: Optional[str] = None,
+        tools_enabled: bool = True,
     ) -> AsyncIterator:
         """
         Two-step multimodal streaming with agentic tool loop.
@@ -629,7 +630,7 @@ class AgentEngine:
         base_messages = self._build_messages(session_id, user_message, sources)
 
         # Inject tool definitions
-        if self._tool_registry:
+        if tools_enabled and self._tool_registry:
             tool_prompt = self._tool_registry.format_tools_for_prompt()
             if tool_prompt:
                 tool_msg = Message(role="system", content=tool_prompt)
@@ -703,7 +704,7 @@ class AgentEngine:
                     "arguments": self._sanitize_args_for_display(tool_args),
                 }
 
-                if self._tool_registry:
+                if tools_enabled and self._tool_registry:
                     result = await self._tool_registry.execute(
                         tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
                     )
@@ -711,7 +712,7 @@ class AgentEngine:
                     from backend.tools.registry import ToolResult
                     result = ToolResult(
                         tool=tool_name, success=False,
-                        error="Tool system is not initialized.",
+                        error="Tools are disabled or the tool system is not initialized.",
                     )
 
                 result_summary = self._format_tool_result_summary(result)

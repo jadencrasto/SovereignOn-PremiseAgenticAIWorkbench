@@ -1,0 +1,3 @@
+# Phase 2 readiness
+
+NOT READY: Phase 1.5 acceptance gates for session isolation/migration, authenticated clearance, upload ingress, tool enforcement, async regressions and end-to-end verification remain open. Complete these before redesigning agent architecture. Branch creation requires writable Git metadata or a user-created branch. Obtain the full SIH statement. On a host where async and local loopback work, run all tests with isolated storage, review failures, confirm model versions, exercise workflows and collect network evidence. Establish the dependency lock/wheelhouse plan after selecting and validating a supported Python runtime.

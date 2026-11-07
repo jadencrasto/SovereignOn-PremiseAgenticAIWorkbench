@@ -984,8 +984,7 @@ async def _stream_sse_multimodal(
         sources = []
         engine_stream = engine.chat_stream_with_tools_multimodal(
             session_id, user_message, image_b64, model_id, user_role=user_role, user_id=user_id,
-        ) if use_tools else engine.chat_stream_with_tools_multimodal(
-            session_id, user_message, image_b64, model_id, user_role=user_role, user_id=user_id,
+            tools_enabled=use_tools,
         )
 
         async for item in engine_stream:

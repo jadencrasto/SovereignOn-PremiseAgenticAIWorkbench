@@ -79,7 +79,18 @@ async def upload_document(
 
     # Read file content
     try:
-        content = await file.read()
+        max_bytes = doc_service._settings.max_file_size_mb * 1024 * 1024
+        content_buffer = bytearray()
+        while True:
+            chunk = await file.read(min(64 * 1024, max_bytes - len(content_buffer) + 1))
+            if not chunk:
+                break
+            content_buffer.extend(chunk)
+            if len(content_buffer) > max_bytes:
+                raise HTTPException(status_code=413, detail="File exceeds maximum upload size.")
+        content = bytes(content_buffer)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to read uploaded file: %s", exc)
         raise HTTPException(status_code=400, detail="Failed to read uploaded file.")

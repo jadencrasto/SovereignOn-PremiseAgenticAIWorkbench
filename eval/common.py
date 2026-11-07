@@ -86,7 +86,7 @@ def get_environment_info() -> Dict[str, Any]:
         "python_version": os.sys.version.split()[0],
         "ollama_available": ollama_ok,
         "available_models": models,
-        "air_gapped": True,
+        "air_gapped": None,  # Network isolation is not measured by this probe.
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
