@@ -55,7 +55,7 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
       >
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 bg-blue-500 text-white font-semibold text-[10px] rounded-full">
-            {runningTool ? 'Running' : 'Completed'}
+            {runningTool ? 'Running' : completedTools.some(e => e.success === false) ? 'Finished with errors' : 'Completed'}
           </span>
           <span className="font-semibold text-blue-700 tracking-tight">
             Tool Pipeline ({completedTools.length} actions)
@@ -73,7 +73,7 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
               key={i}
               className="inline-flex items-center gap-1.5 px-2 py-1 bg-white border border-blue-100 rounded-md text-[11px] font-medium text-blue-700 shadow-sm"
             >
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+              {ev.success === false ? <AlertTriangle className="w-3.5 h-3.5 text-red-600" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
               <span>{formatToolName(ev.tool)}</span>
             </span>
           ))}
@@ -100,10 +100,10 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
                 </>
               ) : (
                 <>
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
+                  {event.success === false ? <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />}
                   <div>
                     <span className="font-semibold text-slate-700">
-                      Completed {formatToolName(event.tool)}
+                      {event.success === false ? 'Failed' : 'Completed'} {formatToolName(event.tool)}
                     </span>
                     {event.summary && (
                       <span className="ml-2 text-slate-600">{event.summary}</span>

@@ -122,9 +122,20 @@ def test_actual_auth_sessions_isolate_conversations_and_tasks(tmp_path, monkeypa
             assert client.get('/api/chat/legacy-export-policy', headers=headers_a).json() == {'allowed': False}
             body = {'session_id': 'fixture-a', 'message': '2 + 2', 'stream': True, 'tools_enabled': True}
             assert client.post('/api/chat', json=body, headers=headers_a).status_code == 200
+            from backend.auth.request_context import effective_owner
+            owner_token = effective_owner.set('user_a')
+            try:
+                app.state.engine._memory.add_assistant_message('fixture-a', 'Synthetic result', tool_events=[{
+                    'tool': 'calculator', 'success': True,
+                    'invocation_id': '12345678-1234-1234-1234-123456789abc', 'summary': 'secret',
+                }])
+            finally:
+                effective_owner.reset(owner_token)
             owned_history = client.get('/api/chat/sessions/fixture-a', headers=headers_a)
             assert owned_history.status_code == 200
             assert any(message['content'] == '2 + 2' for message in owned_history.json()['messages'])
+            event = owned_history.json()['messages'][-1]['tool_events'][0]
+            assert event['tool'] == 'calculator' and 'summary' not in event
             assert client.get('/api/chat/sessions/fixture-a', headers=headers_b).status_code == 404
             assert client.patch('/api/chat/sessions/fixture-a/title', json={'title': 'Private title'}, headers=headers_b).status_code == 404
             assert client.patch('/api/chat/sessions/fixture-a/title', json={'title': 'Private title'}, headers=headers_a).status_code == 200

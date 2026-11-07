@@ -16,6 +16,7 @@ import uuid
 import os
 import tempfile
 import threading
+import re
 from functools import wraps
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -28,6 +29,23 @@ from backend.config import PROJECT_ROOT
 logger = logging.getLogger(__name__)
 
 MEMORY_FILE = PROJECT_ROOT / "data" / "memory.json"
+
+
+def safe_tool_history(events):
+    """Allow only bounded, non-executable tool status metadata."""
+    if not isinstance(events, list):
+        return []
+    result = []
+    for event in events[:32]:
+        if not isinstance(event, dict):
+            continue
+        name, call_id, success = event.get('tool'), event.get('invocation_id'), event.get('success')
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', name)
+                or not isinstance(call_id, str) or not re.fullmatch(r'[a-f0-9-]{36}', call_id)
+                or not isinstance(success, bool)):
+            continue
+        result.append({'type': 'tool_result', 'tool': name, 'success': success, 'invocation_id': call_id})
+    return result
 
 
 def _synchronized(method):
@@ -258,9 +276,12 @@ class ConversationMemory:
         return msg
 
     @_synchronized
-    def add_assistant_message(self, session_id: str, content: str) -> Message:
+    def add_assistant_message(self, session_id: str, content: str, tool_events=None) -> Message:
         """Append an assistant message to the session."""
         msg = self._get_or_create(session_id).add_message("assistant", content)
+        safe_events = safe_tool_history(tool_events)
+        if safe_events:
+            msg.extra_fields['tool_events_v1'] = safe_events
         self._save()
         return msg
 

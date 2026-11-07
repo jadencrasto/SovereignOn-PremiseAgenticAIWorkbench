@@ -1,0 +1,9 @@
+# Antigravity verification handoff
+
+This is a proposed test procedure, not an executed test suite. Read CONVERSATION_RECOVERY_REPORT.md and TELEMETRY_AND_EGRESS_AUDIT.md first. Preserve repository changes and all runtime data. Do not retry the previously rejected suite or bypass the automatic review. Do not make outbound requests, alter host firewall settings, download models/dependencies or send private data externally.
+
+Use an independently verified OS-isolated disposable environment and temporary application databases, conversations, uploads, Chroma and artifacts, with synthetic users and documents. A Python mock is not evidence of OS isolation. Before attempting any suite subject to the previous rejection, resolve the review/authorization and identify its telemetry source; otherwise leave it BLOCKED. Use already installed models only, and only if explicitly permitted in that environment.
+
+Browser scenarios to implement/run in an isolated profile: A creates text/tool conversation, reloads, and checks persisted tool names/status; A logs out; B logs in on the same profile and cannot read A by list or guessed ID; A returns; delayed A history responses and cross-tab account changes do not restore A under B; delete success/failure; local-only legacy export policy; verify no automatic tool replay and consumed approvals cannot execute. Record exact commands, screenshots/logs without credentials, case counts and what was mocked.
+
+Once citations, artifacts, attachments and approval revalidation are actually implemented, add positive and unauthorized-access reload tests, unavailable-resource tests, interrupted streaming, concurrent messages and restart recovery. Do not treat currently missing features as verified. Run Qwen, Nomic and LLaVA on synthetic inputs only when the isolation and local service access are approved; record actual model names and whether real inference ran.

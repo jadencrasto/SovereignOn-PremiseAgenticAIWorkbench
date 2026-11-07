@@ -70,6 +70,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
           const messages: ChatMessage[] = record.messages.filter(m => m.role !== 'system').map((m, i) => ({
             id: m.id || `${id}-${i}`, role: m.role, content: m.content,
             timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
+            toolEvents: m.tool_events || [],
           }));
           return { id, messages, title: record.title || messages.find(m => m.role === 'user')?.content.slice(0, 38) || 'Conversation',
             createdAt: 0, updatedAt: 0, model: '' };

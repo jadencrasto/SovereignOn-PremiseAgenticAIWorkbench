@@ -32,6 +32,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
@@ -285,6 +286,7 @@ class AgentEngine:
         working_messages = list(base_messages)
         iteration = 0
         final_text_parts = []
+        history_tool_events = []
         last_executed_tool = None  # (tool_name, result)
 
         # Duplicate failed-tool protection: track (tool_name, normalized_args) that already failed
@@ -418,6 +420,11 @@ class AgentEngine:
                     )
 
                 last_executed_tool = (tool_name, result)
+                if len(history_tool_events) < 32:
+                    history_tool_events.append({
+                        'tool': tool_name, 'success': bool(result.success),
+                        'invocation_id': str(uuid.uuid4()),
+                    })
 
                 # Yield tool_result event
                 result_summary = self._format_tool_result_summary(result)
@@ -476,7 +483,7 @@ class AgentEngine:
         # Store the final response in memory
         full_final = "".join(final_text_parts)
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         elapsed = time.monotonic() - t0
         logger.info(

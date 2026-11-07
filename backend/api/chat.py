@@ -1265,9 +1265,12 @@ async def read_session(
         title = engine._memory.get_title(session_id)
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
+    from backend.agent.memory import safe_tool_history
     return {"session_id": session_id, "title": title, "messages": [
         {"id": message.id, "role": message.role, "content": message.content,
-         "created_at": message.created_at} for message in messages if message.role != "system"
+         "created_at": message.created_at,
+         "tool_events": safe_tool_history(message.extra_fields.get('tool_events_v1'))
+         if message.role == 'assistant' else []} for message in messages if message.role != "system"
     ]}
 
 
