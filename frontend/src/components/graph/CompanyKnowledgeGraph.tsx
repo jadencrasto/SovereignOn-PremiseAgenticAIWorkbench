@@ -541,7 +541,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
               )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              100% On-Premise Air-Gapped Relational Topology &bull; Role-Based Clearance Gating
+              Workspace topology
             </p>
           </div>
         </div>

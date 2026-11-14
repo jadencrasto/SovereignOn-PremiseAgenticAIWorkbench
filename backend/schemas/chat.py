@@ -74,8 +74,8 @@ class ChatRequest(BaseModel):
     """
     POST /api/chat request body.
 
-    - session_id  : client-generated UUID to track conversation state.
-                    If omitted, a new session is created each request.
+    - session_id  : existing server-issued conversation ID; ownership is checked.
+                    If omitted, the server creates a conversation.
     - message     : the user's current message.
     - model       : optional override of the default model
                     (e.g. "ollama/qwen2.5:7b").
@@ -84,7 +84,7 @@ class ChatRequest(BaseModel):
     """
     session_id: Optional[str] = Field(
         default=None,
-        description="Conversation session ID. Generates a new session if absent.",
+        description="Existing server-issued conversation ID; the server creates one if absent.",
     )
     message: str = Field(..., min_length=1, max_length=32_000)
     model: Optional[str] = Field(
@@ -132,6 +132,7 @@ class StreamChunk(BaseModel):
     """
     type: str  # 'delta' | 'done' | 'sources' | 'error' | 'tool_start' | 'tool_result' | 'agent_status' | 'plan_created' | 'plan_step' | 'approval_required' | 'approval_granted' | 'approval_rejected' | 'task_started' | 'task_completed' | 'task_failed' | 'task_cancelled'
     content: str
+    error_code: Optional[str] = None
     session_id: Optional[str] = None
     model_used: Optional[str] = None
     sources: Optional[List[_SourceRef]] = None

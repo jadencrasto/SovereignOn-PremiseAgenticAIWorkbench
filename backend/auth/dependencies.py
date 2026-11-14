@@ -31,7 +31,7 @@ from backend.auth.models import (
     parse_clearance,
 )
 from backend.config import settings
-from backend.auth.request_context import effective_clearance, effective_owner, local_legacy_access
+from backend.auth.request_context import effective_clearance, effective_owner, local_legacy_access, dispatch_identity_resolver
 from backend.auth.models import resolve_user_clearance
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,27 @@ logger = logging.getLogger(__name__)
 def _bind_conversation_identity(user, active_settings):
     effective_owner.set(str(user.id))
     local_legacy_access.set(not active_settings.auth_enabled and user.id == 'user_dev_admin')
+
+def _bind_dispatch_session(session_mgr, auth_store, raw_token, user_id):
+    """Re-resolve the same server session and account at each dispatch."""
+    def resolve():
+        session = session_mgr.validate_session(raw_token)
+        if not session or str(session.user_id) != str(user_id):
+            return None
+        user = auth_store.get_user_by_id(session.user_id)
+        if not user or not user.is_active or str(user.id) != str(user_id):
+            return None
+        return user
+    dispatch_identity_resolver.set(resolve)
+
+def _bind_local_dispatch(active_settings):
+    """Only the existing server-selected unauthenticated local principal."""
+    def resolve():
+        if (getattr(active_settings, 'auth_enabled', True)
+                or getattr(active_settings, 'app_env', 'development').lower() in ('production', 'prod')):
+            return None
+        return _get_synthetic_dev_admin()
+    dispatch_identity_resolver.set(resolve)
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -105,10 +126,8 @@ async def get_current_user(
     active_settings = getattr(request.app.state, "settings", settings)
     auth_enabled = getattr(active_settings, "auth_enabled", True)
     is_prod = getattr(active_settings, "app_env", "development").lower() in ("production", "prod")
-    dev_override = getattr(active_settings, "auth_dev_override", False)
-
-    if is_prod and not auth_enabled and not dev_override:
-        logger.critical("Security violation: Authentication disabled in production without auth_dev_override")
+    if is_prod and not auth_enabled:
+        logger.critical("Security violation: Authentication disabled in production")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Insecure configuration: Authentication cannot be disabled in production.",
@@ -139,6 +158,7 @@ async def get_current_user(
             if session:
                 user = auth_store.get_user_by_id(session.user_id)
                 if user and user.is_active:
+                    _bind_dispatch_session(session_mgr, auth_store, raw_token, user.id)
                     request.state.user = user
                     effective_clearance.set(resolve_user_clearance(user))
                     _bind_conversation_identity(user, active_settings)
@@ -174,6 +194,8 @@ async def get_current_user(
 
         # Fallback to synthetic dev admin in dev mode (preserves existing developer workflows)
         user = _get_synthetic_dev_admin()
+        if not raw_token:
+            _bind_local_dispatch(active_settings)
         request.state.user = user
         effective_clearance.set(resolve_user_clearance(user))
         _bind_conversation_identity(user, active_settings)
@@ -237,6 +259,7 @@ async def get_current_user(
         )
 
     # Attach to request state for downstream handlers
+    _bind_dispatch_session(session_mgr, auth_store, raw_token, user.id)
     request.state.user = user
     effective_clearance.set(resolve_user_clearance(user))
     _bind_conversation_identity(user, active_settings)

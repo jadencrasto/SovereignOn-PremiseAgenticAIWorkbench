@@ -48,7 +48,7 @@ export const Sidebar: React.FC = () => {
                 Sovereign OS
               </div>
               <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
-                Air-Gap
+                Development
               </span>
             </div>
             <div className="text-xs text-slate-500 mt-2">

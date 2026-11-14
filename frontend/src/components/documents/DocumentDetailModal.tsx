@@ -166,7 +166,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 
                 <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50 space-y-1 shadow-sm">
                   <div className="flex items-center justify-between text-xs text-slate-500 font-mono">
-                    <span>Air-Gap Storage</span>
+                    <span>Document storage</span>
                     <Shield className="w-3.5 h-3.5 text-blue-500" />
                   </div>
                   <div className="text-xs font-semibold text-emerald-600 font-mono mt-1.5">100% Local Vector Index</div>

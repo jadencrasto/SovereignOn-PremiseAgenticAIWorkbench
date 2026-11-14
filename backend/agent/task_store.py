@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS task_events (
 )
 """
 
+_CREATE_TASK_PROVENANCE_TABLE = """
+CREATE TABLE IF NOT EXISTS task_security_provenance (
+    task_id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL,
+    owner_id TEXT,
+    conversation_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    verification_state TEXT NOT NULL CHECK (verification_state = 'unverified'),
+    dependency_state TEXT NOT NULL CHECK (dependency_state = 'unknown'),
+    dependencies_json TEXT CHECK (dependencies_json IS NULL),
+    effective_classification TEXT CHECK (effective_classification IS NULL)
+)
+"""
+
 _CREATE_ARTIFACTS_TABLE = """
 CREATE TABLE IF NOT EXISTS artifacts (
     filename         TEXT PRIMARY KEY,
@@ -116,7 +130,13 @@ class TaskStore:
                 conn.execute(_CREATE_TASKS_TABLE)
                 conn.execute(_CREATE_APPROVALS_TABLE)
                 conn.execute(_CREATE_TASK_EVENTS_TABLE)
+                conn.execute(_CREATE_TASK_PROVENANCE_TABLE)
                 conn.execute(_CREATE_ARTIFACTS_TABLE)
+                artifact_columns = {row[1] for row in conn.execute('PRAGMA table_info(artifacts)')}
+                for column in ('artifact_id', 'display_name'):
+                    if column not in artifact_columns:
+                        conn.execute(f'ALTER TABLE artifacts ADD COLUMN {column} TEXT')
+                conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_opaque_id ON artifacts(artifact_id) WHERE artifact_id IS NOT NULL')
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_user ON artifacts(user_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id)")
                 for col in ("user_id", "user_role", "clearance"):
@@ -139,12 +159,24 @@ class TaskStore:
     # Tasks — CRUD
     # ------------------------------------------------------------------
 
-    def save_task(self, task: Dict[str, Any]) -> None:
+    def save_task(self, task: Dict[str, Any], *, initialize_security: bool = False) -> None:
         """Insert or replace a task record."""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             conn = self._connect()
             try:
+                conn.execute('BEGIN IMMEDIATE')
+                existing = conn.execute(
+                    'SELECT session_id, user_id FROM tasks WHERE task_id = ?', (task['task_id'],)
+                ).fetchone()
+                if initialize_security and existing:
+                    raise sqlite3.IntegrityError('Task ID already exists')
+                if existing:
+                    protected = conn.execute(
+                        'SELECT 1 FROM task_security_provenance WHERE task_id = ?', (task['task_id'],)
+                    ).fetchone()
+                    if protected and (existing['session_id'] != task['session_id'] or existing['user_id'] != task.get('user_id')):
+                        raise ValueError('Task owner and conversation cannot be reassigned')
                 conn.execute(
                     """INSERT OR REPLACE INTO tasks
                        (task_id, session_id, user_request, plan_json,
@@ -169,7 +201,32 @@ class TaskStore:
                         task.get("clearance"),
                     ),
                 )
+                if initialize_security:
+                    from backend.auth.request_context import effective_owner
+                    from backend.security.task_access import TASK_PROVENANCE_SCHEMA_VERSION, TASK_PROVENANCE_UNVERIFIED
+                    bound_owner = effective_owner.get()
+                    # Preserve the attribution only when it matches the trusted
+                    # request context; background/unbound calls stay unknown.
+                    owner = bound_owner if bound_owner and bound_owner == task.get('user_id') else None
+                    conn.execute(
+                        """INSERT INTO task_security_provenance
+                           (task_id, schema_version, owner_id, conversation_id, created_at,
+                            verification_state, dependency_state, dependencies_json, effective_classification)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                        (task['task_id'], TASK_PROVENANCE_SCHEMA_VERSION, owner, task['session_id'],
+                         task.get('created_at', now), TASK_PROVENANCE_UNVERIFIED, 'unknown'),
+                    )
                 conn.commit()
+            finally:
+                conn.close()
+
+    def get_task_security_provenance(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Read the server-owned quarantine envelope; absence means legacy/unknown."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute('SELECT * FROM task_security_provenance WHERE task_id = ?', (task_id,)).fetchone()
+                return dict(row) if row else None
             finally:
                 conn.close()
 
@@ -283,6 +340,7 @@ class TaskStore:
             try:
                 conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
                 conn.execute("DELETE FROM approvals WHERE task_id = ?", (task_id,))
+                conn.execute("DELETE FROM task_security_provenance WHERE task_id = ?", (task_id,))
                 cursor = conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
                 conn.commit()
                 return cursor.rowcount > 0
@@ -294,12 +352,12 @@ class TaskStore:
     # ------------------------------------------------------------------
 
     def save_approval(self, approval: Dict[str, Any]) -> None:
-        """Insert or replace an approval record."""
+        """Insert an approval once; an existing identifier cannot be reset."""
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
-                    """INSERT OR REPLACE INTO approvals
+                    """INSERT INTO approvals
                        (approval_id, task_id, step_id, tool_name,
                         arguments_hash, risk_level, reason, status,
                         created_at, expires_at, resolved_at)
@@ -386,12 +444,14 @@ class TaskStore:
         status: str,
         resolved_at: Optional[str] = None,
     ) -> None:
-        """Update an approval's status."""
+        """Invalidate a live approval without resurrecting a terminal state."""
+        if status not in ('rejected', 'expired'):
+            raise ValueError('Only approval invalidation is supported')
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
-                    "UPDATE approvals SET status = ?, resolved_at = ? WHERE approval_id = ?",
+                    "UPDATE approvals SET status = ?, resolved_at = ? WHERE approval_id = ? AND status IN ('pending', 'approved')",
                     (status, resolved_at, approval_id),
                 )
                 conn.commit()
@@ -406,6 +466,8 @@ class TaskStore:
         resolved_at: Optional[str] = None,
     ) -> bool:
         """Atomically update an approval's status only if current status matches expected_status."""
+        if (expected_status, new_status) not in (('pending', 'approved'), ('pending', 'rejected')):
+            raise ValueError('Unsupported approval transition')
         with self._lock:
             conn = self._connect()
             try:
@@ -419,18 +481,46 @@ class TaskStore:
                 conn.close()
 
     def consume_approved_approval(self, approval_id: str) -> bool:
-        """Atomically consume an unexpired approved action across processes."""
+        """Consume once under a bounded SQLite write transaction.
+
+        This coordinates writers of this database only; it does not authenticate
+        the database path, establish anti-rollback freshness, or authorize work.
+        """
         with self._lock:
-            conn = self._connect()
+            # Existing database only: a missing database must not be recreated.
+            uri = self._db_path.absolute().as_uri() + '?mode=rw'
+            conn = sqlite3.connect(uri, uri=True, timeout=1.0, isolation_level=None)
             try:
-                now = datetime.now(timezone.utc).isoformat()
+                conn.execute('PRAGMA foreign_keys=ON')
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute(
+                    "SELECT expires_at FROM approvals WHERE approval_id=? AND status='approved'",
+                    (approval_id,),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return False
+                try:
+                    expires = datetime.fromisoformat(row[0])
+                    if expires.tzinfo is None or expires.utcoffset() is None:
+                        raise ValueError('Timezone required')
+                    if datetime.now(timezone.utc) >= expires:
+                        conn.rollback()
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    conn.rollback()
+                    return False
                 cursor = conn.execute(
                     "UPDATE approvals SET status = 'consumed' "
-                    "WHERE approval_id = ? AND status = 'approved' AND expires_at > ?",
-                    (approval_id, now),
+                    "WHERE approval_id = ? AND status = 'approved' AND expires_at = ?",
+                    (approval_id, row[0]),
                 )
                 conn.commit()
                 return cursor.rowcount == 1
+            except BaseException:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
             finally:
                 conn.close()
 
@@ -491,28 +581,24 @@ class TaskStore:
         user_role: Optional[str] = None,
         size_bytes: int = 0,
         sha256_hash: Optional[str] = None,
+        artifact_id: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Record or update artifact ownership metadata atomically."""
+        """Register a new artifact without replacing existing metadata."""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
                     """
-                    INSERT INTO artifacts (filename, path, task_id, user_id, user_role, created_at, updated_at, size_bytes, sha256_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(filename) DO UPDATE SET
-                        path=excluded.path,
-                        task_id=COALESCE(excluded.task_id, artifacts.task_id),
-                        user_id=COALESCE(excluded.user_id, artifacts.user_id),
-                        user_role=COALESCE(excluded.user_role, artifacts.user_role),
-                        updated_at=excluded.updated_at,
-                        size_bytes=excluded.size_bytes,
-                        sha256_hash=COALESCE(excluded.sha256_hash, artifacts.sha256_hash)
+                    INSERT INTO artifacts (filename, path, task_id, user_id, user_role, created_at, updated_at, size_bytes, sha256_hash, artifact_id, display_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (filename, path, task_id, user_id, user_role, now, now, size_bytes, sha256_hash),
+                    (filename, path, task_id, user_id, user_role, now, now, size_bytes, sha256_hash, artifact_id, display_name),
                 )
                 conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise ValueError('Artifact registration conflicts with an existing record') from exc
             finally:
                 conn.close()
 
@@ -524,6 +610,8 @@ class TaskStore:
             "user_role": user_role,
             "size_bytes": size_bytes,
             "sha256_hash": sha256_hash,
+            "artifact_id": artifact_id,
+            "display_name": display_name,
         }
 
     def get_artifact(self, filename: str) -> Optional[Dict[str, Any]]:

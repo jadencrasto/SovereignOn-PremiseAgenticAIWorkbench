@@ -98,7 +98,8 @@ class IndustrialGraphExtractor:
         edges: Dict[str, GraphEdge] = {}
 
         # 1. Register Document Node
-        doc_node_id = f"DOC_{document.document_id[:8]}"
+        doc_node_id = (f"DOC_{document.document_id}" if document.document_id.startswith('doc_v1_')
+                       else f"DOC_{document.document_id[:8]}")
         doc_prov = ProvenanceRecord(
             id=f"prov_{uuid.uuid4().hex[:12]}",
             target_type="node",

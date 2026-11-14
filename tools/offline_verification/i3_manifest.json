@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "status": "incomplete_unapproved",
+  "purpose": "Offline verification planning; not an install lock, authorization, or isolation proof",
+  "observed_runtimes": {"python": "3.13.7", "node": "22.20.0", "react": "19.2.8", "react_dom": "19.2.8", "typescript": "6.0.3", "vite": "8.2.2"},
+  "records": {
+    "frontend/package-lock.json": {"sha256": "d4d92726d2c75bfe742f71bdc1546403064cb493d0c1755055b3e7c50b25e854", "note": "npm lock version 3; review resolved versions and integrity for every transitive artifact"},
+    "requirements.txt": {"sha256": "447b4894d7912e13c02354802c79d5375b2b9ba52c1eb891e94acd2652c50792", "note": "lower bounds, not a reproducible lock"},
+    "config/models.yaml": {"sha256": "c93ec744fe5b84fd841d749045173c5ddf2d29484090f529287fe0a309ad0d86", "note": "configuration, not evidence of installed or verified models"},
+    "tools/offline_verification/installed_distributions.txt": {"note": "historical installed metadata snapshot; RECORD text hashes are not wheel hashes"}
+  },
+  "historical_python_inventory": {"fastapi":"0.129.0","httpx":"0.28.1","pydantic":"2.12.5","pydantic-settings":"2.13.0","python-multipart":"0.0.22","pytest":"8.4.2","pytest-asyncio":"1.4.0","uvicorn":"0.41.0","chromadb":"1.5.9","python-docx":"1.2.0","openpyxl":"3.1.5","pypdf":"6.16.2","pillow":"12.3.0"},
+  "configured_model_ids": ["ollama/qwen2.5:7b", "ollama/llava:7b", "ollama/nomic-embed-text"],
+  "unresolved": ["reviewed Python lock and wheel hashes including transitive extras", "DOM runner and version compatibility", "browser binary and dependency hashes", "model file digests and provenance", "explicit isolated environment and command approvals", "network isolation and loopback monitoring evidence", "reviewed test and output containment"]
+}

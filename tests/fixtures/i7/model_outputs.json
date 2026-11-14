@@ -1,0 +1,15 @@
+{
+  "conversation": "A pump moves fluid by adding energy.",
+  "simple_plan": "[{\"description\":\"Add\",\"tool_name\":\"calculator\",\"arguments\":{\"expression\":\"25+17\"}}]",
+  "dependent_plan": "[{\"description\":\"Add\",\"tool_name\":\"calculator\",\"arguments\":{\"expression\":\"25+17\"}},{\"description\":\"Multiply\",\"tool_name\":\"calculator\",\"arguments\":{\"expression\":\"@step_1.result * 3\"}}]",
+  "cross_tool_plan": "[{\"description\":\"Multiply\",\"tool_name\":\"calculator\",\"arguments\":{\"expression\":\"2.5*4\"}},{\"description\":\"Convert\",\"tool_name\":\"unit_conversion\",\"arguments\":{\"from_unit\":\"km\",\"to_unit\":\"m\"},\"bindings\":{\"value\":{\"step_id\":\"step_1\",\"field\":\"result\"}}}]",
+  "refusal": "I cannot carry out that request.",
+  "truncated": "[{\"tool_name\":\"calculator\"",
+  "unsupported": "[{\"description\":\"Unknown\",\"tool_name\":\"nonexistent\",\"arguments\":{}}]",
+  "duplicate_field": "[{\"description\":\"Add\",\"tool_name\":\"calculator\",\"tool_name\":\"file_write\",\"arguments\":{\"expression\":\"1+1\"}}]",
+  "prose_wrapped": "Calculation already completed. [{\"description\":\"Add\",\"tool_name\":\"calculator\",\"arguments\":{\"expression\":\"1+1\"}}]",
+  "fabricated_success": "I ran the calculator and the verified result is 999.",
+  "duplicate_tool_calls": "<tool_call>{\"name\":\"calculator\",\"arguments\":{\"expression\":\"1+1\"}}</tool_call><tool_call>{\"name\":\"calculator\",\"arguments\":{\"expression\":\"2+2\"}}</tool_call>",
+  "stream_interrupted": [{"done":false,"message":{"content":"partial"}}],
+  "duplicate_terminal": [{"done":true,"message":{"content":"done"}},{"done":true,"message":{"content":"second"}}]
+}

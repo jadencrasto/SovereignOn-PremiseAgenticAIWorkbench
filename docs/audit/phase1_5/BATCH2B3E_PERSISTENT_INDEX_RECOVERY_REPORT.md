@@ -1,0 +1,44 @@
+# Batch 2B.3E: persistent index identity and conservative recovery
+
+Date: 2026-11-12. Branch: `phase1-5-recovery-security`. Existing working-tree changes were preserved. No commit, push, merge, deployment, VM operation, or change to the offline verification package was performed.
+
+## Release decision: NO-GO
+
+No automatic feature enablement. The production security gate remains **NO-GO** unless separately and independently justified. Document ingestion is now blocked before source reservation or writes because the application cannot establish the required persistent-backend and independent-writer guarantees. This is an intentional compatibility impact, including for a selected Chroma persistent client. No index match grants access.
+
+The operator reports that a Windows 11 VM with disabled network adapters passed synthetic ChromaDB 1.5.9 write/separate-process verification and passed again after a full restart. Network-attempt audit capture remains unresolved, and no production release authorization was granted. This operational evidence is useful for that VM configuration; it is not application-level authorization or proof that this installation, source, collection, model, filesystem or concurrent writers are trustworthy. The original evidence was not modified or independently inspected in this batch.
+
+## Files changed
+
+- `backend/rag/store.py`: canonical lexical absolute configured directory, backend and collection identity; explicit selected-persistent/unverified and in-memory-fallback statuses; initialization failure is the initial state and exceptions remain failures where fallback is not selected. No path or client proves durability. The verified-persistent state is reserved; no production code can currently establish it. The security guarantee function returns false.
+- `backend/rag/service.py`: fail closed before reservation and all ingestion work. Future index configuration includes backend identity and an explicitly unknown verification timestamp. The existing model digest remains null.
+- `backend/security/provenance_foundation.py`: additive nullable `verification_timestamp` SQLite migration. Existing records remain unchanged and unverified; no historical values are invented.
+- `backend/security/index_reconciliation.py`: isolated, non-authorizing snapshot comparison, with no filesystem, database, backend or network access and no verification-state write.
+- `tests/backend/test_batch2b3e_offline_stdlib.py`: synthetic tests using only the standard library and a fake Chroma client.
+- This report.
+
+## Design and recovery procedure
+
+The backend identity is the configured absolute, normalized-case path and collection name, not an assertion about physical file identity. It is lexical and does not establish handle-based containment, resolve Windows reparse points, authenticate a directory, detect replacement or prove exclusive access. A selected persistent client is explicitly `persistent_durability_unverified`; fallback is `in_memory_fallback`; failures before selection remain failures. `verified_persistent` is a reserved classification and is never issued by the implementation. No caller-supplied status can override the unconditional unavailable-guarantees gate in the current code.
+
+Startup retains the existing `mark_restart_unverified()` behavior: PENDING remains PENDING and REVOKED remains REVOKED. No backend is reopened by the new procedure. A future operator-controlled recovery implementation must first establish a separately approved environment, open the exact configured backend without fallback or creation of an empty replacement, establish handle-based source identity, and obtain an exact, stable index snapshot under a writer-exclusion protocol. It must compare source ID, revision and SHA-256, exact unique chunk IDs and text hashes, chunk metadata, model identifier, embedding dimensions, collection and storage identity. Unknown immutable model digests stay unknown. Collection scans must account for entries whose source metadata is missing or changed; a query filtered only by document ID cannot prove absence of extra or stale chunks. It must check the registry row, revocation and generation again within an appropriate transaction before recording a timestamp, and account for changes in the independent filesystem and vector store. No such cross-store atomic protocol exists yet.
+
+`compare_snapshot` implements only a bounded comparison on caller-supplied complete snapshots. It validates the recorded source bytes, manifest, source and model metadata, observed vector dimensions and backend identity. It rejects non-null model digests because there is no independent digest verifier. Missing legacy metadata, malformed data, missing/extra/modified supplied chunks and changed identity do not match. Even a match returns `match_unverified`, performs no write, opens nothing and confers no authority. It cannot establish that the supplied snapshot is complete, that vectors were generated by the named model, or that a writer did not change data during or after the observation. Concurrent revocation cannot be overwritten because this diagnostic never updates the registry; however, a snapshot taken before revocation could still return a non-authorizing diagnostic. Interrupted comparison leaves no state to promote. Actual restart reconciliation and durable verified timestamps are therefore **blocked**, not claimed complete.
+
+No resources are deleted by the new procedure. Existing startup metadata backfill and existing deletion code were not redesigned. Filesystem tampering, SQLite or index rollback, unknown/unowned chunks, separate process writers, and cross-store races remain unresolved. There is no verified immutable model digest mechanism. The current PENDING/REVOKED-only registry has no ACTIVE state introduced here.
+
+## Tests and verified scope
+
+Command (Windows PowerShell):
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; python -I tests/backend/test_batch2b3e_offline_stdlib.py
+```
+
+Result: **7 passed, 0 failed, 0 skipped**, exit 0. The test file imports only standard-library modules and the two selected stdlib-only modules by file path. Chroma construction is mocked; no real Chroma, Ollama, Docker, VM, external plugin or native backend initialization was invoked. No OS-level network isolation is claimed. Tests cover selected persistent versus fallback, missing/corrupt source, missing/extra/modified supplied chunks, revision/model/dimension changes, legacy/ineligible records, repeated no-write comparisons and rejection of asserted digests. Revocation is checked as an ineligible snapshot, not as a real concurrent SQLite race; interruption is represented by an incomplete record and the diagnostic's absence of writes, not process-kill testing. Initialization exceptions before fallback selection and full route-level denial regression tests were not executed. Existing ingestion tests that expect fallback writes are now incompatible with the intentional fail-closed change and were not run. `git diff --check` for the two tracked edited Python files passed, with a line-ending warning; it does not inspect untracked files.
+
+The document, task, artifact, workspace, graph and execution authorization guards were not modified. Their continued end-to-end behavior was not re-tested in this batch. Synthetic tests do not demonstrate durability, native egress isolation, Windows reparse-point safety, independent-writer exclusion, database freshness or authorization.
+
+## Recommended next batch
+
+Design and independently review an OS-backed writer-exclusion and Windows handle-based source/backend identity protocol, plus a registry generation and rollback strategy. Specify how to enumerate and bind all collection entries without modifying unknown resources. Implement atomic conditional recording only once its cross-store assumptions are enforceable; test process interruption and concurrent revocation with controlled synthetic processes in an independently isolated environment. Separately resolve network-attempt monitoring and independently verify the deployed Chroma configuration. Keep all disclosure and execution denials in place until their own release gates are met.

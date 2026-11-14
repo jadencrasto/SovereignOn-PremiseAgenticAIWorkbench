@@ -3,8 +3,8 @@ backend/rag/store.py
 --------------------
 ChromaDB vector store wrapper with resilient local persistence and test fallback.
 
-Uses ChromaDB in persistent local mode — all data is stored in
-data/chromadb/ and survives application restarts.
+Attempts to select ChromaDB persistent local mode. Selection alone does not
+establish that data survives application restarts; fallback is non-durable.
 
 No cloud services. No external vector databases.
 
@@ -25,6 +25,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "workbench_documents"
+
+
+def persistent_security_guarantees_available() -> bool:
+    """No supported attestation of durability and exclusive writers exists yet."""
+    return False
 
 
 def _create_local_chroma_client(persist_dir: Path):
@@ -115,6 +120,10 @@ class VectorStore:
     """
 
     def __init__(self, persist_dir: Path) -> None:
+        # A canonical configuration is an identifier, not evidence of durability.
+        self.backend_identity = {'backend': 'chromadb', 'directory': os.path.normcase(os.path.abspath(os.fspath(persist_dir))),
+                                 'collection': COLLECTION_NAME}
+        self.backend_status = 'initialization_failure'
         persist_dir.mkdir(parents=True, exist_ok=True)
         try:
             self._client = _create_local_chroma_client(persist_dir)
@@ -123,6 +132,7 @@ class VectorStore:
                 metadata={"hnsw:space": "cosine"},   # cosine similarity
                 embedding_function=None,  # The workbench always supplies Ollama embeddings.
             )
+            self.backend_status = 'persistent_durability_unverified'
             logger.info(
                 "VectorStore ready | collection=%s persist=%s count=%d",
                 COLLECTION_NAME, persist_dir, self._collection.count(),
@@ -133,6 +143,7 @@ class VectorStore:
             logger.warning("ChromaDB persistent client unavailable (%s). Using in-memory fallback store.", exc)
             self._client = None
             self._collection = _InMemoryFallbackCollection()
+            self.backend_status = 'in_memory_fallback'
 
         # Reconcile legacy chunk metadata so existing unclassified chunks default to 'viewer'
         self._reconcile_metadata()
@@ -221,6 +232,9 @@ class VectorStore:
         """
         Similarity search.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            raise PermissionError("Document retrieval is unavailable.")
         kwargs: Dict = {
             "query_embeddings": [query_embedding],
             "n_results": min(top_k, max(1, self._collection.count())),
@@ -233,6 +247,13 @@ class VectorStore:
 
     def get_document_chunks(self, document_id: str) -> Dict:
         """Return all stored chunks for a document (for listing/debug)."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            raise PermissionError("Document retrieval is unavailable.")
+        return self._maintenance_get_document_chunks(document_id)
+
+    def _maintenance_get_document_chunks(self, document_id: str) -> Dict:
+        """Internal cleanup only; not an authorization or disclosure interface."""
         return self._collection.get(
             where={"document_id": document_id},
             include=["documents", "metadatas"],
@@ -242,6 +263,9 @@ class VectorStore:
         """
         Return a deduplicated list of indexed documents with metadata.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return []
         all_chunks = self._collection.get(include=["metadatas"])
         seen: Dict[str, Dict] = {}
         for meta in all_chunks.get("metadatas", []):
@@ -262,6 +286,13 @@ class VectorStore:
 
     def document_chunk_count(self, document_id: str) -> int:
         """Number of chunks belonging to a specific document."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return 0
+        return self._maintenance_document_chunk_count(document_id)
+
+    def _maintenance_document_chunk_count(self, document_id: str) -> int:
+        """Internal cleanup only; not an authorization or disclosure interface."""
         result = self._collection.get(
             where={"document_id": document_id},
             include=[],

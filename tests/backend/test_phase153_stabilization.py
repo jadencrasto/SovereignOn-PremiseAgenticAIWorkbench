@@ -14,7 +14,6 @@ from backend.auth.request_context import effective_owner
 from backend.config import Settings
 
 
-@pytest.mark.xfail(strict=True, reason='Task detail lacks source-provenance clearance revalidation')
 def test_downgraded_owner_cannot_read_classified_task_result(tmp_path):
     store = TaskStore(tmp_path / 'tasks.db')
     store.save_task({'task_id':'fixture', 'session_id':'session', 'user_request':'synthetic',
@@ -29,7 +28,6 @@ def test_downgraded_owner_cannot_read_classified_task_result(tmp_path):
     assert 'SYNTHETIC_RESTRICTED' not in response.text
 
 
-@pytest.mark.xfail(strict=True, reason='Safe assistant turns are currently excluded from model context')
 def test_authorized_source_independent_turn_remains_in_model_context(tmp_path):
     token = effective_owner.set('a')
     try:
@@ -37,16 +35,27 @@ def test_authorized_source_independent_turn_remains_in_model_context(tmp_path):
         memory.create_session(session_id='s')
         memory.add_assistant_message('s', 'previous calculation', access_provenance={
             'version':1, 'kind':'deterministic_calculation', 'sources':[]})
+        memory.add_assistant_message('s', 'unverified historical text')
+        memory.add_assistant_message('s', 'invalid calculation', access_provenance={
+            'version':1, 'kind':'deterministic_calculation', 'sources':[{'document_id':'d','chunk_id':'c'}]})
+        memory.add_assistant_message('s', 'source-derived prior answer', access_provenance={
+            'version':1, 'kind':'plain_chat', 'sources':[{'document_id':'d','chunk_id':'c'}]})
         memory.add_user_message('s', 'continue')
         engine = AgentEngine(Settings(), MagicMock(), memory)
-        assert any(m.content == 'previous calculation' for m in engine._build_messages('s', 'continue', []))
+        messages = engine._build_messages('s', 'continue', [])
+        assert any(m.content == 'previous calculation' for m in messages)
+        assert all(m.content not in ('unverified historical text', 'invalid calculation', 'source-derived prior answer') for m in messages)
     finally:
         effective_owner.reset(token)
 
 
-@pytest.mark.xfail(strict=True, reason='Artifact registry can replace filename ownership on conflict')
 def test_artifact_registration_does_not_reassign_existing_owner(tmp_path):
     store = TaskStore(tmp_path / 'tasks.db')
+    artifact = tmp_path / 'fixture.txt'
+    artifact.write_text('synthetic owner a content')
     store.save_artifact('fixture.txt', 'synthetic', user_id='a')
-    store.save_artifact('fixture.txt', 'synthetic', user_id='b')
+    with pytest.raises(ValueError):
+        store.save_artifact('fixture.txt', 'synthetic', user_id='b')
     assert store.get_artifact('fixture.txt')['user_id'] == 'a'
+    assert store.get_artifact('fixture.txt')['path'] == 'synthetic'
+    assert artifact.read_text() == 'synthetic owner a content'

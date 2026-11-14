@@ -65,6 +65,24 @@ class ConfigValidator:
                 "message": "Authentication configuration matches environment.",
             })
 
+        results.append({
+            "rule": "prod_auth_dev_override",
+            "status": "FAIL" if is_prod and dev_override else "PASS",
+            "message": "Authentication development override must be disabled in production.",
+        })
+
+        if getattr(self._cfg, 'local_chat_only', False):
+            from backend.health.capabilities import loopback_tags_url
+            try:
+                loopback_tags_url(self._cfg.ollama_base_url)
+                safe_ollama = True
+            except ValueError:
+                safe_ollama = False
+            local_ok = (self._cfg.app_env.lower() in ('development', 'dev') and auth_on and not dev_override
+                        and host in ('127.0.0.1', '::1') and safe_ollama)
+            results.append({"rule": "local_chat_only_security", "status": "PASS" if local_ok else "FAIL",
+                "message": "Chat-only requires development, authenticated loopback configuration and a loopback Ollama endpoint."})
+
         # 1b. Production vs Dev Mode conflict check
         dev_mode_flag = getattr(self._cfg, "dev_mode", None)
         if is_prod and dev_mode_flag is True:
@@ -119,7 +137,7 @@ class ConfigValidator:
 
         # 2. CORS configuration check
         cors_list = self._cfg.cors_origins_list
-        if "*" in cors_list and self._cfg.app_env.lower() == "production":
+        if "*" in cors_list and is_prod:
             results.append({
                 "rule": "cors_wildcard_in_prod",
                 "status": "FAIL",
@@ -135,7 +153,7 @@ class ConfigValidator:
             results.append({
                 "rule": "cors_origins",
                 "status": "PASS",
-                "message": f"CORS origins restricted to: {cors_list}",
+                "message": "CORS origins are explicitly configured.",
             })
 
         # 3. Port bounds
@@ -153,19 +171,32 @@ class ConfigValidator:
             })
 
         # 4. Ollama Endpoint check (local air-gap verification)
-        parsed = urlparse(self._cfg.ollama_base_url)
-        host = (parsed.hostname or "").lower()
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        try:
+            parsed = urlparse(self._cfg.ollama_base_url)
+            host = (parsed.hostname or "").lower()
+            malformed = (parsed.scheme not in ("http", "https") or not host or
+                         parsed.username is not None or parsed.password is not None or
+                         bool(parsed.query or parsed.fragment) or
+                         parsed.path not in ("", "/") or parsed.port == 0 or
+                         any(ord(c) <= 32 or ord(c) == 127 for c in self._cfg.ollama_base_url) or
+                         "\\" in self._cfg.ollama_base_url)
+        except ValueError:
+            malformed = True
+            host = ""
+        if malformed:
+            results.append({"rule": "ollama_local_url", "status": "FAIL",
+                            "message": "Ollama endpoint is malformed or includes unsupported components."})
+        elif host in ("localhost", "127.0.0.1", "::1"):
             results.append({
                 "rule": "ollama_local_url",
                 "status": "PASS",
-                "message": f"Ollama is configured locally at {self._cfg.ollama_base_url}.",
+                "message": "Ollama is configured with a loopback host; availability is unverified.",
             })
         else:
             results.append({
                 "rule": "ollama_local_url",
                 "status": "WARN",
-                "message": f"Ollama base URL points to non-loopback address: '{self._cfg.ollama_base_url}'. Ensure network is secured.",
+                "message": "Ollama is configured with a non-loopback host; offline operation is unverified.",
             })
 
         # 5. Directory paths
@@ -174,18 +205,25 @@ class ConfigValidator:
             results.append({
                 "rule": "runtime_directories",
                 "status": "PASS",
-                "message": "All runtime directories exist and are writable.",
+                "message": "Runtime directory initialization completed; writability and security are unverified.",
             })
-        except Exception as exc:
+        except Exception:
             results.append({
                 "rule": "runtime_directories",
                 "status": "FAIL",
-                "message": f"Failed to initialize runtime directories: {exc}",
+                "message": "Failed to initialize runtime directories; check server configuration and permissions.",
             })
 
         # 6. Production code execution isolation
+        from backend.security.execution_policy import code_execution_allowed
         code_exec_isolation = getattr(self._cfg, "code_exec_isolation", "subprocess").lower()
-        if is_prod:
+        if not code_execution_allowed():
+            results.append({
+                "rule": "prod_code_exec_isolation",
+                "status": "PASS",
+                "message": "Code execution is disabled; isolation has not been verified.",
+            })
+        elif is_prod:
             if code_exec_isolation != "docker":
                 results.append({
                     "rule": "prod_code_exec_isolation",

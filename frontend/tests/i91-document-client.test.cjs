@@ -1,0 +1,6 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),Module=require('node:module'),ts=require('typescript');
+function load(relative,mocks={}){const f=path.resolve(__dirname,relative),m=new Module(f,module);m.filename=f;m.paths=Module._nodeModulePaths(path.dirname(f));const orig=m.require.bind(m);m.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,f);return m.exports}
+const client=load('../src/api/client.ts');
+const {fetchDocuments}=load('../src/api/documents.ts',{'./client':client});
+test('503 document unavailable is an error, not an empty document list',async()=>{const original=global.fetch;global.fetch=async()=>({ok:false,status:503,json:async()=>({detail:'Document unavailable'})});try{await assert.rejects(fetchDocuments(),e=>e instanceof client.ApiError&&e.status===503&&e.message==='Document unavailable')}finally{global.fetch=original}});
+test('an authorized successful empty response remains distinguishable',async()=>{const original=global.fetch;global.fetch=async()=>({ok:true,json:async()=>({documents:[],total:0})});try{assert.deepEqual(await fetchDocuments(),{documents:[],total:0})}finally{global.fetch=original}});

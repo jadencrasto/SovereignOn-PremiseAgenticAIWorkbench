@@ -49,6 +49,9 @@ def create_file_list(upload_dir: Path) -> callable:
 
     async def execute_file_list(args: FileListInput) -> List[dict]:
         """List files in the controlled workspace directory."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return []
         # Determine target directory
         if args.directory:
             target = validate_path_within(args.directory, upload_dir)

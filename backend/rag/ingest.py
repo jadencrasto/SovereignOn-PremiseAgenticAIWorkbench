@@ -19,6 +19,7 @@ import io
 import logging
 import re
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Document:
     """Parsed representation of an uploaded file."""
-    document_id: str        # stable UUID derived from filename hash
+    document_id: str        # stable identifier derived from filename and complete content
     filename: str
     file_type: str          # pdf | txt | md | docx
     text: str               # full extracted text
@@ -64,6 +65,8 @@ class DocumentParser:
     """
 
     SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx"}
+    MAX_INPUT_BYTES = 50 * 1024 * 1024
+    MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 
     @classmethod
     def parse(cls, filename: str, content: bytes) -> Document:
@@ -89,6 +92,24 @@ class DocumentParser:
         if not content:
             raise ValueError("File content is empty.")
 
+        if not isinstance(content, bytes) or len(content) > cls.MAX_INPUT_BYTES:
+            raise ValueError("File exceeds the parser size limit or is not bytes.")
+        if suffix == ".pdf" and not content.startswith(b"%PDF-"):
+            raise ValueError("Invalid PDF signature.")
+        if suffix == ".docx":
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    entries = archive.infolist()
+                    if (len(entries) > 10000 or
+                            sum(entry.file_size for entry in entries) > cls.MAX_DOCX_UNCOMPRESSED_BYTES or
+                            "word/document.xml" not in archive.namelist() or
+                            "[Content_Types].xml" not in archive.namelist()):
+                        raise ValueError("Invalid or oversized DOCX archive.")
+            except (zipfile.BadZipFile, OSError) as exc:
+                raise ValueError("Invalid DOCX archive.") from exc
+        elif suffix in (".txt", ".md") and (b"\x00" in content or content.startswith((b"%PDF-", b"PK\x03\x04"))):
+            raise ValueError("File is not supported plain text.")
+
         doc_id = cls._make_doc_id(filename, content)
 
         if suffix == ".pdf":
@@ -102,9 +123,12 @@ class DocumentParser:
             # .txt and .md
             text, metadata = cls._parse_text(content)
 
+        if len(text) > 10 * 1024 * 1024:
+            raise ValueError("Extracted text exceeds the parser limit.")
         if not text.strip():
             raise ValueError(f"No text could be extracted from '{filename}'.")
 
+        metadata["content_sha256"] = hashlib.sha256(content).hexdigest()
         return Document(
             document_id=doc_id,
             filename=filename,
@@ -474,7 +498,7 @@ class DocumentParser:
     @staticmethod
     def _make_doc_id(filename: str, content: bytes) -> str:
         """Stable document ID from filename + content hash."""
-        h = hashlib.sha256(filename.encode() + content[:1024]).hexdigest()[:16]
+        h = hashlib.sha256(filename.encode("utf-8") + b"\0" + content).hexdigest()[:32]
         return f"doc_{h}"
 
 
@@ -486,18 +510,14 @@ class TextChunker:
     """
     Splits a Document into overlapping text chunks.
 
-    Strategy:
-      1. Split text into paragraphs (double newline boundaries).
-      2. Accumulate paragraphs into windows of approximately `chunk_size` chars.
-      3. Apply `overlap` characters from the end of one chunk to the start
-         of the next.
+    Split normalized paragraphs into bounded character windows with fixed overlap.
 
     This paragraph-aware approach preserves semantic boundaries better
     than pure character splitting.
     """
 
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 150) -> None:
-        if chunk_overlap >= chunk_size:
+        if chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
             raise ValueError("chunk_overlap must be less than chunk_size")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -518,7 +538,8 @@ class TextChunker:
                 continue
             chunk_id = f"{document.document_id}_chunk_{idx}"
             # Carry page metadata if available (PDF stores "[Page N]" markers)
-            page = self._extract_page_hint(text)
+            # Text markers are not trusted evidence of a source page.
+            page = None
             chunk_meta = {**document.metadata, "chunk_index": idx}
             if page is not None:
                 chunk_meta["page"] = page
@@ -554,41 +575,17 @@ class TextChunker:
         Greedily accumulate paragraphs into windows ≤ chunk_size characters,
         then prepend an overlap tail from the previous window.
         """
-        if not paragraphs:
+        text = "\n\n".join(paragraphs)
+        if not text:
             return []
-
-        windows: List[str] = []
-        current_parts: List[str] = []
-        current_len = 0
-        overlap_tail = ""
-
-        for para in paragraphs:
-            para_len = len(para)
-
-            if current_len + para_len + 2 > self.chunk_size and current_parts:
-                # Emit current window
-                window = "\n\n".join(current_parts)
-                if overlap_tail:
-                    window = overlap_tail + "\n\n" + window
-                windows.append(window)
-
-                # Build overlap tail: tail characters of current window
-                raw = "\n\n".join(current_parts)
-                overlap_tail = raw[-self.chunk_overlap:] if len(raw) > self.chunk_overlap else raw
-
-                current_parts = []
-                current_len = 0
-
-            current_parts.append(para)
-            current_len += para_len + 2  # +2 for the separator
-
-        # Flush the last window
-        if current_parts:
-            window = "\n\n".join(current_parts)
-            if overlap_tail:
-                window = overlap_tail + "\n\n" + window
-            windows.append(window)
-
+        windows = []
+        start = 0
+        while start < len(text):
+            end = min(start + self.chunk_size, len(text))
+            windows.append(text[start:end])
+            if end == len(text):
+                break
+            start = end - self.chunk_overlap
         return windows
 
     @staticmethod

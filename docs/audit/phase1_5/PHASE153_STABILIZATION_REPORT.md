@@ -47,3 +47,11 @@ Frontend `node --experimental-strip-types --test tests/historyRequests.test.mjs`
 ## Changed files
 
 `backend/security/conversation_access.py` fail-closes empty-source records; `tests/backend/test_phase153_security.py` updates the security regression expectation; `tests/backend/test_phase153_stabilization.py` adds three strict expected-failure acceptance guards. This report and the appended audit addenda document findings. No runtime data was read or modified intentionally.
+
+## Phase 1.5.3B addendum — 2026-11-07
+
+NO-GO: narrow verified deterministic calculation continuity was restored in plain-chat context; task clearance disclosure and filename-based artifact ownership collision remain open strict expected-failure guards. Targeted tests: 23 passed, 2 xfailed; the guard confirmation run produced 1 passed and 2 failed. Shared transitive provenance, authorization and atomic artifact lifecycle remain incomplete. See PHASE153B_SECURITY_REMEDIATION_REPORT.md.
+
+## Phase 1.5.3C addendum — 2026-11-07
+
+The downgraded-owner task-result guard passes using universal fail-closed redaction because trustworthy task/source lineage is absent. Approval/resume, approval-history details, all artifact viewing/download and artifact verification are currently blocked for everyone; task status metadata remains available subject to ownership/admin policy. Compatibility run: 4 passed, 2 failed due to these deliberate restrictions; targeted security run: 39 passed, 1 artifact-collision xfailed. This is partial containment, not full provenance or release readiness. See PHASE153C_TASK_SECURITY_REPORT.md.

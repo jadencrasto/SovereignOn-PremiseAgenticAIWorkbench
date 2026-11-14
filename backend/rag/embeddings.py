@@ -15,11 +15,23 @@ All embedding generation is local — no data is sent to external APIs.
 from __future__ import annotations
 
 import logging
+import math
 from typing import List
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def validate_embedding(vector, expected_dimensions=None):
+    """Validate an untrusted provider vector before it reaches an index."""
+    if (not isinstance(vector, (list, tuple)) or not vector or
+            (expected_dimensions is not None and len(vector) != expected_dimensions)):
+        raise RuntimeError("Embedding dimensionality unavailable or inconsistent.")
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+           not math.isfinite(value) for value in vector):
+        raise RuntimeError("Embedding contains invalid values.")
+    return [float(value) for value in vector]
 
 
 class EmbeddingService:
@@ -40,6 +52,9 @@ class EmbeddingService:
             model    : embedding model name, e.g. 'nomic-embed-text'
             timeout  : HTTP timeout in seconds (default 15s to bound RAG latency)
         """
+        if not isinstance(model, str) or not model.strip() or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("A model and positive finite timeout are required.")
+        self._dimensions = None
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._client = httpx.AsyncClient(
@@ -79,19 +94,20 @@ class EmbeddingService:
                 f"Cannot reach Ollama embedding endpoint at {self._base_url}. "
                 "Ensure Ollama is running: 'ollama serve'"
             ) from exc
+        except httpx.TimeoutException as exc:
+            raise RuntimeError("Embedding provider timed out.") from exc
         except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"Ollama embedding error {exc.response.status_code}: {exc.response.text}"
-            ) from exc
+            raise RuntimeError(f"Embedding provider returned HTTP {exc.response.status_code}.") from exc
 
-        data = resp.json()
-        embedding = data.get("embedding")
-        if not embedding:
-            raise RuntimeError(
-                f"Ollama returned no embedding. "
-                f"Is '{self._model}' pulled? Run: ollama pull {self._model}"
-            )
-        return embedding
+        try:
+            data = resp.json()
+            embedding = data.get("embedding") if isinstance(data, dict) else None
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("Invalid embedding provider response.") from exc
+        vector = validate_embedding(embedding, self._dimensions)
+        if self._dimensions is None:
+            self._dimensions = len(vector)
+        return vector
 
     async def embed_many(self, texts: List[str]) -> List[List[float]]:
         """

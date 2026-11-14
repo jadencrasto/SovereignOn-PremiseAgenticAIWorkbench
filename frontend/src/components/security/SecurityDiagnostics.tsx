@@ -92,7 +92,7 @@ export const SecurityDiagnostics: React.FC = () => {
             Security Diagnostics & Posture
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Automated verification of local sovereign configuration, authentication boundaries, and air-gap posture.
+            Local diagnostic checks for configuration, authentication and egress.
           </p>
         </div>
 

@@ -47,3 +47,20 @@ test('successful delete requires server confirmation; failures do not succeed', 
   }
   assert.equal(await deleteOwnedHistory('a1', async () => {}, () => false), false);
 });
+
+
+test('duplicate server IDs do not duplicate conversation entries', async () => {
+  const seen = [];
+  const records = await loadOwnedHistory(async () => ({sessions: ['a', 'a', 'b']}), async id => { seen.push(id); return id; }, () => true);
+  assert.deepEqual(records, ['a', 'b']);
+  assert.deepEqual(seen, ['a', 'b']);
+});
+
+test('a conversation removed during list loading is skipped; other failures surface', async () => {
+  const records = await loadOwnedHistory(async () => ({sessions:['gone','kept']}), async id => {
+    if (id === 'gone') throw Object.assign(new Error('not found'), {status:404});
+    return id;
+  }, () => true);
+  assert.deepEqual(records, ['kept']);
+  await assert.rejects(loadOwnedHistory(async () => ({sessions:['a']}), async () => {throw Object.assign(new Error('offline'),{status:503})}, () => true));
+});

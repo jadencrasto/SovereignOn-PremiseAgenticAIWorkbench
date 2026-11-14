@@ -103,6 +103,7 @@ export async function streamSSE(
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let terminal = false;
 
   try {
     while (true) {
@@ -120,6 +121,7 @@ export async function streamSSE(
         const jsonStr = trimmed.slice(6);
         try {
           const chunk: StreamChunkPayload = JSON.parse(jsonStr);
+          if (terminal) continue;
 
           if (chunk.type === 'delta') {
             if (chunk.content) {
@@ -130,8 +132,12 @@ export async function streamSSE(
               callbacks.onSources(chunk.sources);
             }
           } else if (chunk.type === 'done') {
+            if (terminal) continue;
+            terminal = true;
             callbacks.onDone(chunk.session_id || '', chunk.model_used || '');
           } else if (chunk.type === 'error') {
+            if (terminal) continue;
+            terminal = true;
             callbacks.onError(chunk.content || 'An error occurred during generation');
           } else if (chunk.type === 'tool_start' || chunk.type === 'tool_result') {
             // Phase 4: Tool events
@@ -177,10 +183,16 @@ export async function streamSSE(
             }
           }
         } catch (parseError) {
-          console.warn('Failed to parse SSE line:', jsonStr, parseError);
+          if (!terminal) { terminal = true; callbacks.onError('Invalid stream response'); }
         }
       }
+      if (terminal) {
+        // Do not leave an HTTP stream open after its terminal event.
+        await reader.cancel().catch(() => {});
+        break;
+      }
     }
+    if (!terminal && !signal?.aborted) callbacks.onError('Response interrupted before completion');
   } catch (err: any) {
     if (err.name === 'AbortError') {
       console.log('Stream aborted by client');
@@ -246,6 +258,7 @@ export async function streamSSEFromFormData(
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let terminal = false;
 
   try {
     while (true) {
@@ -261,13 +274,18 @@ export async function streamSSEFromFormData(
         const jsonStr = trimmed.slice(6);
         try {
           const chunk: StreamChunkPayload = JSON.parse(jsonStr);
+          if (terminal) continue;
           if (chunk.type === 'delta') {
             if (chunk.content) callbacks.onDelta(chunk.content);
           } else if (chunk.type === 'sources') {
             if (chunk.sources && Array.isArray(chunk.sources)) callbacks.onSources(chunk.sources);
           } else if (chunk.type === 'done') {
+            if (terminal) continue;
+            terminal = true;
             callbacks.onDone(chunk.session_id || '', chunk.model_used || '');
           } else if (chunk.type === 'error') {
+            if (terminal) continue;
+            terminal = true;
             callbacks.onError(chunk.content || 'An error occurred during generation');
           } else if (chunk.type === 'tool_start' || chunk.type === 'tool_result') {
             if (callbacks.onToolEvent) {
@@ -293,10 +311,16 @@ export async function streamSSEFromFormData(
             if (callbacks.onTaskStatus) callbacks.onTaskStatus(chunk.type, chunk.task_id || chunk.content || '');
           }
         } catch (parseError) {
-          console.warn('Failed to parse SSE line:', jsonStr, parseError);
+          if (!terminal) { terminal = true; callbacks.onError('Invalid stream response'); }
         }
       }
+      if (terminal) {
+        // Do not leave an HTTP stream open after its terminal event.
+        await reader.cancel().catch(() => {});
+        break;
+      }
     }
+    if (!terminal && !signal?.aborted) callbacks.onError('Response interrupted before completion');
   } catch (err: any) {
     if (err.name === 'AbortError') {
       console.log('Multimodal stream aborted');

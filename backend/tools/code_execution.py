@@ -329,6 +329,8 @@ def _run_subprocess_worker(
     Enforces process group isolation, creation flags, environment sanitization,
     timeout, and hard output-size capping with early termination.
     """
+    from backend.security.execution_policy import require_code_execution
+    require_code_execution()
     creationflags = get_subprocess_creation_flags()
     try:
         proc = subprocess.Popen(
@@ -434,6 +436,8 @@ def _run_docker_worker(
     Synchronous air-gap safe Docker container execution worker.
     Fails closed if daemon or image is unavailable. Never silently falls back to subprocess.
     """
+    from backend.security.execution_policy import require_code_execution
+    require_code_execution()
     if not check_docker_daemon_available():
         raise RuntimeError(
             "Docker container isolation is configured, but Docker daemon is unreachable or stopped. "
@@ -502,6 +506,8 @@ def create_code_execution(sandbox_dir: Path, cfg: Optional[Any] = None) -> calla
     active_cfg = cfg or settings
 
     async def execute_code_execution(args: CodeExecutionInput) -> Dict[str, Any]:
+        from backend.security.execution_policy import require_code_execution
+        require_code_execution()
         code = args.code.strip()
         if not code:
             raise ValueError("Code content cannot be empty.")

@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useWorkbench } from '../../context/WorkbenchContext';
+import { capabilityFor } from '../../api/capabilities';
 import { RefreshCw } from 'lucide-react';
 
 interface HardwareTelemetry {
@@ -36,7 +37,7 @@ export const StatusBar: React.FC = () => {
     refreshHealth,
     health,
     selectedModel,
-    documents,
+    capabilities,
   } = useWorkbench();
 
   const [hw, setHw] = useState<HardwareTelemetry | null>(null);
@@ -65,7 +66,7 @@ export const StatusBar: React.FC = () => {
         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-200 shadow-sm rounded-sm">
           <span className={`w-2 h-2 rounded-full ${isBackendConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
           <span className={isBackendConnected ? 'text-blue-700' : 'text-red-600'}>
-            {isBackendConnected ? 'SOVEREIGN_AIRGAP' : 'DISCONNECTED'}
+            {isBackendConnected ? 'BACKEND READY' : isCheckingHealth ? 'CHECKING' : 'BACKEND UNAVAILABLE'}
           </span>
           <button
             onClick={() => {
@@ -100,19 +101,19 @@ export const StatusBar: React.FC = () => {
 
         {/* Active Model */}
         <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 text-slate-700 shadow-sm rounded-sm">
-          <span className="text-slate-500">ACTIVE_MODEL:</span>
+          <span className="text-slate-500">MODEL:</span>
           <span className="text-blue-600 uppercase">
             {hw?.active_loaded_models && hw.active_loaded_models.length > 0
               ? hw.active_loaded_models[0]
-              : selectedModel || health?.default_model || 'QWEN2.5:7B'}
+              : selectedModel || health?.default_model || 'UNKNOWN'}
           </span>
         </div>
 
         {/* Local Vector Chunks */}
         <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 text-slate-700 shadow-sm rounded-sm">
           <span className="text-slate-500">KB_INDEX:</span>
-          <span className="text-emerald-600">
-            {documents.length > 0 ? `${documents.length} REPO_DOCS` : 'EMPTY'}
+          <span className="text-slate-600">
+            {capabilityFor(capabilities, 'document_rag').state.toUpperCase()}
           </span>
         </div>
       </div>
@@ -120,7 +121,7 @@ export const StatusBar: React.FC = () => {
       {/* Right Block */}
       <div className="flex items-center gap-2 shrink-0 font-bold text-[10px]">
         <div className="px-2 py-0.5 bg-blue-600 text-white border border-blue-700 rounded-sm shadow-sm uppercase">
-          NO_CLOUD_LEAK &bull; SHA256_VERIFIED
+          DEVELOPMENT &bull; DEPLOYMENT UNVERIFIED
         </div>
       </div>
     </footer>

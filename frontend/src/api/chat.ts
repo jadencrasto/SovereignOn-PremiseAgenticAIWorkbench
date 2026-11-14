@@ -95,6 +95,10 @@ export async function streamChatMultimodal(
   return streamSSEFromFormData('/api/chat/multimodal', formData, callbacks, signal);
 }
 
+export async function createSession(): Promise<{ session_id: string }> {
+  return apiRequest('/api/chat/sessions', { method: 'POST' });
+}
+
 export async function fetchSessions(): Promise<{ sessions: string[]; count: number }> {
   return apiRequest<{ sessions: string[]; count: number }>('/api/chat/sessions');
 }
@@ -106,7 +110,7 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
 }
 
 
-export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: {id?: string | null; role: 'system' | 'user' | 'assistant'; content: string; created_at?: string | null; tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[]}[]}> {
+export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; created_at?: string | null; updated_at?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: {id?: string | null; role: 'system' | 'user' | 'assistant'; content: string; created_at?: string | null; withheld?: boolean; tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[]}[]}> {
   return apiRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 
@@ -118,4 +122,17 @@ export async function renameSession(sessionId: string, title: string): Promise<{
 
 export async function legacyExportAllowed(): Promise<{ allowed: boolean }> {
   return apiRequest('/api/chat/legacy-export-policy');
+}
+
+/** Ignore callbacks from a generation that is no longer the active request. */
+export function guardChatCallbacks<T extends object>(callbacks: T, isActive: () => boolean): T {
+  return new Proxy(callbacks, {
+    get(target, property) {
+      const callback = Reflect.get(target, property);
+      if (typeof callback !== 'function') return callback;
+      return (...args: any[]) => {
+        if (isActive()) (callback as (...values: any[]) => void)(...args);
+      };
+    },
+  });
 }

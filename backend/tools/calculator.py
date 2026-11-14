@@ -159,6 +159,21 @@ def safe_calculate(expression: str) -> Union[int, float]:
     return result
 
 
+class CalculatorOutput(BaseModel):
+    """The bounded result fields available to dependent read-only steps."""
+    expression: str = Field(min_length=1, max_length=_MAX_EXPR_LEN)
+    result: int | float
+
+
+def verify_calculator_output(arguments: dict, output: dict) -> bool:
+    try:
+        return (output.get('expression') == arguments['expression']
+                and type(output.get('result')) in (int, float)
+                and output['result'] == safe_calculate(arguments['expression']))
+    except (ValueError, TypeError, KeyError, ArithmeticError, OverflowError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Tool execute function
 # ---------------------------------------------------------------------------

@@ -19,14 +19,20 @@ interface MessageItemProps {
   onReject?: (taskId: string) => void;
 }
 
-const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
+const ToolActivity: React.FC<{ events: ToolEvent[]; isStreaming?: boolean }> = ({ events, isStreaming }) => {
   const [expanded, setExpanded] = useState(false);
   if (!events || events.length === 0) return null;
 
   const completedTools = events.filter((e) => e.type === 'tool_result');
-  const runningTool = events.find(
-    (e) => e.type === 'tool_start' && !events.some((r) => r.type === 'tool_result' && r.tool === e.tool)
-  );
+  // Match starts and results in order: the same tool may be invoked repeatedly.
+  const outstanding = new Map<string, number>();
+  for (const event of events) {
+    const count = outstanding.get(event.tool) || 0;
+    if (event.type === 'tool_start') outstanding.set(event.tool, count + 1);
+    else if (event.type === 'tool_result' && count > 0) outstanding.set(event.tool, count - 1);
+  }
+  const runningTool = [...outstanding.values()].some(count => count > 0);
+  const unknownResult = completedTools.some(event => event.success !== true && event.success !== false);
 
   const formatToolName = (tool: string) => {
     switch (tool) {
@@ -36,6 +42,8 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
         return 'WORKSPACE_FILE_INGEST';
       case 'calculator':
         return 'NUMERIC_TOLERANCE_SOLVER';
+      case 'unit_conversion':
+        return 'UNIT CONVERSION';
       case 'xlsx_report':
         return 'XLSX_COMPLIANCE_BUILDER';
       case 'file_write':
@@ -49,13 +57,14 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
 
   return (
     <div className="mb-4 border border-blue-100 rounded-lg bg-blue-50/30 font-sans text-xs">
-      <div
+      <button type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center justify-between p-3 bg-blue-50/50 border-b border-blue-100 cursor-pointer hover:bg-blue-100/50 transition-colors rounded-t-lg"
+        aria-expanded={expanded}
+        className="w-full flex items-center justify-between p-3 bg-blue-50/50 border-b border-blue-100 cursor-pointer hover:bg-blue-100/50 transition-colors rounded-t-lg"
       >
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 bg-blue-500 text-white font-semibold text-[10px] rounded-full">
-            {runningTool ? 'Running' : completedTools.some(e => e.success === false) ? 'Finished with errors' : 'Completed'}
+            {runningTool ? (isStreaming ? 'Running' : 'Outcome uncertain') : completedTools.some(e => e.success === false) ? 'Finished with errors' : unknownResult ? 'Outcome unknown' : 'Results received'}
           </span>
           <span className="font-semibold text-blue-700 tracking-tight">
             Tool Pipeline ({completedTools.length} actions)
@@ -64,7 +73,7 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
         <span className="text-[10px] font-medium text-blue-600">
           {expanded ? 'Hide Logs' : 'View Logs'}
         </span>
-      </div>
+      </button>
 
       {!expanded && completedTools.length > 0 && (
         <div className="p-2.5 flex flex-wrap gap-2 bg-blue-50/30 rounded-b-lg">
@@ -73,7 +82,7 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
               key={i}
               className="inline-flex items-center gap-1.5 px-2 py-1 bg-white border border-blue-100 rounded-md text-[11px] font-medium text-blue-700 shadow-sm"
             >
-              {ev.success === false ? <AlertTriangle className="w-3.5 h-3.5 text-red-600" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
+              {ev.success !== true ? <AlertTriangle className="w-3.5 h-3.5 text-red-600" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
               <span>{formatToolName(ev.tool)}</span>
             </span>
           ))}
@@ -91,19 +100,14 @@ const ToolActivity: React.FC<{ events: ToolEvent[] }> = ({ events }) => {
                     <span className="font-semibold text-blue-600">
                       Running {formatToolName(event.tool)}
                     </span>
-                    {event.arguments && (
-                      <span className="text-slate-600 ml-2">
-                        {JSON.stringify(event.arguments)}
-                      </span>
-                    )}
                   </div>
                 </>
               ) : (
                 <>
-                  {event.success === false ? <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />}
+                  {event.success !== true ? <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />}
                   <div>
                     <span className="font-semibold text-slate-700">
-                      {event.success === false ? 'Failed' : 'Completed'} {formatToolName(event.tool)}
+                      {event.success === true ? 'Completed' : event.success === false ? 'Failed' : 'Outcome unknown for'} {formatToolName(event.tool)}
                     </span>
                     {event.summary && (
                       <span className="ml-2 text-slate-600">{event.summary}</span>
@@ -169,7 +173,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
   }
 
   // Assistant Message (White & Light Blue Terminal Output)
-  const hasToolEvents = message.toolEvents && message.toolEvents.length > 0;
+  const hasToolEvents = !message.withheld && message.toolEvents && message.toolEvents.length > 0;
 
   return (
     <div className="flex flex-col gap-2 max-w-5xl mx-auto px-2 py-3 font-sans">
@@ -196,7 +200,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             : 'border-slate-200 text-slate-800'
         }`}
       >
-        {message.error ? (
+        {message.withheld ? (
+          <p role="status" className="text-sm text-slate-600">This response is withheld because its source access cannot be verified.</p>
+        ) : message.error ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2 font-semibold text-sm text-rose-600">
               <AlertTriangle className="w-4 h-4" />
@@ -214,11 +220,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
           </div>
         ) : (
           <>
+            {message.workflowStatus && <p role="status" className="mb-3 text-xs font-medium text-slate-600">
+              {({ planning: 'Planning', executing: 'Executing', awaiting_approval: 'Waiting for approval',
+                completed: 'Workflow completed', failed: 'Workflow failed', cancelled: 'Workflow cancelled; an operation already started may require review.',
+                interrupted: 'Workflow interrupted; any operation already started may require review.' })[message.workflowStatus]}
+            </p>}
             {/* Tool Activity Timeline */}
-            {hasToolEvents && <ToolActivity events={message.toolEvents!} />}
+            {hasToolEvents && <ToolActivity events={message.toolEvents!} isStreaming={message.isStreaming} />}
 
             {/* Plan Timeline */}
-            {message.plan && message.plan.steps && message.plan.steps.length > 0 && (
+            {!message.withheld && message.plan && message.plan.steps && message.plan.steps.length > 0 && (
               <PlanTimeline
                 taskId={message.plan.taskId}
                 objective={message.plan.objective}
@@ -227,7 +238,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             )}
 
             {/* Approval Card */}
-            {message.pendingApproval && onApprove && onReject && (
+            {!message.withheld && message.pendingApproval && onApprove && onReject && (
               <ApprovalCard
                 taskId={message.pendingApproval.task_id}
                 stepId={message.pendingApproval.step_id}
@@ -264,7 +275,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
         )}
 
         {/* Sources Grid */}
-        {message.sources && message.sources.length > 0 && (
+        {!message.withheld && message.sources && message.sources.length > 0 && (
           <div className="mt-6 pt-5 border-t border-slate-100">
             <div className="text-xs font-semibold text-slate-500 tracking-wide mb-3">
               Sources & Evidence
@@ -279,7 +290,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
       </div>
 
       {/* Copy / Actions Footer */}
-      {!message.isStreaming && !message.error && message.content && (
+      {!message.withheld && !message.isStreaming && !message.error && message.content && (
         <div className="flex items-center justify-end gap-2 mt-1">
           <button
             onClick={handleCopy}

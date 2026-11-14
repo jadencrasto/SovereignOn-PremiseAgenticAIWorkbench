@@ -178,6 +178,12 @@ class TaskManager:
         clearance: Optional[str] = None,
     ) -> TaskState:
         """Create a new task in PENDING state."""
+        from backend.auth.request_context import effective_owner
+        bound_owner = effective_owner.get()
+        if bound_owner:
+            if user_id is not None and user_id != bound_owner:
+                raise PermissionError('Task owner does not match authenticated principal')
+            user_id = bound_owner
         task = TaskState(
             session_id=session_id,
             user_request=user_request,
@@ -185,7 +191,7 @@ class TaskManager:
             user_role=user_role,
             clearance=clearance,
         )
-        self._persist(task)
+        self._persist(task, initialize_security=True)
         logger.info(
             "task_created | task=%s session=%s user_role=%s request_len=%d",
             task.task_id, session_id, user_role, len(user_request),
@@ -399,13 +405,13 @@ class TaskManager:
                 f"Allowed: {allowed}"
             )
 
-    def _persist(self, task: TaskState) -> None:
+    def _persist(self, task: TaskState, *, initialize_security: bool = False) -> None:
         """Save task to SQLite."""
         plan_json = None
         if task.plan:
             plan_json = task.plan.model_dump_json()
 
-        self._store.save_task({
+        record = {
             "task_id": task.task_id,
             "session_id": task.session_id,
             "user_request": task.user_request,
@@ -420,7 +426,11 @@ class TaskManager:
             "user_id": task.user_id,
             "user_role": task.user_role,
             "clearance": task.clearance,
-        })
+        }
+        if initialize_security:
+            self._store.save_task(record, initialize_security=True)
+        else:
+            self._store.save_task(record)
 
     def recover_tasks_on_startup(
         self,

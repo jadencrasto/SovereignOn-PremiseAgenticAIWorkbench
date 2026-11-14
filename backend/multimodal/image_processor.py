@@ -202,20 +202,29 @@ class ImageProcessor:
                 code="unsupported_mime",
             )
 
-        # 5. Decode dimensions (lightweight, no Pillow required)
-        width, height = self._read_dimensions(data, ext)
-        if width is not None and height is not None:
-            if width > limit_dim or height > limit_dim:
-                raise ImageValidationError(
-                    message=(
-                        f"Image dimensions {width}×{height} exceed maximum "
-                        f"{limit_dim}×{limit_dim}."
-                    ),
-                    code="excessive_dimensions",
-                )
-
-        # 6. Verify image is not malformed (attempt header parse)
-        self._verify_not_malformed(data, ext)
+        # Verify and fully decode a bounded, single-frame image. Header-only
+        # validation cannot establish WebP dimensions or detect truncation.
+        try:
+            from PIL import Image
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(data)) as image:
+                    width, height = image.size
+                    if (width <= 0 or height <= 0 or width > limit_dim or height > limit_dim
+                            or width * height > 16_000_000):
+                        raise ImageValidationError('Image dimensions exceed the allowed limit.', 'excessive_dimensions')
+                    if getattr(image, 'n_frames', 1) != 1:
+                        raise ImageValidationError('Animated images are unsupported.', 'unsupported_image')
+                    if Image.MIME.get(image.format) != expected_mime:
+                        raise ImageValidationError('Image content does not match its extension.', 'mime_mismatch')
+                    image.verify()
+                with Image.open(io.BytesIO(data)) as image:
+                    image.load()
+        except ImageValidationError:
+            raise
+        except Exception as exc:
+            raise ImageValidationError('Malformed or unsupported image.', 'malformed_image') from exc
 
         # 7. Encode to base64 for LLaVA (NEVER logged)
         b64 = base64.b64encode(data).decode("ascii")

@@ -450,12 +450,12 @@ class ApprovalManager:
     def _is_expired(self, approval: ApprovalRequest) -> bool:
         """Check if an approval has expired."""
         if not approval.expires_at:
-            return False
+            return True
         try:
             expires = datetime.fromisoformat(approval.expires_at)
             return datetime.now(timezone.utc) > expires
         except (ValueError, TypeError):
-            return False
+            return True
 
     def _expire(self, approval: ApprovalRequest) -> None:
         """Mark an approval as expired."""

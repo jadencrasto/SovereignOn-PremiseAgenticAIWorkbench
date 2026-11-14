@@ -31,6 +31,9 @@ def may_read_assistant(message, doc_service, clearance):
     if provenance['kind'] == 'deterministic_calculation' and refs:
         return False
     for ref in refs:
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return False
         if not isinstance(ref, dict):
             return False
         document_id, chunk_id = ref.get('document_id'), ref.get('chunk_id')

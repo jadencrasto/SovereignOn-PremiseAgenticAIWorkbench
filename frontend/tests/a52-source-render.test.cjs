@@ -1,0 +1,5 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),Module=require('node:module'),ts=require('typescript'),React=require('react');
+const {renderToStaticMarkup}=require('react-dom/server');
+const f=path.resolve(__dirname,'../src/components/chat/SourceCard.tsx'),m=new Module(f,module);m.filename=f;m.paths=Module._nodeModulePaths(path.dirname(f));m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText,f);
+test('unverified source metadata and preview are withheld',()=>{let html=renderToStaticMarkup(React.createElement(m.exports.SourceCard,{source:{filename:'secret.txt',document_id:'secret-doc',chunk_id:'secret-chunk',page:99,score:0,text:'secret passage'}}));assert.match(html,/Source details unavailable/);assert.doesNotMatch(html,/secret|99|Chroma|grounded/i)});
+test('missing source metadata is handled safely',()=>{let html=renderToStaticMarkup(React.createElement(m.exports.SourceCard,{source:{}}));assert.match(html,/Source details unavailable/)});

@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { clearSession, fetchSessions, fetchSession, legacyExportAllowed, renameSession } from '../../api/chat';
+import { ApiError } from '../../api/client';
 import { loadOwnedHistory, deleteOwnedHistory } from './historyRequests';
 import type { ChatMessage } from '../../types';
 import {
@@ -32,12 +33,12 @@ export interface ChatSession {
   model: string;
 }
 
-async function loadSession(id: string): Promise<ChatSession> {
+export async function loadSession(id: string): Promise<ChatSession> {
   const record = await fetchSession(id);
   const messages: ChatMessage[] = record.messages.filter(m => m.role !== 'system').map((m, i) => ({
     id: m.id || `${id}-${i}`, role: m.role, content: m.content,
     timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
-    toolEvents: m.tool_events || [],
+    toolEvents: m.tool_events || [], withheld: m.withheld === true,
   }));
   for (const task of record.tasks || []) {
     const taskStatus = task.status.replace(/[^a-zA-Z0-9_-]/g, '');
@@ -46,7 +47,8 @@ async function loadSession(id: string): Promise<ChatSession> {
       content: `**Task status:** ${taskStatus}. **Approval history:** ${approvalStates}. This is read-only; open Tasks for current state.` });
   }
   return { id, messages, title: record.title || messages.find(m => m.role === 'user')?.content.slice(0, 38) || 'Conversation',
-    createdAt: 0, updatedAt: 0, model: '' };
+    createdAt: record.created_at ? Date.parse(record.created_at) || 0 : 0,
+    updatedAt: record.updated_at ? Date.parse(record.updated_at) || 0 : 0, model: '' };
 }
 
 interface ChatHistorySidebarProps {
@@ -55,6 +57,9 @@ interface ChatHistorySidebarProps {
   currentSessionId: string;
   onSelectSession: (session: ChatSession) => void;
   onNewChat: () => void;
+  onRenamed?: (id: string, title: string) => void;
+  onDeleted?: () => void;
+  refreshKey?: number;
 }
 
 export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
@@ -63,6 +68,9 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   currentSessionId,
   onSelectSession,
   onNewChat,
+  onRenamed,
+  onDeleted,
+  refreshKey = 0,
 }) => {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -70,6 +78,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const [editTitle, setEditTitle] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [deleting, setDeleting] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [canExportLegacy, setCanExportLegacy] = useState(false);
   const generation = useRef(0);
 
@@ -77,6 +86,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     if (!isOpen) return;
     const current = ++generation.current;
     setError('');
+    setLoading(true);
     void legacyExportAllowed().then(policy => {
       if (generation.current === current) setCanExportLegacy(policy.allowed);
     }).catch(() => { if (generation.current === current) setCanExportLegacy(false); });
@@ -86,31 +96,40 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
         if (records) setSessions(records);
       } catch {
         if (generation.current === current) setError('Unable to load conversation history. Please sign in or try again.');
+      } finally {
+        if (generation.current === current) setLoading(false);
       }
     })();
     return () => { generation.current++; };
-  }, [isOpen]);
+  }, [isOpen, refreshKey]);
 
   const filteredSessions = useMemo(() => {
     return sessions.filter((s) => {
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();
-      const matchTitle = s.title.toLowerCase().includes(q);
-      const matchContent = s.messages.some((m) => m.content.toLowerCase().includes(q));
-      return matchTitle || matchContent;
+      return s.title.toLowerCase().includes(q);
     });
   }, [sessions, searchQuery]);
 
   const removeSession = async (id: string) => {
     const current = ++generation.current;
+    setLoading(false);
     setDeleting(true);
     setError('');
     try {
       if (!await deleteOwnedHistory(id, clearSession, () => generation.current === current)) return;
       setSessions(prev => prev.filter(s => s.id !== id));
       if (id === currentSessionId) onNewChat();
-    } catch {
-      setError('Conversation was not deleted. Check your session and connection, then try again.');
+      onDeleted?.();
+    } catch (err) {
+      if (generation.current === current && err instanceof ApiError && err.status === 404) {
+        setSessions(prev => prev.filter(s => s.id !== id));
+        if (id === currentSessionId) onNewChat();
+        onDeleted?.();
+        setError('Conversation is no longer available.');
+      } else if (generation.current === current) {
+        setError('Conversation was not deleted. Check your session and connection, then try again.');
+      }
     } finally {
       setDeleting(false);
     }
@@ -118,7 +137,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    if (!deleting) void removeSession(id);
+    if (!deleting && window.confirm('Delete this conversation from the server?')) void removeSession(id);
   };
 
   const handleStartRename = (e: React.MouseEvent, s: ChatSession) => {
@@ -131,17 +150,37 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     e.stopPropagation();
     if (editTitle.trim()) {
       const current = ++generation.current;
+      setLoading(false);
       try {
         const result = await renameSession(id, editTitle.trim());
-        if (generation.current === current) setSessions(prev => prev.map(s =>
-          s.id === id ? { ...s, title: result.title } : s));
+        if (generation.current === current) {
+          setSessions(prev => prev.map(s => s.id === id ? { ...s, title: result.title } : s));
+          onRenamed?.(id, result.title);
+        }
       } catch { if (generation.current === current) setError('Conversation could not be renamed.'); }
     }
     setEditingId(null);
   };
 
-  const handleExportMarkdown = (e: React.MouseEvent, s: ChatSession) => {
+  const handleExportMarkdown = async (e: React.MouseEvent, session: ChatSession) => {
     e.stopPropagation();
+    const current = ++generation.current;
+    setLoading(false);
+    let s: ChatSession;
+    try {
+      s = await loadSession(session.id);
+      if (generation.current !== current) return;
+    } catch (err) {
+      if (generation.current === current) {
+        if (err instanceof ApiError && err.status === 404) {
+          setSessions(prev => prev.filter(item => item.id !== session.id));
+          if (session.id === currentSessionId) onNewChat();
+          onDeleted?.();
+          setError('Conversation is no longer available.');
+        } else setError('Unable to revalidate conversation access for export.');
+      }
+      return;
+    }
     let md = `# Sovereign AI Workbench — Chat Transcript\n`;
     md += `**Session:** ${s.title}\n`;
     md += `**Date:** ${new Date(s.createdAt).toLocaleString()}\n`;
@@ -149,8 +188,8 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
 
     for (const m of s.messages) {
       md += `### ${m.role === 'user' ? '👤 User' : '🤖 Sovereign Assistant'} (${m.timestamp})\n\n`;
-      md += `${m.content}\n\n`;
-      if (m.sources && m.sources.length > 0) {
+      md += `${m.withheld ? '[Response withheld: source access cannot be verified.]' : m.content}\n\n`;
+      if (!m.withheld && m.sources && m.sources.length > 0) {
         md += `**Sources:**\n`;
         for (const src of m.sources) {
           md += `- ${src.filename} (score: ${(src.score * 100).toFixed(1)}%)\n`;
@@ -182,7 +221,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="absolute inset-y-0 left-0 z-30 w-80 lg:w-96 bg-white border-r border-slate-200 flex flex-col shadow-2xl backdrop-blur-xl animate-in slide-in-from-left duration-200 font-sans">
+    <div className="absolute inset-y-0 left-0 z-30 w-80 max-w-full lg:w-96 bg-white border-r border-slate-200 flex flex-col shadow-2xl backdrop-blur-xl animate-in slide-in-from-left duration-200 font-sans">
       {/* Top Header */}
       <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-2 bg-slate-50">
         <div className="flex items-center gap-2">
@@ -222,9 +261,10 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            aria-label="Search conversation titles"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search past conversations..."
+            placeholder="Search conversation titles..."
             className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 font-sans"
           />
         </div>
@@ -233,7 +273,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
       {error && <p role="alert" className="px-3 text-sm text-red-700">{error}</p>}
       {/* Session List */}
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {filteredSessions.length === 0 ? (
+        {loading ? <p role="status" className="p-4 text-sm text-slate-500">Loading conversations...</p> : filteredSessions.length === 0 ? (
           <div className="py-12 px-4 text-center text-slate-500">
             <MessageSquare className="w-8 h-8 mx-auto mb-3 opacity-40 text-slate-400" />
             <p className="text-sm font-medium text-slate-600">No chat history found</p>
@@ -249,16 +289,32 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
             return (
               <div
                 key={s.id}
+                role="group"
+                aria-label={`Conversation: ${s.title}. Press Enter to open.`}
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (!isEditing && e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault();
+                    e.currentTarget.click();
+                  }
+                }}
                 onClick={async () => {
                   if (!isEditing) {
                     const current = ++generation.current;
+                    setLoading(false);
                     try {
                       const fresh = await loadSession(s.id);
                       if (generation.current !== current) return;
                       onSelectSession(fresh);
                       onClose();
-                    } catch {
-                      if (generation.current === current) setError('Unable to revalidate conversation access.');
+                    } catch (err) {
+                      if (generation.current !== current) return;
+                      if (err instanceof ApiError && err.status === 404) {
+                        setSessions(prev => prev.filter(item => item.id !== s.id));
+                        if (s.id === currentSessionId) onNewChat();
+                        onDeleted?.();
+                        setError('Conversation is no longer available.');
+                      } else setError('Unable to revalidate conversation access.');
                     }
                   }
                 }}
@@ -274,6 +330,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                     <div className="flex items-center gap-1 flex-1">
                       <input
                         type="text"
+                        aria-label="Conversation title"
                         value={editTitle}
                         onChange={(e) => setEditTitle(e.target.value)}
                         onClick={(e) => e.stopPropagation()}
@@ -339,9 +396,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                     <Calendar className="w-3.5 h-3.5" />
                     <span>{formatRelativeTime(s.updatedAt)}</span>
                   </span>
-                  <span className="font-medium px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-600">
-                    {s.messages.length} msgs
-                  </span>
+
                 </div>
               </div>
             );
@@ -374,6 +429,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
             onClick={async () => {
               if (!confirm('Delete all listed conversations from the server?')) return;
               const current = ++generation.current;
+              setLoading(false);
               setDeleting(true);
               setError('');
               let failed = false;
@@ -388,6 +444,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
               }
               if (failed) setError('Some conversations could not be deleted. They remain in the list.');
               setDeleting(false);
+              onDeleted?.();
             }}>
             Clear All History
           </button>

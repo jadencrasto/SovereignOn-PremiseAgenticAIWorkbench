@@ -20,6 +20,7 @@ Validates:
 from __future__ import annotations
 
 import logging
+import re
 from typing import List, Optional
 
 from pydantic import ValidationError
@@ -92,15 +93,47 @@ class PlanValidator:
                 ))
             seen_ids.add(step.id)
 
+        # Bound workflows finish only when every operation has a trusted,
+        # explicitly declared read-only result contract. Legacy unbound plans
+        # keep their prior behavior and cannot act as dependency evidence.
+        if any(step.bindings for step in plan.steps):
+            for step in plan.steps:
+                tool = self._tool_registry.get(step.tool_name) if step.tool_name else None
+                if (not tool or not tool.enabled or not tool.read_only or tool.requires_approval
+                        or not tool.result_schema or not callable(tool.result_verifier)):
+                    errors.append(PlanValidationError(step.id, 'Bound workflow requires verified read-only tool contracts'))
+
         # --- Per-step validation ---
         tool_call_signatures = []
+        previous_calculations = set()
+        previous_steps = {}
         for step in plan.steps:
             step_errors = self._validate_step(step)
+            target = self._tool_registry.get(step.tool_name) if step.tool_name else None
+            for argument, binding in step.bindings.items():
+                source = previous_steps.get(binding.step_id)
+                source_tool = self._tool_registry.get(source.tool_name) if source and source.tool_name else None
+                output = getattr(source_tool, 'result_schema', None)
+                if (not target or not target.read_only or target.requires_approval
+                        or argument not in target.input_schema.model_fields or argument in step.arguments
+                        or not source_tool or not source_tool.enabled or not source_tool.read_only
+                        or source_tool.requires_approval or output is None
+                        or not callable(getattr(source_tool, 'result_verifier', None))
+                        or binding.field not in output.model_fields):
+                    errors.append(PlanValidationError(step.id, 'Invalid or unavailable step binding'))
+            previous_steps[step.id] = step
+            if step.tool_name == 'calculator':
+                expression = step.arguments.get('expression')
+                if isinstance(expression, str):
+                    references = re.findall(r'@([A-Za-z0-9_]+)\.result', expression)
+                    if any(ref not in previous_calculations for ref in references) or '@' in re.sub(r'@[A-Za-z0-9_]+\.result', '', expression):
+                        errors.append(PlanValidationError(step.id, 'Invalid calculator dependency'))
+                previous_calculations.add(step.id)
             errors.extend(step_errors)
 
             # Check for recursive patterns (same tool + same args repeated)
             if step.tool_name:
-                sig = (step.tool_name, str(sorted(step.arguments.items())))
+                sig = (step.tool_name, str(sorted(step.arguments.items())), tuple(sorted((key, value.step_id, value.field) for key, value in step.bindings.items())))
                 if sig in tool_call_signatures:
                     errors.append(PlanValidationError(
                         step.id,
@@ -163,22 +196,30 @@ class PlanValidator:
                 if "relative_path" not in step.arguments and "filename" in step.arguments:
                     step.arguments["relative_path"] = step.arguments["filename"]
 
-            try:
-                tool.input_schema(**step.arguments)
-            except ValidationError as exc:
-                error_details = "; ".join(
-                    f"{e.get('loc', ['?'])}: {e.get('msg', 'invalid')}"
-                    for e in exc.errors()
-                )
-                errors.append(PlanValidationError(
-                    step.id,
-                    f"Invalid arguments for '{step.tool_name}': {error_details}"
-                ))
-            except Exception as exc:
-                errors.append(PlanValidationError(
-                    step.id,
-                    f"Argument validation error for '{step.tool_name}': {exc}"
-                ))
+        arguments_to_validate = dict(step.arguments)
+        if step.tool_name == 'calculator' and isinstance(arguments_to_validate.get('expression'), str):
+            arguments_to_validate['expression'] = re.sub(r'@[A-Za-z0-9_]+\.result', '1', arguments_to_validate['expression'])
+        try:
+            if step.bindings:
+                supplied = set(arguments_to_validate) | set(step.bindings)
+                missing = [name for name, field in tool.input_schema.model_fields.items() if field.is_required() and name not in supplied]
+                if missing:
+                    raise ValueError('Required tool arguments missing')
+                from pydantic import TypeAdapter
+                for name, value in arguments_to_validate.items():
+                    if name not in tool.input_schema.model_fields:
+                        raise ValueError('Unknown tool argument')
+                    TypeAdapter(tool.input_schema.model_fields[name].annotation).validate_python(value)
+            else:
+                tool.input_schema(**arguments_to_validate)
+        except ValidationError as exc:
+            error_details = "; ".join(
+                f"{e.get('loc', ['?'])}: {e.get('msg', 'invalid')}"
+                for e in exc.errors()
+            )
+            errors.append(PlanValidationError(step.id, f"Invalid arguments for '{step.tool_name}': {error_details}"))
+        except Exception:
+            errors.append(PlanValidationError(step.id, f"Argument validation failed for '{step.tool_name}'"))
 
         # --- Reject placeholder/fabricated paths for file_read ---
         if step.tool_name == "file_read" and step.arguments:

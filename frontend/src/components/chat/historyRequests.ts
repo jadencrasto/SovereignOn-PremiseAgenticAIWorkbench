@@ -5,8 +5,14 @@ export async function loadOwnedHistory<T>(
 ): Promise<T[] | null> {
   const { sessions } = await list();
   if (!isCurrent()) return null;
-  const records = await Promise.all(sessions.map(read));
-  return isCurrent() ? records : null;
+  const settled = await Promise.allSettled([...new Set(sessions)].map(read));
+  if (!isCurrent()) return null;
+  const records: T[] = [];
+  for (const item of settled) {
+    if (item.status === 'fulfilled') records.push(item.value);
+    else if (item.reason?.status !== 404) throw item.reason;
+  }
+  return records;
 }
 
 export async function deleteOwnedHistory(

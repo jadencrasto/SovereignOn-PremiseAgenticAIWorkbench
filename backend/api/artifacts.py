@@ -22,6 +22,7 @@ from backend.auth.dependencies import require_permission
 from backend.auth.models import Permission, User
 from backend.config import settings
 from backend.tools.safety import validate_path_within
+from backend.security.public_errors import public_error
 
 router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 
@@ -45,6 +46,13 @@ def _is_artifact_accessible(filename: str, user: User, task_store: Optional[Any]
     - Everyone else requires a matching server-owned artifact record.
     - A linked task must have the same owner as the artifact.
     """
+    # Existing artifacts do not carry revalidatable transitive task/source
+    # provenance. Even an unlinked legacy file may contain a task result.
+    # Withhold access until that provenance can be verified (including admins).
+    from backend.security.task_access import task_content_revalidation_available
+    if not task_content_revalidation_available():
+        return False
+
     from backend.auth.models import UserRole
     record = task_store.get_artifact(filename) if task_store else None
     if record and record.get('task_id'):
@@ -64,6 +72,10 @@ async def list_artifacts(
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """Returns metadata for all files currently in the sandbox output directory visible to caller."""
+    from backend.security.task_access import task_content_revalidation_available
+    if not task_content_revalidation_available():
+        raise HTTPException(status_code=503, detail='Artifact access is temporarily unavailable.',
+                            headers={'X-Error-Code': 'ARTIFACT_UNAVAILABLE'})
     sb_dir = getattr(request.app.state, 'settings', settings).sandbox_dir
     sb_dir.mkdir(parents=True, exist_ok=True)
 
@@ -119,8 +131,8 @@ async def preview_artifact(
     sb_dir = getattr(request.app.state, 'settings', settings).sandbox_dir
     try:
         target_path = validate_path_within(filename, sb_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
@@ -143,8 +155,8 @@ async def preview_artifact(
                 "truncated": truncated,
                 "metadata": {"size_bytes": file_size, "encoding": "utf-8"}
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to read text file: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     # Handle DOCX
     elif suffix == ".docx":
@@ -182,8 +194,8 @@ async def preview_artifact(
                     "table_count": len(tables),
                 }
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to parse DOCX document: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     # Handle XLSX
     elif suffix in (".xlsx", ".xls"):
@@ -226,8 +238,8 @@ async def preview_artifact(
                     "columns": len(headers),
                 }
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to parse XLSX workbook: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     # Handle PDF
     elif suffix == ".pdf":
@@ -256,8 +268,8 @@ async def preview_artifact(
                     "page_count": len(reader.pages),
                 }
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to parse PDF document: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     else:
         return {
@@ -290,8 +302,8 @@ async def download_artifact(
     sb_dir = getattr(request.app.state, 'settings', settings).sandbox_dir
     try:
         target_path = validate_path_within(filename, sb_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
