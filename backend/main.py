@@ -23,7 +23,7 @@ Shutdown:
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -64,6 +64,7 @@ from backend.api.knowledge_graph import router as knowledge_graph_router
 # Tool imports
 from backend.tools.registry import ToolRegistry, ToolDefinition
 from backend.tools.calculator import CalculatorInput, execute_calculator
+from backend.tools.unit_conversion import register_unit_conversion
 from backend.tools.document_search import DocumentSearchInput, create_document_search
 from backend.tools.file_list import FileListInput, create_file_list
 from backend.tools.file_read import FileReadInput, create_file_read
@@ -100,6 +101,32 @@ setup_logging(
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _UnavailableVectorStore:
+    """Fail closed for every index operation in the explicit local chat profile."""
+    backend_status = 'unavailable'
+
+    def count(self):
+        # No document index is mounted; retrieval and ingestion remain denied.
+        return 0
+
+    def __getattr__(self, name):
+        raise RuntimeError('Document index unavailable in local chat-only profile')
+
+
+class _UnavailableEmbeddingService:
+    async def aclose(self):
+        pass
+
+    def __getattr__(self, name):
+        raise RuntimeError('Document embeddings unavailable in local chat-only profile')
+
+
+def _initialize_vector_store(cfg):
+    if getattr(cfg, 'local_chat_only', False):
+        return _UnavailableVectorStore()
+    return VectorStore(persist_dir=cfg.chroma_persist_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +273,13 @@ def _register_tools(
         enabled=_is_enabled("calculator"),
     ))
 
+    # Deterministic offline engineering unit conversion.
+    register_unit_conversion(
+        registry, enabled=_is_enabled('unit_conversion'),
+        risk_level=_get_risk_level('unit_conversion', 'low'),
+        requires_approval=_get_requires_approval('unit_conversion', False, read_only=True),
+    )
+
     # 5. file_write
     registry.register(ToolDefinition(
         name="file_write",
@@ -304,13 +338,10 @@ def _register_tools(
     registry.register(ToolDefinition(
         name="code_execution",
         description=(
-            "Execute Python code safely inside the workbench sandbox boundary using "
-            "hardened local subprocess execution (or container isolation if enabled). "
-            "Captures stdout, stderr, and exit codes with strict timeout and output limits. "
-            "Air-gapped; never accesses external networks."
+            "Code execution is disabled until isolation is independently verified."
         ),
         input_schema=CodeExecutionInput,
-        execute_fn=create_code_execution(sandbox_dir),
+        execute_fn=create_code_execution(sandbox_dir, cfg=active_cfg),
         category="Computation",
         read_only=False,
         risk_level=_get_risk_level("code_execution", "medium"),
@@ -429,8 +460,39 @@ def _register_tools(
 # Lifespan
 # ---------------------------------------------------------------------------
 
+async def _close_owned(resource, label):
+    try:
+        await resource.aclose()
+    except Exception:
+        # Do not expose provider errors, credentials, or paths in cleanup logs.
+        logger.error('Application resource cleanup failed: %s', label)
+
+
+def _clear_readiness(app):
+    app.state.startup_complete = False
+    app.state.model_observation = None
+    app.state.inference_observation = None
+    app.state.model_observation_generation = getattr(app.state, 'model_observation_generation', 0) + 1
+    app.state.inference_check_in_progress = None
+    app.state.inference_check_token = None
+    app.state.model_check_in_progress = False
+    app.state.model_check_token = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Own resources immediately after acquisition, including before startup yields.
+    _clear_readiness(app)
+    async with AsyncExitStack() as stack:
+        try:
+            async with _lifespan_body(app, stack):
+                yield
+        finally:
+            _clear_readiness(app)
+
+
+@asynccontextmanager
+async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     active_settings = getattr(app.state, "settings", settings)
 
     # 0. Fail-fast configuration validation
@@ -444,6 +506,11 @@ async def lifespan(app: FastAPI):
     images_dir = active_settings.upload_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Image storage directory: %s", images_dir)
+
+    # Check before AuthStore can create the shared security database.
+    from backend.agent.conversation_registry import require_registry_for_existing_history
+    from backend.agent.memory import MEMORY_FILE
+    require_registry_for_existing_history(active_settings.conversation_memory_path or MEMORY_FILE, active_settings.tasks_db_path)
 
     # ---- Phase 7: Local Authentication & Audit Systems ----
     auth_store = AuthStore(db_path=active_settings.tasks_db_path)
@@ -482,29 +549,27 @@ async def lifespan(app: FastAPI):
 
     # ---- Model router ----
     model_router = ModelRouter(active_settings)
+    stack.push_async_callback(_close_owned, model_router, 'model router')
     logger.info("ModelRouter ready | default=%s", model_router.default_model_id)
 
     # ---- Conversation memory ----
-    memory = ConversationMemory()
+    from backend.agent.conversation_registry import ConversationRegistry
+    conversation_registry = ConversationRegistry(active_settings.tasks_db_path)
+    memory_path = active_settings.conversation_memory_path
+    memory = ConversationMemory(storage_file=memory_path) if memory_path is not None else ConversationMemory()
+    memory.attach_security_registry(conversation_registry)
+    app.state.conversation_registry = conversation_registry
 
     # ---- RAG: Embedding service ----
-    embedding_service = EmbeddingService(
-        base_url=active_settings.ollama_base_url,
-        model=active_settings.embedding_model,
-    )
-    embed_ok = await embedding_service.health_check()
-    if embed_ok:
-        logger.info("EmbeddingService ready | model=%s", active_settings.embedding_model)
-    else:
-        logger.warning(
-            "Ollama not reachable for embeddings at %s. "
-            "Document upload will fail until Ollama is running.",
-            active_settings.ollama_base_url,
-        )
-
+    embedding_service = (_UnavailableEmbeddingService() if getattr(active_settings, 'local_chat_only', False)
+        else EmbeddingService(base_url=active_settings.ollama_base_url, model=active_settings.embedding_model))
+    stack.push_async_callback(_close_owned, embedding_service, 'embedding service')
     # ---- RAG: Vector store ----
-    vector_store = VectorStore(persist_dir=active_settings.chroma_persist_dir)
-    logger.info("VectorStore ready | chunks=%d", vector_store.count())
+    vector_store = _initialize_vector_store(active_settings)
+    if getattr(active_settings, 'local_chat_only', False):
+        logger.info("Document vector store unavailable in local chat-only profile")
+    else:
+        logger.info("VectorStore ready | chunks=%d", vector_store.count())
 
     # ---- RAG: Retriever ----
     rag_top_k = 5
@@ -515,11 +580,15 @@ async def lifespan(app: FastAPI):
     )
 
     # ---- RAG: Document service ----
+    from backend.security.provenance_foundation import QuarantinedSources
+    source_registry = QuarantinedSources(active_settings.tasks_db_path)
+    source_registry.mark_restart_unverified()
     doc_service = DocumentService(
         settings=active_settings,
         embedding_service=embedding_service,
         vector_store=vector_store,
         retriever=retriever,
+        source_registry=source_registry,
     )
     logger.info(
         "DocumentService ready | indexed_docs=%d",
@@ -548,8 +617,12 @@ async def lifespan(app: FastAPI):
     )
 
     # ---- Code Execution Isolation Startup Diagnostics ----
+    from backend.security.execution_policy import code_execution_allowed
     isolation_mode = getattr(active_settings, "code_exec_isolation", "subprocess").lower()
-    if isolation_mode == "docker":
+    if not code_execution_allowed():
+        tool_registry.disable("code_execution")
+        logger.warning("Code execution disabled pending independently verified isolation.")
+    elif isolation_mode == "docker":
         from backend.tools.code_execution import check_docker_daemon_available, check_docker_image_available
         daemon_ok = check_docker_daemon_available()
         image_name = getattr(active_settings, "code_exec_docker_image", "sovereign-code-sandbox:latest")
@@ -587,15 +660,6 @@ async def lifespan(app: FastAPI):
         doc_service=doc_service,
         tool_registry=tool_registry,
     )
-
-    # ---- Ollama chat health check ----
-    chat_provider = model_router.get_provider("ollama")
-    ollama_ok = await chat_provider.health_check()
-    if ollama_ok:
-        models = await chat_provider.list_models()
-        logger.info("Ollama reachable | models: %s", models)
-    else:
-        logger.warning("Ollama chat provider not reachable at %s.", active_settings.ollama_base_url)
 
     # ---- Phase 6: Task persistence + planning ----
     task_store = TaskStore(db_path=active_settings.tasks_db_path)
@@ -637,8 +701,7 @@ async def lifespan(app: FastAPI):
     app.state.doc_service = doc_service
     app.state.tool_registry = tool_registry
     app.state.vector_store = vector_store
-    app.state.ollama_ok = ollama_ok
-    app.state.embed_ok = embed_ok
+    app.state.conversation_persistence_initialized = memory.persistence_configured
     app.state.upload_dir = active_settings.upload_dir
     app.state.task_manager = task_manager
     app.state.task_store = task_store
@@ -656,17 +719,8 @@ async def lifespan(app: FastAPI):
 
     logger.info("Startup complete — listening on %s:%d", active_settings.backend_host, active_settings.backend_port)
 
-    yield  # ← application runs
-
-    # ---- SHUTDOWN ----
-    logger.info("Shutting down...")
-    try:
-        await chat_provider.aclose()
-        await embedding_service.aclose()
-        logger.info("HTTP clients closed")
-    except Exception as exc:
-        logger.warning("Shutdown cleanup error: %s", exc)
-    logger.info("=== %s shutdown complete ===", active_settings.app_name)
+    app.state.startup_complete = True
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -695,11 +749,13 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = active_settings
+    app.state.enforce_model_readiness = True
 
     # ---- Request ID & Context Tracing Middleware (Phase 7 & Step 9 Error Guard) ----
     @app.middleware("http")
     async def request_tracing_middleware(request: Request, call_next):
-        req_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:12]}"
+        req_id = f"req_{uuid.uuid4().hex}"
+        request.state.server_request_id = req_id
         token = request_id_ctx.set(req_id)
         try:
             try:
@@ -741,9 +797,8 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
                     response = JSONResponse(
                         status_code=500,
                         content={
-                            "detail": f"Internal server error: {str(exc)}",
+                            "detail": "An internal server error occurred.",
                             "error_code": "INTERNAL_SERVER_ERROR",
-                            "exception_type": type(exc).__name__,
                             "request_id": req_id,
                         },
                     )
@@ -787,7 +842,7 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
         if isinstance(exc, RequestValidationError):
             return await request_validation_exception_handler(request, exc)
 
-        req_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:12]}"
+        req_id = getattr(request.state, 'server_request_id', None) or f"req_{uuid.uuid4().hex}"
         logger.exception(
             "Unhandled server exception on %s %s [req_id=%s]: %s",
             request.method,
@@ -826,9 +881,8 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
             return JSONResponse(
                 status_code=500,
                 content={
-                    "detail": f"Internal server error: {str(exc)}",
+                    "detail": "An internal server error occurred.",
                     "error_code": "INTERNAL_SERVER_ERROR",
-                    "exception_type": type(exc).__name__,
                     "request_id": req_id,
                 },
                 headers={"X-Request-ID": req_id},
@@ -844,6 +898,10 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    from backend.auth.request_context import ClearanceContextMiddleware
+    app.add_middleware(ClearanceContextMiddleware)
+    from backend.security.request_limits import MultipartBodyLimitMiddleware
+    app.add_middleware(MultipartBodyLimitMiddleware, max_file_bytes=active_settings.max_file_size_mb * 1024 * 1024)
 
     # ---- Routes ----
     app.include_router(chat_router)

@@ -31,6 +31,8 @@ from backend.auth.models import (
     User,
     UserPublic,
     UserRole,
+    Permission,
+    has_permission,
 )
 from backend.auth.security import (
     BruteForceProtector,
@@ -241,6 +243,16 @@ async def get_me(current_user: User = Depends(get_current_user)):
         last_login_at=current_user.last_login_at,
         clearance=current_user.clearance,
     )
+
+
+@router.get("/me/permissions", summary="Get current role permissions")
+async def get_my_permissions(current_user: User = Depends(get_current_user)):
+    """Report role permissions only; capability and per-operation gates still apply."""
+    return {
+        "role": current_user.role,
+        "permissions": {permission.value: has_permission(current_user.role, permission)
+                        for permission in Permission},
+    }
 
 
 @router.post("/change-password", summary="Change own password")

@@ -3,24 +3,18 @@ backend/tools/file_write.py
 -----------------------------
 File write tool — creates output artifacts in data/sandbox/.
 
-Security:
-- NEVER writes outside data/sandbox/
-- Filename sanitization
-- Path traversal prevention
-- Max content size 1 MB
-- No overwrite — generates unique filename on conflict
-- Mutating: requires_confirmation = True
+Security: filenames are sanitized and files use exclusive opaque names.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from backend.tools.safety import atomic_write_file, sanitize_filename, validate_path_within
+from backend.tools.safety import sanitize_filename
+from backend.tools.artifact_storage import create_artifact_file
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +78,7 @@ def create_file_write(sandbox_dir: Path) -> callable:
     """
 
     async def execute_file_write(args: FileWriteInput) -> dict:
-        """Create an output file atomically in the sandbox directory."""
+        """Create an exclusive output file in the sandbox directory."""
         # Validate content quality
         _validate_content_quality(args.content)
 
@@ -99,19 +93,14 @@ def create_file_write(sandbox_dir: Path) -> callable:
         # Sanitize filename
         safe_name = sanitize_filename(args.filename)
 
-        # Validate path stays strictly inside sandbox_dir
-        target = validate_path_within(safe_name, sandbox_dir)
-
-        # If file exists and overwrite is False, generate unique filename
-        if target.exists() and not args.overwrite:
-            stem = Path(safe_name).stem
-            suffix = Path(safe_name).suffix
-            unique_id = uuid.uuid4().hex[:8]
-            safe_name = f"{stem}_{unique_id}{suffix}"
-            target = validate_path_within(safe_name, sandbox_dir)
-
-        # Write file atomically
-        atomic_write_file(target, args.content, encoding="utf-8", overwrite=True)
+        display_name = safe_name
+        artifact_id, safe_name, stream = create_artifact_file(sandbox_dir, display_name)
+        target = sandbox_dir.resolve() / safe_name
+        with stream:
+            stream.write(content_bytes)
+            stream.flush()
+            import os
+            os.fsync(stream.fileno())
 
         rel_path = f"data/sandbox/{safe_name}"
 
@@ -128,6 +117,8 @@ def create_file_write(sandbox_dir: Path) -> callable:
         return {
             "created_path": rel_path,
             "filename": safe_name,
+            "artifact_id": artifact_id,
+            "display_name": display_name,
             "size_bytes": len(content_bytes),
         }
 

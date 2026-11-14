@@ -6,7 +6,7 @@ Dedicated Microsoft Word (.docx) OOXML artifact generation tool.
 Security & Integrity:
 - Generates genuine ZIP-based OOXML .docx files using python-docx
 - Writes strictly within data/sandbox/
-- Atomic file generation via temporary files and os.replace()
+- Exclusive opaque file creation
 - Path traversal and filename sanitization via backend.tools.safety
 - Computes cryptographic SHA-256 hash of the generated artifact
 - Mutating & high risk: requires human confirmation and planning approval
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from backend.tools.safety import sanitize_filename, validate_path_within
+from backend.tools.safety import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,8 @@ def create_docx_create(sandbox_dir: Path) -> callable:
     """
     Create the docx_create execution function bound to sandbox_dir.
     """
+    if sandbox_dir.is_symlink():
+        raise ValueError('Artifact storage root cannot be a symlink')
     sandbox_resolved = sandbox_dir.resolve()
     sandbox_resolved.mkdir(parents=True, exist_ok=True)
 
@@ -111,10 +113,7 @@ def create_docx_create(sandbox_dir: Path) -> callable:
         if not safe_name.lower().endswith(".docx"):
             safe_name += ".docx"
 
-        target_path = validate_path_within(safe_name, sandbox_resolved)
-
-        if target_path.exists() and not args.overwrite:
-            raise ValueError(f"File '{safe_name}' already exists. Set overwrite=True to replace.")
+        display_name = safe_name
 
         # 2. Build Document using python-docx
         try:
@@ -299,11 +298,14 @@ def create_docx_create(sandbox_dir: Path) -> callable:
                                         p.paragraph_format.space_before = Pt(2)
                                         p.paragraph_format.space_after = Pt(2)
 
-            # 3. Save to temporary file and replace atomically
-            temp_path = target_path.with_suffix(".tmp.docx")
-            doc.save(str(temp_path))
-
-            os.replace(temp_path, target_path)
+            # 3. Create an exclusive opaque file. Failed writes may leave an orphan.
+            from backend.tools.artifact_storage import create_artifact_file
+            artifact_id, safe_name, stream = create_artifact_file(sandbox_resolved, display_name)
+            target_path = sandbox_resolved / safe_name
+            with stream:
+                doc.save(stream)
+                stream.flush()
+                os.fsync(stream.fileno())
 
         except Exception as exc:
             logger.error("Docx generation failed: %s", exc)
@@ -330,6 +332,8 @@ def create_docx_create(sandbox_dir: Path) -> callable:
         return {
             "created_path": rel_path,
             "filename": safe_name,
+            "artifact_id": artifact_id,
+            "display_name": display_name,
             "size_bytes": len(file_bytes),
             "sha256_hash": sha256_hash,
             "content_type": _DOCX_MIME_TYPE,

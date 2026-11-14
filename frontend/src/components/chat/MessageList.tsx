@@ -62,11 +62,11 @@ export const MessageList: React.FC<MessageListProps> = ({
               Sovereign Assistant
             </div>
             <span className="font-sans text-xs font-semibold px-3 py-1 bg-blue-50 text-blue-600 rounded-full border border-blue-100 self-start md:self-auto">
-              Secure &bull; Local
+              Workbench
             </span>
           </div>
           <p className="font-sans text-sm font-medium leading-relaxed text-slate-600 max-w-3xl">
-            Autonomous agent for analysis, data QA, and intelligent workflows. All inference runs securely on your local machine.
+            Ask a question or start a workflow. Availability and restrictions depend on the current capability status.
           </p>
         </div>
 

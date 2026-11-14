@@ -1,0 +1,63 @@
+# Final integration and release candidate verification
+
+Date: 2026-11-07. Branch `phase1-5-recovery-security`; baseline commit `ec4839c4b05d27132985908908886df916b38dc5`. Working tree was clean before this verification. Windows, Python 3.13.7, Node 22.20.0. No push, merge, deployment, model download or full-suite retry.
+
+## Decision
+
+**NOT RELEASE READY; Phase 1.5 PARTIAL.** Browser profile history is not user-isolated, the full Python suite and OS-level egress isolation remain blocked, and live application model/RAG and isolated sandbox workflows remain unverified in this verification. Do not start Phase 2 until the security and acceptance gates are resolved.
+
+## Changes and integration findings
+
+- `backend/api/chat.py:195`: arithmetic shortcut was executed and advertised as a tool when `tools_enabled=false`; it is now skipped for disabled requests. `tests/backend/test_phase15_app_integration.py` tests the route with fake inference and checks no tool event is emitted.
+- **OPEN, high priority, statically confirmed:** `frontend/src/components/chat/ChatHistorySidebar.tsx:34` uses an origin-wide browser localStorage history, without per-user scoping. Different accounts using the same browser profile can be exposed to prior locally saved transcripts even when backend access is denied. Browser reproduction and remediation are outstanding.
+- **OPEN, deletion gap, statically supported:** `frontend/src/components/chat/ChatHistorySidebar.tsx:116` deletes browser storage; the server deletion helper exists at `frontend/src/api/chat.ts:102`, but the sidebar does not invoke it. Server-side deletion from that UI path remains unverified; users may expect deletion to remove persisted server data.
+- Frontend API passes `tools_enabled` in JSON and multipart requests; this static inspection does not establish complete frontend compatibility or browser behavior.
+
+## Tests and commands
+
+Python tests ran in a newly created temporary `git archive HEAD` copy with the modified chat module and (for integration) the new test overlaid. Temporary databases, memory, uploads, logs and Chroma paths were configured by the tests. `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` and `PYTHONDONTWRITEBYTECODE=1`. Exact commands below are executed from the isolated copy:
+
+```text
+python -m pytest -p pytest_asyncio.plugin tests/backend/test_phase15_app_integration.py -q -p no:cacheprovider --tb=short
+# 2 passed, 0 failed, 0 skipped; 10.93 s
+python -m pytest -p pytest_asyncio.plugin tests/backend/test_phase15_security_controls.py tests/backend/test_phase15_registry_continuation.py tests/backend/test_phase15_memory_continuation.py tests/backend/test_phase15_clearance_continuation.py tests/backend/test_phase15_targeted.py tests/backend/test_memory.py tests/backend/test_approval.py tests/backend/test_tasks.py tests/backend/test_task_recovery.py tests/backend/test_telemetry_configuration.py -q -p no:cacheprovider --tb=short
+# 81 passed, 0 failed, 0 skipped; 12.84 s
+```
+
+The two new integration tests start the actual FastAPI lifespan and exercise real routes, authentication stores, JSON conversation persistence, SQLite task/approval persistence and an actual calculator implementation. They cover health, local session continuation/deletion, local legacy claim and restart, two authenticated users' denied guessed sessions and tasks, disabled text dispatch, permitted approval with consumption and replay denial, malformed multipart, and an oversized multipart request. Task plan and approval state are seeded, rather than produced by a real agent. Chroma, embedding health and Ollama are substituted; an in-process Python socket guard is used. This does not prove OS egress isolation, real Chroma, live inference, native library traffic, or the whole deployment. Clearance and concurrent persistence coverage comes from the targeted synthetic component tests, not a complete live RAG flow. Exact-size and interrupted ingress coverage is in targeted tests, not an external proxy test. Full task resume and recovery as a live route workflow is not established.
+
+Frontend commands (from `frontend`): `npm run lint` exit 0 with warnings; `.\node_modules\.bin\tsc.cmd --noEmit --incremental false -p tsconfig.app.json` exit 0; `.\node_modules\.bin\tsc.cmd --noEmit --incremental false -p tsconfig.node.json` exit 0; `.\node_modules\.bin\vite.cmd build --outDir <new-temporary-directory> --logLevel warn` exit 0 with large-chunk warning. The temporary build avoids overwriting existing `dist`; this is not the `npm run build` command. No browser tests were executed.
+
+## Blocked and not run
+
+Full Python suite: **BLOCKED** after automatic review rejected an earlier attempt involving an unidentified outbound telemetry request; destination and call path remain unavailable. No retry was made. OS-level egress denial and browser network capture: **BLOCKED**. Real Chroma/RAG ingestion, Qwen, Nomic, LLaVA, DOCX/XLSX generation, real agent planning and verified sandbox execution: **NOT RUN** in this verification, because an adequately isolated environment has not been demonstrated. Previous local model successes in older reports are historical and are not current end-to-end evidence.
+
+## Future verification in an approved isolated environment
+
+Use a dedicated disposable Windows VM or equivalent with independently verified OS/network policy blocking external egress while allowing only required loopback services; verify isolation using authorized network monitoring, not library settings or mocks. Keep the guest disconnected from production data and credentials. Export a disposable copy of this commit plus the reviewed changes; use dedicated temporary conversation, auth/task databases, document, Chroma, upload, log and artifact directories, with synthetic documents. Confirm model files are already present and no download is triggered. Obtain authorization consistent with the earlier automatic-review decision before any previously rejected suite retry. Then run the documented targeted commands, approved full suite, browser capture, real Qwen/Nomic/LLaVA and cited RAG, artifact, agent, approval and sandbox workflows. Record commands, case counts, traffic evidence and outputs; failures must remain visible. See `TELEMETRY_AND_EGRESS_AUDIT.md` for the unresolved telemetry investigation.
+
+## Browser history follow-up, 2026-11-07
+
+The earlier frontend findings are addressed in code, pending browser verification. The sidebar loads only sessions listed and read through authenticated server routes. The old browser-wide history key is not read or deleted and is not attributed to authenticated or local users. Logout/account changes unmount chat, abort its stream, invalidate old responses and notify other tabs where BroadcastChannel is supported. Delete waits for server success; errors retain the visible row. Account switching, legacy key isolation, async invalidation and deletion were covered by 4 Node unit tests with fakes; authenticated read/delete was exercised in 2 isolated actual-app route tests. There are no installed browser/component test dependencies and no real browser test was executed.
+
+Compatibility limitation: server conversation persistence provides role/content only, so reconstructed history cannot restore local-only timestamps, display renames, source/tool events, images or interactive pending approval state across a page reload. In-session rich state is retained in memory during same-user navigation. Legacy local-only conversations remain preserved in browser storage but cannot currently be viewed or migrated through the UI. This is an open functional regression and Phase 1.5 remains PARTIAL. Multi-tab behavior on browsers without BroadcastChannel remains unverified. See SECURITY_REGRESSION_RESULTS.md for exact tests.
+
+## Phase 1.5.1 conversation recovery
+
+Stable message IDs and timestamps, owner-scoped titles, unknown-field preservation and a local-only explicit legacy export are implemented in a limited schema extension. Rich source/tool/artifact and approval restoration remain incomplete; browser verification is not done. Phase 1.5 remains PARTIAL. See CONVERSATION_RECOVERY_REPORT.md for migration, rollback, tests and blockers.
+
+## Final rich-history continuation, 2026-11-07
+
+Baseline `03370df` on `phase1-5-recovery-security`. Status remains **PARTIAL**. In `AgentEngine.chat_stream_with_tools`, successful and failed tool calls are now recorded atomically with a nonempty final assistant message, in bounded `tool_events_v1` metadata: up to 32 entries with generated invocation ID, restricted tool name and boolean result. Arguments, tool output, summaries, tokens, source text and filesystem paths are not persisted in that metadata. An actual engine test uses a fake model and fake tool registry. Authenticated history emits only validated allowlisted fields; the sidebar maps them to existing tool activity UI, which now labels failures correctly. No hydration invokes a tool or makes an approval actionable. Existing owners, unknown fields, local legacy export and the same JSON file/locking scheme remain in use.
+
+This does not record interrupted calls (a final assistant message may never be saved), tools when the final response is empty, or events emitted by `chat_stream_with_tools_multimodal`, the planning/agent execution and resume paths, and arithmetic shortcut. It does not implement persisted source citations, artifact/attachment references, task status, approval history, interruption/failure state, retry/reconnect deduplication, full browser reload or authorization revalidation of source/artifact access. Invocation IDs are generated for this stored record and are not existing execution registry identifiers. Do not infer these missing features from this partial implementation. No live inference, artifact, browser, real Chroma or OS egress test was run. No persisted migration executed against user data; existing backup and rollback advice continues to apply.
+
+Validation from a temporary Git-archive copy with modified backend/test files overlaid, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `PYTHONDONTWRITEBYTECODE=1`: `python -m pytest -p pytest_asyncio.plugin tests/backend/test_phase151_tool_history.py tests/backend/test_phase151_conversation_records.py tests/backend/test_phase15_app_integration.py tests/backend/test_phase15_memory_continuation.py tests/backend/test_memory.py tests/backend/test_phase15_registry_continuation.py -q -p no:cacheprovider --tb=short` — **26 passed, 0 failed, 0 skipped in 14.89s**. Covers fake model/tool engine loop, allowlist, restart/owner isolation, actual route serialization with synthetic persistence, and existing approval controls. `node --experimental-strip-types --test tests/historyRequests.test.mjs` — **4 passed, 0 failed, 0 skipped**; these are request-helper tests, not browser tests. Frontend `npm run lint` exit 0 with warnings, app and node `tsc.cmd --noEmit --incremental false -p ...` exit 0, and `vite.cmd build --outDir <new temporary directory> --logLevel warn` exit 0 with large-chunk warning. Full Python suite and OS egress proof remain BLOCKED after the previous automatic review rejection.
+
+## Phase 1.5.2 addendum — 2026-11-07
+
+Partial: multimodal, planned and resumed registry tool statuses persist only with a nonempty final response; conversation reads expose owner-scoped, read-only task/approval statuses. Synthetic targeted run: 11 passed; frontend helper tests: 4 passed; lint, both typechecks and temporary build passed with warnings. Images, clearance-revalidated citations, artifact links and interrupted-stream journaling remain unimplemented. Actual browser, live models, full suite and OS egress isolation remain unverified or blocked. Static review found the artifact API grants MANAGE_TASKS roles access before checking ownership. See PHASE152_IMPLEMENTATION_REPORT.md for evidence and limitations.
+
+## Phase 1.5.3 security addendum — 2026-11-07
+
+Partial: owner-bound artifact policy, conservative provenance-gated assistant history and owner-bound image descriptors were added. Unprovenanced assistant history is withheld and prior assistant turns are excluded from model context; attachment retrieval is not exposed. Synthetic targeted Python runs: 19 passed and 31 passed (overlapping); frontend helpers 4 passed; lint/typechecks/build passed with warnings. Task/step clearance revalidation, complete provenance, artifact lifecycle and authorized attachment retrieval remain open; full suite and OS isolation remain blocked. See PHASE153_SECURITY_REPORT.md for exact commands, initial test failure, compatibility impact and limitations.

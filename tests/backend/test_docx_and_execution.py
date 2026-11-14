@@ -207,13 +207,14 @@ class TestDocxCreate:
         )
 
         result = await docx_fn(input_data)
-        assert result["filename"] == "P-204_Maintenance_Summary.docx"
-        assert result["created_path"] == "data/sandbox/P-204_Maintenance_Summary.docx"
+        assert result["display_name"] == "P-204_Maintenance_Summary.docx"
+        assert result["filename"] == result["artifact_id"] + ".docx"
+        assert result["created_path"] == "data/sandbox/" + result["filename"]
         assert result["size_bytes"] > 0
         assert len(result["sha256_hash"]) == 64
 
         # Verify on filesystem using python-docx directly
-        file_path = sandbox / "P-204_Maintenance_Summary.docx"
+        file_path = sandbox / result["filename"]
         assert file_path.exists()
 
         doc = docx.Document(file_path)
@@ -255,7 +256,7 @@ class TestArtifactVerifierDocx:
     async def test_verify_real_docx_success(self, sandbox):
         """A genuine python-docx generated document passes verification."""
         docx_fn = create_docx_create(sandbox)
-        await docx_fn(DocxCreateInput(
+        created = await docx_fn(DocxCreateInput(
             filename="genuine_report.docx",
             title="Inspection Report",
             content="Detailed findings for refinery pump P-204.\nAll parameters verified.",
@@ -263,7 +264,7 @@ class TestArtifactVerifierDocx:
 
         verifier_fn = create_artifact_verifier(sandbox)
         verify_res = await verifier_fn(ArtifactVerifierInput(
-            relative_path="data/sandbox/genuine_report.docx",
+            relative_path=created["created_path"],
             min_row_count=1,
         ))
 

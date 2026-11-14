@@ -31,6 +31,7 @@ from backend.schemas.document import (
 )
 from backend.auth.dependencies import get_current_user, require_permission
 from backend.auth.models import Permission, User, resolve_user_clearance
+from backend.security.public_errors import public_error
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +63,8 @@ async def upload_document(
     """
     Upload a document for RAG indexing.
 
-    The document is:
-      1. Validated (file type + size).
-      2. Parsed (text extracted).
-      3. Chunked (split into overlapping segments).
-      4. Embedded (local Ollama nomic-embed-text).
-      5. Stored (local ChromaDB).
-
-    Returns document_id and chunk count.  The document_id can be used
-    to delete the document later.
+    Uploads are bounded at ingress. Ingestion remains unavailable until the
+    document service can verify persistent storage and provenance guarantees.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
@@ -79,7 +73,18 @@ async def upload_document(
 
     # Read file content
     try:
-        content = await file.read()
+        max_bytes = doc_service._settings.max_file_size_mb * 1024 * 1024
+        content_buffer = bytearray()
+        while True:
+            chunk = await file.read(min(64 * 1024, max_bytes - len(content_buffer) + 1))
+            if not chunk:
+                break
+            content_buffer.extend(chunk)
+            if len(content_buffer) > max_bytes:
+                raise HTTPException(status_code=413, detail="File exceeds maximum upload size.")
+        content = bytes(content_buffer)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to read uploaded file: %s", exc)
         raise HTTPException(status_code=400, detail="Failed to read uploaded file.")
@@ -96,11 +101,11 @@ async def upload_document(
             content,
             clearance=user_clearance,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=public_error('DOCUMENT_INVALID'), headers={'X-Error-Code': 'DOCUMENT_INVALID'}) from None
     except RuntimeError as exc:
         logger.error("Ingestion failed: %s", exc)
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=public_error('DOCUMENT_UNAVAILABLE'), headers={'X-Error-Code': 'DOCUMENT_UNAVAILABLE'}) from None
 
     return DocumentUploadResponse(
         document_id=result.document_id,
@@ -125,6 +130,10 @@ async def list_documents(
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """Return all documents currently indexed in the vector store visible to caller clearance."""
+    from backend.security.provenance_foundation import document_content_allowed
+    if not document_content_allowed():
+        raise HTTPException(status_code=503, detail=public_error('DOCUMENT_UNAVAILABLE'),
+                            headers={'X-Error-Code': 'DOCUMENT_UNAVAILABLE'})
     user_clearance = resolve_user_clearance(current_user)
     docs = doc_service.list_documents(user_clearance=user_clearance)
     return DocumentListResponse(
@@ -163,6 +172,9 @@ async def get_document(
     if not document_id or len(document_id) > 100:
         raise HTTPException(status_code=400, detail="Invalid document_id.")
 
+    from backend.security.provenance_foundation import document_content_allowed
+    if not document_content_allowed():
+        raise HTTPException(status_code=404, detail='Document not found.')
     user_clearance = resolve_user_clearance(current_user)
     details = doc_service.get_document_details(document_id, user_clearance=user_clearance)
     if details is None:
@@ -196,8 +208,10 @@ async def delete_document(
 
     try:
         deleted_chunks = doc_service.delete_document(document_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=404, detail=public_error('DOCUMENT_NOT_FOUND'), headers={'X-Error-Code': 'DOCUMENT_NOT_FOUND'}) from None
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail=public_error('DOCUMENT_UNAVAILABLE'), headers={'X-Error-Code': 'DOCUMENT_UNAVAILABLE'}) from None
     except Exception as exc:
         logger.error("Delete failed for %s: %s", document_id, exc)
         raise HTTPException(status_code=500, detail="Failed to delete document.")

@@ -541,7 +541,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
               )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              100% On-Premise Air-Gapped Relational Topology &bull; Role-Based Clearance Gating
+              Workspace topology
             </p>
           </div>
         </div>
@@ -976,7 +976,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                           <span>Base Facility Topology</span>
                         </div>
                         <p className="text-slate-600 leading-relaxed text-[11px]">
-                          Seeded from verified MRPL refinery P&amp;ID asset master registry. Immutable operational baseline.
+                          Demonstration topology; not a verified refinery asset registry.
                         </p>
                       </div>
                     ) : selectedNode.provenance && selectedNode.provenance.length > 0 ? (
@@ -1064,7 +1064,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                 <Database className="w-8 h-8 mb-2 opacity-40 text-slate-400" />
                 <p className="text-xs font-medium text-slate-600">Select any entity on the canvas</p>
                 <p className="text-[11px] text-slate-500 mt-1 max-w-[200px]">
-                  Click or drag any node to view real-time attributes and telemetry.
+                  Click or drag any node to view its available attributes. Demonstration data is not live telemetry.
                 </p>
               </div>
             )}
@@ -1082,7 +1082,7 @@ export const CompanyKnowledgeGraph: React.FC = () => {
                   <span>Enterprise Relational Database Matrix</span>
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Full tabular record view of company plant units, mechanical assets, telemetry probes, failure modes, and live documents.
+                  Tabular view of demonstration plant units, assets, probes and failure modes, plus indexed documents.
                 </p>
               </div>
               <div className="flex items-center gap-2 text-xs">

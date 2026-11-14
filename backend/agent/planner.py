@@ -55,12 +55,20 @@ class PlanStatus(str, Enum):
 # Plan models
 # ---------------------------------------------------------------------------
 
+class StepBinding(BaseModel):
+    """Bind one argument to one field of an earlier verified result."""
+    model_config = {'extra': 'forbid'}
+    step_id: str = Field(min_length=1, max_length=80, pattern=r'^[A-Za-z0-9_]+$')
+    field: str = Field(min_length=1, max_length=80, pattern=r'^[A-Za-z0-9_]+$')
+
+
 class PlanStep(BaseModel):
     """A single step in an agent execution plan."""
     id: str = Field(default_factory=lambda: f"step_{uuid.uuid4().hex[:8]}")
     description: str
     tool_name: Optional[str] = None
     arguments: Dict[str, Any] = Field(default_factory=dict)
+    bindings: Dict[str, StepBinding] = Field(default_factory=dict, max_length=32)
     requires_approval: bool = False
     status: str = Field(default=StepStatus.pending.value)
     result: Optional[str] = None
@@ -84,6 +92,7 @@ class AgentPlan(BaseModel):
 
 # Keywords / patterns that suggest multi-step tasks
 _MULTI_STEP_INDICATORS = [
+    r"\b(?:calculate|compute)\b.*\bthen\b",
     r"\band\b.*\b(then|also|after|next)\b",
     r"\bfirst\b.*\bthen\b",
     r"\bstep\s*\d",
@@ -138,6 +147,11 @@ def is_general_knowledge_query(query: str) -> bool:
     if not query:
         return False
     q = query.strip().lower()
+
+    # Numeric action requests are execution intents, even when phrased as a
+    # question. Conceptual questions without numbers stay conversational.
+    if re.search(r'\d', q) and re.search(r'\b(calculate|compute|convert|multiply)\b', q):
+        return False
 
     # Strip conversational polite prefixes (e.g. "please", "can you", "could you")
     q = re.sub(r"^(please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|kindly\s+)", "", q).strip()
@@ -209,7 +223,7 @@ def is_short_conversational_followup(query: str) -> bool:
     # Very short messages (< 50 chars) that don't contain tool/action keywords
     if len(q) < 50:
         action_keywords = [
-            "create", "generate", "write", "calculate", "execute", "run",
+            "create", "generate", "write", "calculate", "compute", "convert", "multiply", "execute", "run",
             "search", "find", "list", "read", "file", "code", "python",
             "xlsx", "docx", "report", "artifact", "export", "save",
         ]
@@ -313,6 +327,11 @@ def should_use_planning(
         return False
 
     msg_lower = message.lower().strip()
+
+    if (re.search(r'\d', msg_lower) and re.search(r'\b(calculate|compute|convert|multiply)\b', msg_lower)
+            and (re.search(r'\bthen\b', msg_lower) or
+                 any(re.search(pattern, msg_lower, re.IGNORECASE) for pattern in _MULTI_STEP_INDICATORS))):
+        return True
 
     # General knowledge questions never need planning
     if is_general_knowledge_query(message):
@@ -454,7 +473,8 @@ RULES:
    - document_search: Searches and retrieves text passages directly from the local knowledge base (e.g. benchmarks, standard operating procedures, runbooks). Use this for general knowledge retrieval, equipment documentation, and refinery records. Do NOT follow document_search with file_read.
    - file_list: Lists files available in the local workspace (data/uploads/ directory). Use this when the user asks what files are available, or when working with an uploaded or local workspace file.
    - file_read: Reads an existing document or file from the workspace (supports .pdf, .docx, .txt, .md, .csv). Use file_read whenever the user refers to an uploaded file or workspace document. When following file_list, the exact filename returned by file_list must be used. NEVER invent, fabricate, guess, or normalize placeholder filenames (such as 'document_0.txt', 'Pump_Instability_Document.txt', 'pump_maintenance.pdf', etc.). If the exact filename is not yet known prior to file_list execution, leave relative_path empty so it is dynamically resolved from the file_list result.
-   - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2").
+   - unit_conversion: Converts values between compatible length, mass or time units. Use a binding when the numeric value comes from a prior verified step.
+   - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2"). To use an earlier calculator step result in a later calculator expression, use @step_1.result (or the earlier step number), e.g. "@step_1.result * 3". Never invent a previous result.
    - code_execution: Executes Python code inside the local sandbox (e.g. for computation, data analysis, or script execution). Captures stdout/stderr. For standalone code or calculation tasks, write the Python program in the 'code' argument. ALWAYS follow code_execution with a reasoning step (tool_name = null) to inspect sandbox stdout and present the exact computed results. NEVER call document_search, file_list, or file_read for standalone code/calculation tasks.
    - docx_create: Generates a genuine Microsoft Word (.docx) document in the sandbox with title, paragraphs, and tables. Always set requires_approval to true.
    - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Headers and rows will be dynamically populated from prior step observations at runtime. If the user specifies particular column headers or relationship tables (e.g. 'Problem', 'Recommended Improvement', or 'Equipment ID', 'Maintenance Findings', 'Operating Observations', 'Recommended Actions'), preserve those exact semantic columns. Do NOT use generic column names like 'Topic', 'Description', 'Page Number', or 'Content'. Always set requires_approval to true.
@@ -480,6 +500,10 @@ RULES:
      * For knowledge base requests: Step 1: document_search, Step 2: reasoning, Step 3: docx_create or xlsx_report with requires_approval: true, Step 4: artifact_verifier to verify the generated artifact (requires_approval: false).
 
 6. Maximum {max_steps} steps.
+7. For a supported verified read-only result, bind an argument explicitly with
+   "bindings": {{"argument_name": {{"step_id": "step_1", "field": "result"}}}}.
+   Omit that argument from arguments. Bind only earlier steps and declared fields.
+   Do not invent values from tool results. Bindings are not available for write tools.
 
 OUTPUT FORMAT (JSON array of steps):
 [
@@ -541,9 +565,13 @@ class AgentPlanner:
                     )
                 params = "\n".join(param_strs) if param_strs else "    (no parameters)"
                 approval = " [REQUIRES APPROVAL]" if getattr(tool, "requires_approval", False) else ""
+                schema_out = getattr(tool, 'result_schema', None)
+                verified = bool(getattr(tool, 'read_only', False) and not getattr(tool, 'requires_approval', False)
+                                and schema_out and callable(getattr(tool, 'result_verifier', None)))
+                output_fields = ', '.join(schema_out.model_fields) if verified else 'none'
                 tool_descriptions += (
                     f"- {tool.name}: {tool.description}{approval}\n"
-                    f"  Parameters:\n{params}\n\n"
+                    f"  Parameters:\n{params}\n  Verified output fields: {output_fields}\n\n"
                 )
 
         system_prompt = _PLAN_SYSTEM_PROMPT.format(
@@ -568,15 +596,33 @@ class AgentPlanner:
             response = await provider.chat(request)
             raw = response.content.strip()
 
-            # Extract JSON from the response (handle markdown code blocks)
-            json_match = re.search(r"\[.*\]", raw, re.DOTALL)
-            if json_match:
-                raw = json_match.group()
-
-            steps_data = json.loads(raw)
+            # Accept a single array or a single fenced JSON array, not prose
+            # surrounding an executable fragment or multiple responses.
+            if len(raw) > 65536:
+                raise ValueError('Plan response too large')
+            fenced = re.fullmatch(r'```(?:json)?\s*([\s\S]*?)\s*```', raw, re.IGNORECASE)
+            if fenced:
+                raw = fenced.group(1)
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError('Duplicate plan field')
+                    result[key] = value
+                return result
+            def reject_constant(_value):
+                raise ValueError('Non-finite plan value')
+            steps_data = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
 
             if not isinstance(steps_data, list):
                 raise ValueError("Plan must be a JSON array of steps")
+
+            if not steps_data or len(steps_data) > self._max_plan_steps:
+                raise ValueError("Invalid plan length")
+            if not all(isinstance(step, dict) for step in steps_data):
+                raise ValueError("Invalid plan step")
+            if any(set(step) - {'description', 'tool_name', 'arguments', 'bindings', 'requires_approval'} for step in steps_data):
+                raise ValueError('Unexpected plan step field')
 
             # Convert to PlanStep objects, filtering out fabricated/placeholder file_read calls
             has_doc_search = any(
@@ -593,7 +639,7 @@ class AgentPlanner:
                     tool_name = None
                 args = step_data.get("arguments", {})
                 if not isinstance(args, dict):
-                    args = {}
+                    raise ValueError("Plan step arguments must be an object")
 
                 # Prevent planner from calling file_read with fabricated/placeholder document paths
                 if tool_name == "file_read":
@@ -620,9 +666,15 @@ class AgentPlanner:
                     description=step_data.get("description", f"Step {len(steps) + 1}"),
                     tool_name=tool_name,
                     arguments=args,
+                    bindings=step_data.get('bindings', {}),
                     requires_approval=req_app,
                     status=StepStatus.pending.value,
                 ))
+
+            has_bindings = any(bool(item.get('bindings')) for item in steps_data)
+            if has_bindings and len(steps) != len(steps_data):
+                raise ValueError('Bound plan steps cannot be pruned')
+            original_bound_steps = [(step.id, step.tool_name) for step in steps]
 
             # Requirement 4: For requests referring to uploaded/workspace files, ensure file_list -> file_read is used
             obj_lower = objective.lower()
@@ -750,15 +802,10 @@ class AgentPlanner:
                     ns.id = f"step_{idx}"
                 steps = pruned
 
+            if has_bindings and [(step.id, step.tool_name) for step in steps] != original_bound_steps:
+                raise ValueError('Bound plan steps cannot be reordered')
             if not steps:
-                steps = [PlanStep(
-                    id="step_1",
-                    description=f"Answer the user's request: {objective[:200]}",
-                    tool_name=None,
-                    arguments={},
-                    requires_approval=False,
-                    status=StepStatus.pending.value,
-                )]
+                raise ValueError("Plan has no usable steps")
 
             plan = AgentPlan(
                 task_id=task_id,
@@ -777,17 +824,4 @@ class AgentPlanner:
             logger.warning(
                 "plan_parse_error | task=%s error=%s", task_id, str(exc)[:200]
             )
-            # Return a minimal single-step plan as fallback
-            return AgentPlan(
-                task_id=task_id,
-                objective=objective,
-                steps=[PlanStep(
-                    id="step_1",
-                    description=f"Answer the user's request: {objective[:200]}",
-                    tool_name=None,
-                    arguments={},
-                    requires_approval=False,
-                    status=StepStatus.pending.value,
-                )],
-                status=PlanStatus.planning.value,
-            )
+            raise RuntimeError("Planning response invalid") from exc

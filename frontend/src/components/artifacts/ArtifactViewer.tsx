@@ -29,7 +29,7 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 
 interface ArtifactItem {
   filename: string;
-  path: string;
+  display_name?: string;
   size_bytes: number;
   modified_at: number;
   format: string;
@@ -38,6 +38,9 @@ interface ArtifactItem {
 }
 
 export const ArtifactViewer: React.FC = () => {
+  // The current API has no per-artifact verified publication contract.
+  // Keep the existing viewer dormant even if the outer capability changes.
+  const publicationSupported = false;
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [lastRefreshed, setLastRefreshed] = useState<string>('');
@@ -93,6 +96,7 @@ export const ArtifactViewer: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!publicationSupported) return;
     loadArtifacts();
     const interval = setInterval(loadArtifacts, 10000);
     return () => clearInterval(interval);
@@ -118,6 +122,16 @@ export const ArtifactViewer: React.FC = () => {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
+
+  if (!publicationSupported) {
+    return <section className="p-6" aria-labelledby="artifact-access-title">
+      <h1 id="artifact-access-title" className="text-xl font-semibold">Artifacts &amp; Reports</h1>
+      <p role="status" className="mt-3 text-sm text-slate-600">
+        Artifact preview and download are blocked until authorization and publication can be verified.
+        Internal generation does not make an artifact available for publication.
+      </p>
+    </section>;
+  }
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-y-auto bg-[#090d16] text-slate-100 p-6 space-y-6">
@@ -176,7 +190,7 @@ export const ArtifactViewer: React.FC = () => {
 
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <h3 className="font-semibold text-sm text-slate-200 truncate">{art.filename}</h3>
+                      <h3 className="font-semibold text-sm text-slate-200 truncate">{art.display_name || art.filename}</h3>
                       <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
                         {art.format}
                       </span>
@@ -218,7 +232,7 @@ export const ArtifactViewer: React.FC = () => {
 
                   <a
                     href={`/api/artifacts/${encodeURIComponent(art.filename)}`}
-                    download={art.filename}
+                    download={art.display_name || art.filename}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />

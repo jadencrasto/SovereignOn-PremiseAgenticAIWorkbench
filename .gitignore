@@ -70,3 +70,4 @@ eval/results/*_20*.md
 .freebuff/
 
 data/memory.json
+data/memory.json.lock

@@ -54,6 +54,7 @@ def generate_consolidated_report(
     suite_results: List[EvaluationSuiteResult],
     env_info: Dict[str, Any],
     total_duration_sec: float,
+    expected_suites: int = 8,
 ) -> Tuple[Path, Path]:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -64,7 +65,14 @@ def generate_consolidated_report(
     total_failed = sum(s.failed for s in suite_results)
     total_unavail = sum(s.environment_unavailable for s in suite_results)
 
-    overall_status = "PASS" if total_failed == 0 else "FAIL"
+    if total_failed:
+        overall_status = "FAIL"
+    elif not suite_results or total_cases == 0 or total_passed == 0:
+        overall_status = "BLOCKED"
+    elif len(suite_results) != expected_suites or total_unavail or total_passed != total_cases:
+        overall_status = "INCOMPLETE"
+    else:
+        overall_status = "PASS"
 
     consolidated_data = {
         "title": "Sovereign AI Workbench — Phase 8 Evaluation Scorecard",
@@ -110,7 +118,7 @@ def generate_consolidated_report(
         "# Sovereign AI Workbench — Phase 8 Evaluation Scorecard",
         f"**Generated:** {timestamp_str}  ",
         f"**Overall Status:** `{overall_status}`  ",
-        f"**Air-Gapped Local Environment:** Verified (100% on-premise execution)  ",
+        "**Network isolation:** Not verified by this evaluation.  ",
         f"**Total Execution Time:** {total_duration_sec:.2f}s  ",
         "",
         "---",
@@ -148,7 +156,7 @@ def generate_consolidated_report(
         f"- **Python Version:** `{env_info.get('python_version')}`",
         f"- **Local Ollama Online:** `{env_info.get('ollama_available')}`",
         f"- **Loaded Local Models:** `{', '.join(env_info.get('available_models', [])) or 'None (Offline Mode)'}`",
-        f"- **Data Sovereignty Assurance:** Zero external cloud egress, all embeddings & vector stores local",
+        "- **Data Sovereignty Assurance:** Not established; verify network isolation separately.",
         "",
     ])
 
@@ -167,7 +175,7 @@ async def main() -> int:
 
     env_info = get_environment_info()
     print(f"[*] Environment Detected: Python {env_info['python_version']} on {env_info['os']}")
-    print(f"[*] Ollama Instance: {'ONLINE (' + str(len(env_info['available_models'])) + ' models)' if env_info['ollama_available'] else 'OFFLINE (Air-gapped offline test mode)'}")
+    print(f"[*] Ollama Instance: {'ONLINE (' + str(len(env_info['available_models'])) + ' models)' if env_info['ollama_available'] else 'UNAVAILABLE'}")
     print("-" * 75)
 
     suite_evaluators = [
@@ -202,9 +210,9 @@ async def main() -> int:
     print(f"[*] Consolidated JSON Report: {json_out.resolve()}")
     print(f"[*] Consolidated Markdown Scorecard: {md_out.resolve()}")
 
-    total_failed = sum(s.failed for s in suite_results)
-    if total_failed > 0:
-        print(f"\n[!] WARNING: {total_failed} test cases failed. Non-zero exit.")
+    result_data = json.loads(json_out.read_text(encoding="utf-8"))
+    if result_data["overall_status"] != "PASS":
+        print(f"\n[!] Evaluation status: {result_data['overall_status']}. Non-zero exit.")
         return 1
 
     print("\n[OK] ALL RUNNABLE EVALUATIONS PASSED WITH ZERO REGRESSIONS.")

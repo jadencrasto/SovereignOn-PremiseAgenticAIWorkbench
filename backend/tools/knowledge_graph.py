@@ -65,6 +65,9 @@ def create_knowledge_graph_query(graph_service: Optional[Any] = None) -> Callabl
         server-injected parameters (_user or authenticated server kwargs).
         LLM-supplied tool arguments cannot specify, spoof, or elevate clearance.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return {"success": False, "found": False, "error": "Knowledge graph content unavailable.", "relationships": []}
         if graph_service is None:
             return {
                 "success": False,

@@ -29,11 +29,10 @@ from backend.schemas.tasks import (
     ApprovalSchema,
     ApprovalActionRequest,
     ApprovalListResponse,
-    AgentPlanSchema,
-    PlanStepSchema,
 )
 from backend.auth.dependencies import get_current_user, require_permission
 from backend.auth.models import Permission, User
+from backend.security.task_access import TASK_CONTENT_WITHHELD, task_content_revalidation_available
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +63,7 @@ def _is_task_accessible(task, current_user: User, is_cancel: bool = False) -> bo
     """
     Check if a task is accessible by the current user:
     - Administrators (UserRole.ADMIN) can access and cancel all tasks.
-    - Privileged operators can cancel unowned/legacy tasks (user_id=NULL) as part of operational management.
-    - Regular users and operators can only access and cancel tasks matching their user id or username.
+    - Regular users and operators can only access tasks matching their stable user id.
     - Legacy tasks with user_id=NULL return 404 for read access by non-administrators.
     """
     from backend.auth.models import UserRole
@@ -74,17 +72,15 @@ def _is_task_accessible(task, current_user: User, is_cancel: bool = False) -> bo
         return True
 
     if not task.user_id:
-        if is_cancel:
-            is_operator = current_user.role == UserRole.OPERATOR.value or current_user.role == UserRole.OPERATOR
-            if is_operator:
-                return True
         return False
 
-    user_identifiers = {
-        getattr(current_user, "id", None),
-        getattr(current_user, "username", None),
-    }
-    return task.user_id in user_identifiers
+    return task.user_id == getattr(current_user, "id", None)
+
+
+# Task records currently contain no verifiable source-dependency lineage. A
+# creation-time clearance is not proof after reclassification or deletion.
+# Do not introduce role/admin or legacy-record exceptions for content.
+_WITHHELD = TASK_CONTENT_WITHHELD
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +92,7 @@ async def monitor_tasks(
     request: Request,
     stale_threshold_seconds: int = Query(default=3600, ge=60, le=86400),
     task_manager=Depends(get_task_manager),
-    current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
     Return operational aggregation of all agent tasks:
@@ -104,7 +100,13 @@ async def monitor_tasks(
     - Stale task counts
     - Total task metrics
     """
-    return task_manager.get_monitoring_summary(stale_threshold_seconds=stale_threshold_seconds)
+    summary = task_manager.get_monitoring_summary(stale_threshold_seconds=stale_threshold_seconds)
+    for items in summary.get('grouped_tasks', {}).values():
+        for item in items:
+            item['user_request'] = _WITHHELD
+            item['error'] = None
+            item['session_id'] = _WITHHELD
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +132,7 @@ async def list_tasks(
     if is_admin:
         tasks = task_manager.list_tasks(limit=limit, status=status)
     else:
-        user_ids = [u for u in (getattr(current_user, "id", None), getattr(current_user, "username", None)) if u]
-        tasks = task_manager.list_tasks(limit=limit, status=status, user_id=user_ids)
+        tasks = task_manager.list_tasks(limit=limit, status=status, user_id=current_user.id)
 
     summaries = []
     for t in tasks:
@@ -145,8 +146,8 @@ async def list_tasks(
 
         summaries.append(TaskSummarySchema(
             task_id=t.task_id,
-            session_id=t.session_id,
-            user_request=t.user_request[:200],
+            session_id=_WITHHELD,
+            user_request=_WITHHELD,
             status=t.status,
             step_count=step_count,
             completed_steps=completed_steps,
@@ -177,37 +178,15 @@ async def get_task(
     if task is None or not _is_task_accessible(task, current_user):
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
 
-    plan_schema = None
-    if task.plan:
-        plan_schema = AgentPlanSchema(
-            task_id=task.plan.task_id,
-            objective=task.plan.objective,
-            steps=[
-                PlanStepSchema(
-                    id=s.id,
-                    description=s.description,
-                    tool_name=s.tool_name,
-                    arguments=s.arguments,
-                    requires_approval=s.requires_approval,
-                    status=s.status,
-                    result=s.result,
-                    error=s.error,
-                )
-                for s in task.plan.steps
-            ],
-            status=task.plan.status,
-            created_at=task.plan.created_at,
-        )
-
     return TaskSchema(
         task_id=task.task_id,
-        session_id=task.session_id,
-        user_request=task.user_request,
-        plan=plan_schema,
+        session_id=_WITHHELD,
+        user_request=_WITHHELD,
+        plan=None,
         current_step_idx=task.current_step_idx,
         status=task.status,
-        result=task.result,
-        error=task.error,
+        result=None,
+        error=None,
         created_at=task.created_at,
         updated_at=task.updated_at,
         completed_at=task.completed_at,
@@ -244,6 +223,12 @@ async def approve_task_step(
             status_code=404,
             detail=f"Task not found: {task_id}",
         )
+
+    # All existing task payloads lack verifiable lineage. Block both approval
+    # and rejection through this execution path before reading pending details
+    # or consuming an approval. Cancellation remains a separate operation.
+    if not task_content_revalidation_available():
+        raise HTTPException(status_code=403, detail=_WITHHELD)
 
     # Cannot approve tasks that are cancelled or in a terminal state
     from backend.agent.task import TaskStatus, TERMINAL_TASK_STATUSES
@@ -323,8 +308,9 @@ async def cancel_task(
             "status": cancelled_task.status,
             "message": "Task cancelled",
         }
-    except TaskStateError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except TaskStateError:
+        raise HTTPException(status_code=400, detail='Task cannot be cancelled in its current state.',
+                            headers={'X-Error-Code': 'TASK_CANCEL_FAILED'}) from None
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +332,10 @@ async def list_task_approvals(
     task = task_manager.get_task(task_id)
     if task is None or not _is_task_accessible(task, current_user):
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
+    # Approval reasons and bindings can contain derived sensitive data.
+    if not task_content_revalidation_available():
+        raise HTTPException(status_code=403, detail=_WITHHELD)
 
     approvals = approval_manager.get_approvals_for_task(task_id)
 

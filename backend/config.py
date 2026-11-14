@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Backend server
     # ------------------------------------------------------------------
-    backend_host: str = Field(default="0.0.0.0")
+    backend_host: str = Field(default="127.0.0.1")
     backend_port: int = Field(default=8000)
 
     # ------------------------------------------------------------------
@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_default_model: str = Field(default="qwen2.5:7b")
+    local_chat_only: bool = Field(default=False, description="Explicit authenticated development profile without a document vector store.")
 
     # ------------------------------------------------------------------
     # RAG / Embeddings  (used in Phase 2; included here for completeness)
@@ -122,6 +123,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     tasks_dir: Path = Field(default=PROJECT_ROOT / "data" / "tasks")
     tasks_db_path: Path = Field(default=PROJECT_ROOT / "data" / "tasks" / "tasks.db")
+    conversation_memory_path: Optional[Path] = Field(default=None, description="Optional explicit conversation JSON path; defaults to existing local storage.")
     approval_timeout_seconds: int = Field(default=300)
     max_plan_steps: int = Field(default=10)
     tool_timeout_seconds: int = Field(default=30)
@@ -185,7 +187,10 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         """Create all runtime directories that must exist before startup."""
-        for d in [self.upload_dir, self.log_dir, self.sandbox_dir, self.chroma_persist_dir, self.tasks_dir]:
+        directories = [self.upload_dir, self.log_dir, self.sandbox_dir, self.tasks_dir]
+        if not self.local_chat_only:
+            directories.append(self.chroma_persist_dir)
+        for d in directories:
             d.mkdir(parents=True, exist_ok=True)
 
     def get_log_level(self) -> int:

@@ -24,6 +24,11 @@ The API router just calls service methods.
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
+import os
+import re
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +45,73 @@ logger = logging.getLogger(__name__)
 # Allowed upload extensions — security boundary
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx"}
 MAX_FILENAME_LEN = 255
+
+
+def _validate_index_readback(readback, manifest, document_id, index_model, clearance):
+    """Reject inconsistent text/metadata; this does not verify embeddings or authorize access."""
+    if not isinstance(readback, dict):
+        raise RuntimeError('Index readback incomplete')
+    ids, texts, metas = readback.get('ids'), readback.get('documents'), readback.get('metadatas')
+    if not all(isinstance(part, list) for part in (ids, texts, metas)):
+        raise RuntimeError('Index readback incomplete')
+    expected = {item['chunk_id']: item for item in manifest}
+    if (not manifest or any(not isinstance(cid, str) for cid in ids)
+            or len(expected) != len(manifest) or len(ids) != len(expected) or len(set(ids)) != len(ids)
+            or set(ids) != set(expected) or len(texts) != len(ids) or len(metas) != len(ids)):
+        raise RuntimeError('Index readback incomplete')
+    for cid, text, meta in zip(ids, texts, metas):
+        item = expected[cid]
+        if (not isinstance(text, str) or not isinstance(meta, dict) or meta.get('document_id') != document_id
+                or type(meta.get('source_revision')) is not int or meta['source_revision'] != 1
+                or type(meta.get('chunk_index')) is not int or meta['chunk_index'] != item['chunk_index']
+                or meta.get('index_model') != index_model or meta.get('clearance') != clearance
+                or hashlib.sha256(text.encode('utf-8')).hexdigest() != item['sha256']):
+            raise RuntimeError('Index readback mismatch')
+
+
+def _persist_new_upload(root: Path, content: bytes, store, reserved_id: Optional[str] = None) -> tuple[str, Path]:
+    """Exclusively create and verify an opaque upload; never remove failures.
+
+    The storage root must be trusted against non-cooperating OS writers. Windows
+    reparse-point resistance is not established by these checks alone.
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    info = root.lstat()
+    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+        raise OSError('Upload storage root unavailable')
+    root = root.resolve(strict=True)
+    expected = hashlib.sha256(content).digest()
+    if reserved_id is not None and not re.fullmatch(r'doc_v1_[0-9a-f]{32}', reserved_id):
+        raise ValueError('Invalid reserved identity')
+    for _ in range(1 if reserved_id else 8):
+        document_id = reserved_id or ('doc_v1_' + uuid.uuid4().hex)
+        if store._maintenance_document_chunk_count(document_id):
+            continue
+        path = root / (document_id + '.bin')
+        try:
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, 'wb') as stream:
+            written = stream.write(content)
+            if written != len(content):
+                raise OSError('Upload write incomplete')
+            stream.flush()
+            os.fsync(stream.fileno())
+        with path.open('rb') as verify:
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                block = verify.read(65536)
+                if not block:
+                    break
+                size += len(block)
+                digest.update(block)
+        if size != len(content) or digest.digest() != expected:
+            raise OSError('Upload integrity verification failed')
+        return document_id, path
+    raise OSError('Unable to allocate unique upload identity')
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +154,13 @@ class DocumentService:
         embedding_service: EmbeddingService,
         vector_store: VectorStore,
         retriever: Retriever,
+        source_registry=None,
     ) -> None:
         self._settings = settings
         self._embedder = embedding_service
         self._store = vector_store
         self._retriever = retriever
+        self._source_registry = source_registry
         self._parser = DocumentParser()
         self._chunker = TextChunker(
             chunk_size=settings.chunk_size,
@@ -123,6 +197,19 @@ class DocumentService:
         Raises:
             ValueError : invalid file type, too large, empty, etc.
         """
+        if self._source_registry is None:
+            raise RuntimeError('Document provenance service unavailable')
+        from backend.security.execution_policy import require_protected_storage_writer
+        try:
+            require_protected_storage_writer()
+        except Exception:
+            raise RuntimeError('Verified persistent index unavailable') from None
+        # No supported verifier currently establishes the required independent
+        # persistence and writer guarantees. Do not reserve or write anything.
+        from backend.rag.store import persistent_security_guarantees_available
+        if (getattr(self._store, 'backend_status', None) != 'verified_persistent'
+                or not persistent_security_guarantees_available()):
+            raise RuntimeError('Verified persistent index unavailable')
         clean_clearance = str(clearance or "viewer").strip().lower()
         if clean_clearance not in ("viewer", "operator", "admin"):
             clean_clearance = "viewer"
@@ -147,17 +234,26 @@ class DocumentService:
         logger.info("Ingesting document: %s (%d bytes, clearance=%s)", filename, len(content), clean_clearance)
 
         # ------ Parse ------
-        document = DocumentParser.parse(filename, content)
+        reserved_id = None
+        if self._source_registry is not None:
+            from backend.auth.request_context import effective_clearance
+            if effective_clearance.get() != clean_clearance:
+                raise PermissionError('Current clearance unavailable')
+            reserved_id = self._source_registry.reserve_document(content)
+        document_id, upload_path = _persist_new_upload(self._settings.upload_dir, content, self._store, reserved_id)
+        persisted = upload_path.read_bytes()
+        if hashlib.sha256(persisted).digest() != hashlib.sha256(content).digest():
+            raise OSError('Upload integrity verification failed')
+        document = DocumentParser.parse(filename, persisted)
+        document.document_id = document_id
         document.metadata["clearance"] = clean_clearance
+        document.metadata["source_revision"] = 1
         logger.info(
             "Parsed %s → doc_id=%s text_len=%d",
             filename, document.document_id, len(document.text),
         )
 
         # ------ Save original file to uploads/ ------
-        upload_path = self._settings.upload_dir / f"{document.document_id}_{filename}"
-        upload_path.parent.mkdir(parents=True, exist_ok=True)
-        upload_path.write_bytes(content)
         logger.debug("Saved original file to %s", upload_path)
 
         # ------ Chunk ------
@@ -169,19 +265,48 @@ class DocumentService:
         # ------ Embed ------
         texts = [c.text for c in chunks]
         embeddings = await self._embedder.embed_many(texts)
+        if (not isinstance(embeddings, list) or len(embeddings) != len(texts) or not embeddings
+                or not isinstance(embeddings[0], (list, tuple))
+                or not all(isinstance(v, (list, tuple)) and len(v) == len(embeddings[0]) and len(v) > 0 for v in embeddings)):
+            raise RuntimeError('Embedding dimensionality unavailable or inconsistent')
+        from backend.rag.embeddings import validate_embedding
+        embeddings = [validate_embedding(vector, len(embeddings[0])) for vector in embeddings]
+        if self._embedder.model_name != str(self._settings.embedding_model):
+            raise RuntimeError('Embedding model does not match index configuration')
         logger.info("Generated %d embeddings for %s", len(embeddings), filename)
 
         # ------ Store ------
         chunk_ids = [c.chunk_id for c in chunks]
         metadatas = [self._chunk_to_metadata(c) for c in chunks]
+        index_model = str(self._settings.embedding_model)
         for m in metadatas:
             m["clearance"] = clean_clearance
+            m['index_model'] = index_model
+        manifest = [{'chunk_id': c.chunk_id, 'chunk_index': c.chunk_index,
+                     'sha256': hashlib.sha256(c.text.encode('utf-8')).hexdigest()} for c in chunks]
+        manifest_json = json.dumps(manifest, sort_keys=True, separators=(',', ':'))
+        if self._source_registry is not None:
+            config = {'embedding_model': index_model, 'model_digest': None,
+                      'dimensions': len(embeddings[0]), 'collection': 'workbench_documents',
+                      'chunk_size': self._settings.chunk_size, 'chunk_overlap': self._settings.chunk_overlap,
+                      'backend_evidence': ('in_memory_nondurable' if getattr(self._store, '_client', None) is None
+                                           else 'persistent_backend_unverified'),
+                      'source_revision': 1, 'storage_configuration_verified': False}
+            config['backend_identity'] = getattr(self._store, 'backend_identity', None)
+            config['verification_timestamp'] = None
+            self._source_registry.record_manifest(document_id, manifest_json=manifest_json, index_model=index_model,
+                index_configuration_json=json.dumps(config, sort_keys=True, separators=(',', ':')))
         self._store.add_chunks(
             chunk_ids=chunk_ids,
             embeddings=embeddings,
             texts=texts,
             metadatas=metadatas,
         )
+        if self._source_registry is not None:
+            readback = self._store._maintenance_get_document_chunks(document_id)
+            _validate_index_readback(readback, manifest, document_id, index_model, clean_clearance)
+            self._source_registry.record_readback(document_id, manifest_json=manifest_json, index_model=index_model,
+                                                  nondurable=getattr(self._store, '_client', None) is None)
         logger.info("Indexed %d chunks for document_id=%s", len(chunks), document.document_id)
 
         # ------ Knowledge Graph Ingestion Hook (Non-fatal Isolation) ------
@@ -203,6 +328,7 @@ class DocumentService:
             filename=filename,
             file_type=document.file_type,
             chunk_count=len(chunks),
+            status='pending' if self._source_registry is not None else 'indexed',
         )
 
     def set_graph_service(self, graph_service) -> None:
@@ -220,6 +346,10 @@ class DocumentService:
         user_clearance: str = "viewer",
     ) -> List[RetrievedChunk]:
         """Semantic retrieval — delegates to the Retriever with clearance gating."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            from backend.rag.retriever import RetrievalBlocked
+            raise RetrievalBlocked("Document retrieval is unavailable.")
         return await self._retriever.retrieve(query, top_k=top_k, user_clearance=user_clearance)
 
     def has_documents(self) -> bool:
@@ -235,6 +365,9 @@ class DocumentService:
         Return a list of indexed documents visible at user_clearance.
         Restricted documents with 0 accessible chunks are excluded to prevent metadata leakage.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return []
         from backend.auth.models import is_clearance_sufficient, parse_clearance
 
         raw = self._store.list_documents()
@@ -274,6 +407,9 @@ class DocumentService:
 
         Returns None if document does not exist or user has zero accessible chunks.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return None
         from backend.auth.models import is_clearance_sufficient, parse_clearance
 
         if not self._store.document_exists(document_id):
@@ -340,11 +476,32 @@ class DocumentService:
         Returns the number of chunks deleted.
         Raises ValueError if document not found.
         """
-        if not self._store.document_exists(document_id):
+        if self._source_registry is None:
+            raise RuntimeError('Document provenance service unavailable')
+        if self._source_registry is not None:
+            record = self._source_registry.read(document_id)
+            if record is None:
+                raise PermissionError('Document unavailable')
+            if record['state'] == 'pending' and not self._source_registry.revoke(document_id):
+                raise PermissionError('Document unavailable')
+            if record['state'] not in ('pending', 'revoked'):
+                raise PermissionError('Document unavailable')
+        # Revocation is a local metadata denial. Physical cleanup is a separate
+        # protected mutation and must not use the direct fallback while the
+        # storage and independent-writer boundary remains unverified.
+        from backend.security.execution_policy import require_protected_storage_writer
+        try:
+            require_protected_storage_writer()
+        except Exception:
+            raise RuntimeError('Protected document cleanup unavailable') from None
+        from backend.rag.store import persistent_security_guarantees_available
+        if not persistent_security_guarantees_available():
+            raise RuntimeError('Protected document cleanup unavailable')
+        if not self._store._maintenance_document_chunk_count(document_id):
             raise ValueError(f"Document '{document_id}' not found in the index.")
 
         # Get filename before deleting (so we can remove the upload)
-        chunks_data = self._store.get_document_chunks(document_id)
+        chunks_data = self._store._maintenance_get_document_chunks(document_id)
         filename = None
         if chunks_data.get("metadatas"):
             filename = chunks_data["metadatas"][0].get("filename")
@@ -409,7 +566,10 @@ class DocumentService:
 
     def _delete_upload_file(self, document_id: str, filename: str) -> None:
         """Safely delete the original uploaded file."""
-        upload_path = self._settings.upload_dir / f"{document_id}_{filename}"
+        if re.fullmatch(r'doc_v1_[0-9a-f]{32}', document_id):
+            upload_path = self._settings.upload_dir / f"{document_id}.bin"
+        else:
+            upload_path = self._settings.upload_dir / f"{document_id}_{filename}"
         try:
             if upload_path.exists() and upload_path.is_file():
                 # Extra safety: ensure path is still inside upload_dir

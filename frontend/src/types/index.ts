@@ -51,6 +51,8 @@ export interface ChatMessage {
   toolEvents?: ToolEvent[];
   isStreaming?: boolean;
   error?: boolean;
+  withheld?: boolean;
+  workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   // Phase 5: optional image attachments on user messages
   attachments?: ImageAttachment[];
   // Phase 6: Plan and Approval states
@@ -218,6 +220,8 @@ export interface ToolInfo {
   requires_approval: boolean;   // Phase 6
   risk_level: string;           // Phase 6: 'low' | 'medium' | 'high'
   enabled: boolean;
+  availability?: 'blocked' | 'disabled' | 'unknown';
+  availability_reason?: string | null;
 }
 
 export interface ToolsListResponse {

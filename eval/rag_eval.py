@@ -39,6 +39,13 @@ from eval.common import (
 logger = logging.getLogger("eval.rag")
 
 
+def _index_is_complete(attempted, ingested, failed, eligible):
+    """Every requested document must have a distinct eligible identity."""
+    eligible_ids = {doc.document_id for doc in eligible}
+    return (not failed and attempted > 0 and len(ingested) == attempted
+            and len(set(ingested)) == attempted and set(ingested).issubset(eligible_ids))
+
+
 class RAGEvaluator:
     """Evaluates RAG retrieval and grounded generation using the actual codebase pipeline."""
 
@@ -59,22 +66,43 @@ class RAGEvaluator:
             raise FileNotFoundError(f"QA dataset not found: {self.qa_file}")
         return json.loads(self.qa_file.read_text(encoding="utf-8"))
 
-    async def setup_index(self, doc_service: DocumentService) -> int:
+    async def setup_index(self, doc_service: DocumentService) -> tuple[int, list[str], int]:
         """Ingest synthetic industrial documents from data/demo/."""
         demo_files = list(DEMO_DATA_DIR.glob("*.md"))
-        ingested = 0
+        ingested = []
+        failed = 0
         for f in demo_files:
             try:
                 content = f.read_bytes()
-                await doc_service.ingest_document(f.name, content)
-                ingested += 1
-            except Exception as exc:
-                logger.warning("Failed ingesting %s: %s", f.name, exc)
-        return ingested
+                result = await doc_service.ingest_document(f.name, content)
+                if not isinstance(result.document_id, str) or not result.document_id:
+                    raise ValueError('Missing document identity')
+                ingested.append(result.document_id)
+            except Exception:
+                failed += 1
+                logger.warning("A synthetic evaluation document could not be ingested.")
+        return len(demo_files), ingested, failed
+
+    def _blocked(self, qa_items, t0, reason):
+        """Persist unavailable cases without implying measured retrieval quality."""
+        cases = [TestCaseResult(test_id=item['id'], name=f"RAG Retrieval: {item['category']}",
+                                category=item['category'], status=EvalStatus.ENVIRONMENT_UNAVAILABLE,
+                                duration_ms=0.0, details=reason) for item in qa_items]
+        suite = EvaluationSuiteResult(
+            suite_name="RAG Industrial Retrieval & Groundedness Benchmark",
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            environment="Not verified", total_cases=len(cases), passed=0, failed=0,
+            environment_unavailable=len(cases), duration_seconds=time.monotonic() - t0,
+            summary_metrics={}, test_cases=cases, errors=[reason])
+        save_evaluation_results(suite, "rag_eval")
+        return suite
 
     async def run(self) -> EvaluationSuiteResult:
         t0 = time.monotonic()
         qa_items = self.load_qa_dataset()
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return self._blocked(qa_items, t0, 'Blocked: document retrieval authorization is unavailable.')
         ollama_ok, models = check_ollama_available()
 
         test_cases: List[TestCaseResult] = []
@@ -107,12 +135,7 @@ class RAGEvaluator:
                 failed=0,
                 environment_unavailable=len(qa_items),
                 duration_seconds=duration,
-                summary_metrics={
-                    "Mean_Precision_at_K": 0.0,
-                    "Mean_Recall_at_K": 0.0,
-                    "Mean_Latency_ms": 0.0,
-                    "Groundedness_Overlap_Rate": 0.0,
-                },
+                summary_metrics={},
                 test_cases=test_cases,
                 errors=["Ollama service unavailable: Local embedding & LLM model not reachable"],
             )
@@ -140,7 +163,10 @@ class RAGEvaluator:
         )
 
         # Ingest demo data
-        await self.setup_index(doc_service)
+        attempted, ingested, failed = await self.setup_index(doc_service)
+        eligible = doc_service.list_documents()
+        if not _index_is_complete(attempted, ingested, failed, eligible):
+            return self._blocked(qa_items, t0, 'Blocked: ingestion failed or no eligible indexed documents are available.')
 
         for item in qa_items:
             t_case = time.monotonic()
@@ -248,4 +274,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     evaluator = RAGEvaluator()
     res = asyncio.run(evaluator.run())
-    print(f"RAG Evaluation Complete: {res.passed}/{res.total_cases} Passed (Status: {res.passed}/{res.total_cases})")
+    if res.environment_unavailable or res.errors:
+        print('RAG evaluation blocked or unavailable; no valid retrieval score was produced.')
+        raise SystemExit(1)
+    print(f"RAG Evaluation Complete: {res.passed}/{res.total_cases} Passed")
+    if res.failed:
+        raise SystemExit(1)

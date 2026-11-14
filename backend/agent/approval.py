@@ -399,6 +399,21 @@ class ApprovalManager:
         )
         return True
 
+    def consume_approval_for_execution(
+        self, approval_id: str, task_id: str, step_id: str,
+        tool_name: str, arguments: Dict[str, Any], tool_registry: Any = None,
+    ) -> bool:
+        """Consume a valid approval exactly once, before dispatching the action.
+
+        The atomic transition means interrupted/failed executions need a new
+        approval; an action is never retried using an already-consumed approval.
+        """
+        if not self.verify_approval_for_execution(
+            approval_id, task_id, step_id, tool_name, arguments, tool_registry,
+        ):
+            return False
+        return self._store.consume_approved_approval(approval_id)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -435,12 +450,12 @@ class ApprovalManager:
     def _is_expired(self, approval: ApprovalRequest) -> bool:
         """Check if an approval has expired."""
         if not approval.expires_at:
-            return False
+            return True
         try:
             expires = datetime.fromisoformat(approval.expires_at)
             return datetime.now(timezone.utc) > expires
         except (ValueError, TypeError):
-            return False
+            return True
 
     def _expire(self, approval: ApprovalRequest) -> None:
         """Mark an approval as expired."""

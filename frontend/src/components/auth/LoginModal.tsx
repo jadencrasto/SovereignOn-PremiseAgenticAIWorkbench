@@ -84,7 +84,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
         <div className="p-6">
           {error && (
-            <div className="mb-4 p-3 bg-red-950/50 border border-red-800/60 rounded-lg text-red-200 text-xs flex items-center gap-2">
+            <div role="alert" className="mb-4 p-3 bg-red-950/50 border border-red-800/60 rounded-lg text-red-200 text-xs flex items-center gap-2">
               <span className="font-bold">Error:</span> {error}
             </div>
           )}
@@ -208,9 +208,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
                 </button>
                 <button
                   onClick={async () => {
-                    await logout();
-                    onClose();
+                    setError(null);
+                    setIsSubmitting(true);
+                    try {
+                      await logout();
+                      onClose();
+                    } catch {
+                      setError('Sign out could not be confirmed. The server session may still be active.');
+                    } finally {
+                      setIsSubmitting(false);
+                    }
                   }}
+                  disabled={isSubmitting}
                   className="py-2 px-4 bg-red-950/40 hover:bg-red-900/60 border border-red-800/40 text-red-300 text-sm font-medium rounded-lg transition"
                 >
                   Sign Out

@@ -394,6 +394,10 @@ async def get_knowledge_graph(
 
     # --- Delegate to KnowledgeGraphService if available ---
     graph_service = getattr(request.app.state, "graph_service", None)
+    from backend.security.provenance_foundation import document_content_allowed
+    if graph_service is not None and not document_content_allowed():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail='Knowledge graph content is temporarily unavailable.')
     service_error: Optional[Exception] = None
     if graph_service is not None:
         try:
@@ -437,7 +441,7 @@ async def get_knowledge_graph(
     if not allow_legacy:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Knowledge graph service unavailable: {service_error}",
+            detail="Knowledge graph service is temporarily unavailable.",
         )
     # 1. Base Nodes filtering
     filtered_nodes: List[Dict[str, Any]] = []
@@ -463,7 +467,7 @@ async def get_knowledge_graph(
     # 2. Dynamic Ingested Documents from Local Document Service
     dynamic_doc_edges: List[Dict[str, Any]] = []
     try:
-        if hasattr(request.app.state, "doc_service"):
+        if document_content_allowed() and hasattr(request.app.state, "doc_service"):
             indexed_docs = request.app.state.doc_service.list_documents(user_clearance=effective_role)
             for doc in indexed_docs:
                 doc_node_id = f"DOC_{doc.document_id[:8]}"

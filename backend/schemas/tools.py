@@ -21,6 +21,8 @@ class ToolInfoResponse(BaseModel):
     requires_approval: bool = False        # Phase 6
     risk_level: str = "low"               # Phase 6
     enabled: bool
+    availability: str = 'unknown'
+    availability_reason: Optional[str] = None
 
 
 class ToolsListResponse(BaseModel):

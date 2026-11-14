@@ -42,6 +42,9 @@ class ToolDefinition:
     requires_approval: bool = False         # Phase 6: planning approval gate
     risk_level: str = "low"                 # Phase 6: "low" | "medium" | "high"
     enabled: bool = True
+    # Opt-in server-owned contract for values used by later read-only steps.
+    result_schema: Optional[Type[BaseModel]] = None
+    result_verifier: Optional[Callable[[Dict[str, Any], Dict[str, Any]], bool]] = None
 
 
 @dataclass
@@ -71,6 +74,32 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: Dict[str, ToolDefinition] = {}
+        self._registration_versions: Dict[str, int] = {}
+        self._approval_manager = None
+
+    def registration_token(self, name: str):
+        """Return process-local evidence of the current execution contract.
+
+        This detects replacement and ordinary in-place metadata/schema changes;
+        it is not a cross-process lock or a durable authorization receipt.
+        """
+        tool = self._tools.get(name)
+        if tool is None:
+            return None
+        try:
+            schemas = tuple(json.dumps(s.model_json_schema(), sort_keys=True)
+                            if s is not None else None
+                            for s in (tool.input_schema, tool.result_schema))
+            return (self._registration_versions.get(name, 0), id(tool), tool.name,
+                    id(tool.execute_fn), id(tool.input_schema), id(tool.result_schema),
+                    id(tool.result_verifier), tool.category, tool.read_only,
+                    tool.requires_confirmation, tool.requires_approval, tool.risk_level,
+                    tool.enabled, schemas)
+        except Exception:
+            return None
+
+    def set_approval_manager(self, manager: Any) -> None:
+        self._approval_manager = manager
 
     # ------------------------------------------------------------------
     # Registration
@@ -78,7 +107,15 @@ class ToolRegistry:
 
     def register(self, tool: ToolDefinition) -> None:
         """Register a tool definition. Overwrites if name already exists."""
+        from backend.security.execution_policy import code_execution_allowed
+        if tool.name == 'calculator':
+            from backend.tools.calculator import CalculatorOutput, verify_calculator_output
+            tool.result_schema = CalculatorOutput
+            tool.result_verifier = verify_calculator_output
+        if tool.name == 'code_execution' and not code_execution_allowed():
+            tool.enabled = False
         self._tools[tool.name] = tool
+        self._registration_versions[tool.name] = self._registration_versions.get(tool.name, 0) + 1
         logger.info(
             "ToolRegistry: registered '%s' [category=%s, read_only=%s, enabled=%s]",
             tool.name, tool.category, tool.read_only, tool.enabled,
@@ -89,14 +126,19 @@ class ToolRegistry:
         t = self._tools.get(name)
         if t:
             t.enabled = False
+            self._registration_versions[name] = self._registration_versions.get(name, 0) + 1
             return True
         return False
 
     def enable(self, name: str) -> bool:
         """Enable a tool by name. Returns True if found."""
+        from backend.security.execution_policy import code_execution_allowed
+        if name == 'code_execution' and not code_execution_allowed():
+            return False
         t = self._tools.get(name)
         if t:
             t.enabled = True
+            self._registration_versions[name] = self._registration_versions.get(name, 0) + 1
             return True
         return False
 
@@ -104,6 +146,8 @@ class ToolRegistry:
         """Remove a tool. Returns True if it existed."""
         existed = name in self._tools
         self._tools.pop(name, None)
+        if existed:
+            self._registration_versions[name] = self._registration_versions.get(name, 0) + 1
         return existed
 
     # ------------------------------------------------------------------
@@ -138,6 +182,9 @@ class ToolRegistry:
         task_id: Optional[str] = None,
         step_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        approval_id: Optional[str] = None,
+        tools_enabled: bool = True,
+        expected_registration: Any = None,
     ) -> ToolResult:
         """
         Validate arguments, enforce RBAC permissions, and execute a tool.
@@ -157,6 +204,17 @@ class ToolRegistry:
         """
         t0 = time.monotonic()
 
+        if expected_registration is not None and self.registration_token(name) != expected_registration:
+            return ToolResult(tool=name, success=False, error="Tool registration changed; the plan must be revalidated.")
+
+        from backend.security.execution_policy import code_execution_allowed, EXECUTION_DISABLED_MESSAGE, ARTIFACT_WRITE_TOOLS
+        if name == 'code_execution' and not code_execution_allowed():
+            return ToolResult(tool=name, success=False, error=EXECUTION_DISABLED_MESSAGE)
+
+        from backend.auth.request_context import request_tools_enabled
+        if not tools_enabled or request_tools_enabled.get() is False:
+            return ToolResult(tool=name, success=False, error="Tools are disabled for this request.")
+
         # --- Check existence ---
         tool = self._tools.get(name)
         if tool is None:
@@ -171,6 +229,42 @@ class ToolRegistry:
                 tool=name, success=False,
                 error=f"Tool '{name}' is currently disabled.",
             )
+
+        if name in ('file_read', 'file_list', 'document_search'):
+            from backend.security.provenance_foundation import document_content_allowed
+            if not document_content_allowed():
+                return ToolResult(tool=name, success=False, error='Document retrieval is unavailable.' if name == 'document_search' else 'Workspace document content unavailable.')
+
+        # This tool reads artifact contents (including previews), so it must
+        # share the fail-closed boundary used by artifact download endpoints.
+        if name == 'artifact_verifier':
+            from backend.security.task_access import TASK_CONTENT_WITHHELD, task_content_revalidation_available
+            if not task_content_revalidation_available():
+                return ToolResult(tool=name, success=False, error=TASK_CONTENT_WITHHELD)
+
+        if name in ('file_write', 'docx_create', 'xlsx_report'):
+            from backend.auth.request_context import effective_owner
+            if not self._task_store or not user_id or effective_owner.get() != str(user_id):
+                return ToolResult(tool=name, success=False, error='Artifact ownership cannot be verified.')
+
+        # Approval is enforced at dispatch, including for direct or multimodal calls.
+        if tool.requires_approval:
+            if not (self._approval_manager and approval_id and task_id and step_id):
+                return ToolResult(tool=name, success=False, error="A verified task approval is required.")
+            try:
+                approved = self._approval_manager.verify_approval_for_execution(
+                    approval_id=approval_id, task_id=task_id, step_id=step_id,
+                    tool_name=name, arguments=arguments, tool_registry=self,
+                )
+            except Exception:
+                logger.exception("Approval verification failed for tool %s", name)
+                approved = False
+            if not approved:
+                return ToolResult(tool=name, success=False, error="Task approval verification failed.")
+
+        # Callers must provide the server-resolved role; absence is not authority.
+        if user_role is None:
+            return ToolResult(tool=name, success=False, error="Permission denied: authenticated role is required.")
 
         # --- Enforce RBAC (Phase 7 & Phase B) ---
         if user_role is not None:
@@ -324,7 +418,38 @@ class ToolRegistry:
                 error=f"Argument validation error for '{name}': {exc}",
             )
 
+        # These generators return a path and a self-reported digest, not the
+        # independently verified execution-bound evidence needed for success.
+        # The isolated verifier has no trusted task/approval/storage boundary.
+        # Do not invoke a generator or consume an approval until that boundary
+        # exists; in particular, a returned filename is not a receipt.
+        if name in ARTIFACT_WRITE_TOOLS:
+            from backend.security.execution_policy import require_protected_storage_writer
+            try:
+                require_protected_storage_writer()
+            except Exception:
+                pass
+            # Independent artifact execution/provenance controls remain absent
+            # even if a storage provider is added in the future.
+            return ToolResult(tool=name, success=False,
+                              error='Verified artifact generation is unavailable.')
+
+        # Consume only after authorization and validation, and before side effects.
+        if tool.requires_approval:
+            try:
+                consumed = self._approval_manager.consume_approval_for_execution(
+                    approval_id=approval_id, task_id=task_id, step_id=step_id,
+                    tool_name=name, arguments=arguments, tool_registry=self,
+                )
+            except Exception:
+                logger.exception("Approval consumption failed for tool %s", name)
+                consumed = False
+            if not consumed:
+                return ToolResult(tool=name, success=False, error="Approval is expired, invalid or already used.")
+
         # --- Execute ---
+        if expected_registration is not None and self.registration_token(name) != expected_registration:
+            return ToolResult(tool=name, success=False, error="Tool registration changed; the plan must be revalidated.")
         try:
             import inspect
             sig = inspect.signature(tool.execute_fn)
@@ -371,9 +496,13 @@ class ToolRegistry:
                             user_id=user_id,
                             user_role=user_role,
                             size_bytes=size_bytes,
+                            artifact_id=res_dict.get('artifact_id'),
+                            display_name=res_dict.get('display_name'),
+                            sha256_hash=res_dict.get('sha256_hash'),
                         )
                     except Exception as exc:
-                        logger.warning("Failed to record artifact ownership in store: %s", exc)
+                        logger.error("Artifact ownership registration failed")
+                        raise RuntimeError('Artifact registration failed') from exc
 
             self._audit_log(
                 session_id=session_id,
@@ -396,6 +525,8 @@ class ToolRegistry:
         except Exception as exc:
             duration = (time.monotonic() - t0) * 1000
             error_msg = str(exc)
+            if name in ('file_write', 'docx_create', 'xlsx_report') and error_msg != 'Artifact registration failed':
+                error_msg = 'Artifact operation failed'
 
             self._audit_log(
                 session_id=session_id,

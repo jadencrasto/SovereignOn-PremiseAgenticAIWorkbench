@@ -28,10 +28,13 @@ New SSE events emitted during multimodal:
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 import logging
+import math
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
@@ -52,7 +55,7 @@ _DocumentService = None
 # Known local tools
 _KNOWN_TOOL_NAMES = {
     "file_read", "file_list", "file_write", "document_search",
-    "code_execution", "calculator", "docx_create", "xlsx_report",
+    "code_execution", "calculator", "unit_conversion", "docx_create", "xlsx_report",
     "artifact_verifier", "knowledge_graph", "hardware_status",
     "model_scan", "security_diagnostics",
 }
@@ -66,6 +69,23 @@ _TOOL_CALL_PATTERN = re.compile(
 _FUNC_CALL_PATTERN = re.compile(
     r"\b(" + "|".join(_KNOWN_TOOL_NAMES) + r")\s*\(([\s\S]*?)\)",
 )
+
+
+def _strict_tool_json(raw: str) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate tool field')
+            result[key] = value
+        return result
+    def reject_constant(_value):
+        raise ValueError('Non-finite tool value')
+    value = json.loads(raw, object_pairs_hook=unique, parse_constant=reject_constant)
+    if (not isinstance(value, dict) or set(value) - {'name', 'arguments'} or
+            not isinstance(value.get('name'), str) or not isinstance(value.get('arguments', {}), dict)):
+        raise ValueError('Invalid tool request')
+    return value
 
 
 class AgentEngine:
@@ -115,15 +135,74 @@ class AgentEngine:
         self._tool_registry = registry
         logger.info("AgentEngine: ToolRegistry wired — Tools enabled")
 
+    async def _dispatch_tool(self, name, arguments, **kwargs):
+        """Enforce execution policy before any normal, planned or resumed dispatch."""
+        from backend.security.execution_policy import code_execution_allowed, EXECUTION_DISABLED_MESSAGE
+        from backend.tools.registry import ToolResult
+        from backend.auth.request_context import dispatch_identity_resolver, effective_owner, effective_clearance
+        from backend.auth.models import UserRole, resolve_user_clearance
+        if name == 'code_execution' and not code_execution_allowed():
+            return ToolResult(tool=name, success=False, error=EXECUTION_DISABLED_MESSAGE)
+        try:
+            resolver = dispatch_identity_resolver.get()
+            user = resolver() if resolver else None
+            uid = kwargs.get('user_id')
+            session_id = kwargs.get('session_id')
+            if (not user or not user.is_active or not uid or str(user.id) != str(uid)
+                    or effective_owner.get() != str(uid) or not session_id):
+                raise PermissionError
+            UserRole(user.role)  # Unknown roles fail closed, including in dev.
+            identity = self._memory.stream_identity(session_id)
+            if not identity or identity[0] != str(uid) or not identity[1]:
+                raise PermissionError
+            if kwargs.get('task_id'):
+                task = self._task_manager.get_task(kwargs['task_id'])
+                if not task or task.user_id != str(uid) or task.session_id != session_id:
+                    raise PermissionError
+            clearance = resolve_user_clearance(user)
+        except Exception:
+            return ToolResult(tool=name, success=False, error='Authorization is no longer available for this operation.')
+        # The fresh account decision is the process-local observation point;
+        # registry policy and approval are still independently enforced below.
+        kwargs['user_role'] = user.role
+        clearance_token = effective_clearance.set(clearance)
+        try:
+            return await self._tool_registry.execute(name, arguments, **kwargs)
+        finally:
+            effective_clearance.reset(clearance_token)
+
     # ------------------------------------------------------------------
     # Public API — Original (backward compatible, Phase 1–3)
     # ------------------------------------------------------------------
+
+    def _verify_registered_tool_result(self, name, arguments, result):
+        """Validate opted-in tool output without granting authorization."""
+        from backend.tools.registry import ToolResult
+        # Neither a generator's success payload nor its claimed digest can be
+        # promoted to a task receipt. The isolated verifier is deliberately not
+        # an execution-bound authority; keep these results non-consumable even
+        # if an accidental caller or replacement returns success.
+        if name in {'docx_create', 'xlsx_report', 'file_write', 'artifact_verifier'} and result.success:
+            return ToolResult(tool=name, success=False,
+                              error='Verified artifact execution is unavailable.'), False
+        definition = self._tool_registry.get(name) if self._tool_registry else None
+        if not result.success or not definition or not definition.result_schema or not definition.result_verifier:
+            return result, False
+        try:
+            payload = definition.result_schema.model_validate(result.result, strict=True).model_dump()
+            if definition.result_verifier(arguments, payload) is not True:
+                raise ValueError('Result verification failed')
+            result.result = payload
+            return result, bool(definition.read_only and not definition.requires_approval)
+        except Exception:
+            return ToolResult(tool=name, success=False, error='Tool result verification failed'), False
 
     async def chat(
         self,
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
+        user_clearance: str = "viewer",
     ) -> Tuple[str, List]:
         """
         Non-streaming chat.
@@ -139,11 +218,12 @@ class AgentEngine:
         provider, model_name = self._router.get_provider_for_model(model_id)
 
         # RAG: retrieve relevant chunks
-        sources = await self._retrieve_context(user_message)
+        sources = await self._retrieve_context(user_message, user_clearance=user_clearance)
 
         # Build messages for this turn (history + optional RAG context)
         messages = self._build_messages(session_id, user_message, sources)
 
+        independent = self._independent_plain_input(session_id, messages, sources)
         request = ChatRequest(
             messages=messages,
             model=model_name,
@@ -153,8 +233,12 @@ class AgentEngine:
         )
 
         response = await provider.chat(request)
+        if "<tool_call" in response.content.lower() or "</tool_call" in response.content.lower():
+            raise RuntimeError("Invalid model response")
 
-        self._memory.add_assistant_message(session_id, response.content)
+        from backend.security.conversation_access import source_provenance
+        provenance = self._plain_response_provenance(session_id, response.content, sources, independent)
+        self._memory.add_assistant_message(session_id, response.content, access_provenance=provenance)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -169,6 +253,7 @@ class AgentEngine:
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
+        user_clearance: str = "viewer",
     ) -> AsyncIterator:
         """
         Streaming chat (no tools).
@@ -184,11 +269,12 @@ class AgentEngine:
         provider, model_name = self._router.get_provider_for_model(model_id)
 
         # RAG: retrieve relevant chunks
-        sources = await self._retrieve_context(user_message)
+        sources = await self._retrieve_context(user_message, user_clearance=user_clearance)
 
         # Build messages for this turn
         messages = self._build_messages(session_id, user_message, sources)
 
+        independent = self._independent_plain_input(session_id, messages, sources)
         request = ChatRequest(
             messages=messages,
             model=model_name,
@@ -203,15 +289,31 @@ class AgentEngine:
         )
 
         accumulated = []
-        async for chunk in provider.chat_stream(request):
-            if chunk.delta:
-                accumulated.append(chunk.delta)
-                yield chunk.delta
-            if chunk.done:
-                break
+        completed = False
+        pending = ""
+        async with aclosing(provider.chat_stream(request)) as provider_stream:
+            async for chunk in provider_stream:
+                if chunk.delta:
+                    accumulated.append(chunk.delta)
+                    pending += chunk.delta
+                    if "<tool_call" in pending.lower() or "</tool_call" in pending.lower():
+                        raise RuntimeError("Invalid model response")
+                    # Retain enough characters to detect a tag split across deltas.
+                    if len(pending) > 11:
+                        yield pending[:-11]
+                        pending = pending[-11:]
+                if chunk.done:
+                    completed = True
+                    break
+        if not completed or not "".join(accumulated).strip():
+            raise RuntimeError("Model response interrupted")
+        if pending:
+            yield pending
 
         full_response = "".join(accumulated)
-        self._memory.add_assistant_message(session_id, full_response)
+        from backend.security.conversation_access import source_provenance
+        provenance = self._plain_response_provenance(session_id, full_response, sources, independent)
+        self._memory.add_assistant_message(session_id, full_response, access_provenance=provenance)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -283,6 +385,7 @@ class AgentEngine:
         working_messages = list(base_messages)
         iteration = 0
         final_text_parts = []
+        history_tool_events = []
         last_executed_tool = None  # (tool_name, result)
 
         # Duplicate failed-tool protection: track (tool_name, normalized_args) that already failed
@@ -290,7 +393,7 @@ class AgentEngine:
 
         # One-shot tools that should trigger final-answer-only mode after execution
         _ONE_SHOT_TOOLS = {
-            "calculator", "file_list", "file_read", "document_search",
+            "calculator", "unit_conversion", "file_list", "file_read", "document_search",
             "code_execution", "hardware_status", "model_scan", "security_diagnostics",
         }
         _is_explicit_python = any(p in user_message.lower() for p in ("using python", "in python", "with python", "use python to", "run python", "execute python"))
@@ -306,14 +409,18 @@ class AgentEngine:
                 stream=True,
             )
 
-            # Stream the LLM response and accumulate
+            # Require a terminal marker and close the provider on interruption.
             accumulated = []
-            async for chunk in provider.chat_stream(request):
-                if chunk.delta:
-                    accumulated.append(chunk.delta)
-                if chunk.done:
-                    break
-
+            completed = False
+            async with aclosing(provider.chat_stream(request)) as provider_stream:
+                async for chunk in provider_stream:
+                    if chunk.delta:
+                        accumulated.append(chunk.delta)
+                    if chunk.done:
+                        completed = True
+                        break
+            if not completed:
+                raise RuntimeError('Model response interrupted')
             full_response = "".join(accumulated)
 
             # Check for tool calls
@@ -329,6 +436,9 @@ class AgentEngine:
                         "arguments": {"code": py_match.group(1).strip()}
                     }
 
+            if tool_call is None and ('<tool_call' in full_response.lower() or '</tool_call' in full_response.lower()):
+                yield 'The model returned an invalid tool request. Please try again.'
+                return
             if tool_call is None:
                 # No tool call — this is the final answer
                 # Sanitize: strip leaked tool markup, JSON, FSM state, unrequested Mermaid/Python
@@ -342,6 +452,11 @@ class AgentEngine:
 
                 if not sanitized or sanitized.strip().lower() in ("undefined", "null", "none"):
                     sanitized = full_response
+
+                if (last_executed_tool is None and re.search(
+                        r'\b(?:i|we)\s+(?:ran|executed|used)\s+(?:the\s+|a\s+)?(?:calculator|tool|script|code)\b',
+                        sanitized, re.IGNORECASE)):
+                    sanitized = 'No tool execution was recorded for this response.\n\n' + sanitized
 
                 if last_executed_tool and last_executed_tool[0] == "code_execution":
                     c_step_res = {
@@ -404,8 +519,9 @@ class AgentEngine:
 
                 # Execute the tool with user_role authorization check
                 if self._tool_registry:
-                    result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
+                    result = await self._dispatch_tool(
+                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id,
+                        tools_enabled=True,
                     )
                 else:
                     from backend.tools.registry import ToolResult
@@ -414,7 +530,13 @@ class AgentEngine:
                         error="Tool system is not initialized.",
                     )
 
+                result, evidence_verified = self._verify_registered_tool_result(tool_name, tool_args, result)
                 last_executed_tool = (tool_name, result)
+                if len(history_tool_events) < 32:
+                    history_tool_events.append({
+                        'tool': tool_name, 'success': bool(result.success),
+                        'invocation_id': str(uuid.uuid4()),
+                    })
 
                 # Yield tool_result event
                 result_summary = self._format_tool_result_summary(result)
@@ -425,9 +547,20 @@ class AgentEngine:
                     "summary": result_summary,
                 }
 
-                # Track failed calls for duplicate protection
+                # Never turn a failed tool call into a model-authored success.
                 if not result.success:
-                    failed_tool_calls.add(call_key)
+                    failure_msg = (result.error if result.error in {'Document retrieval is unavailable.', 'Workspace document content unavailable.', 'Tool result verification failed'}
+                                   else 'The requested tool operation could not be completed.')
+                    yield failure_msg
+                    final_text_parts.append(failure_msg)
+                    tool_call = None
+                    break
+                if evidence_verified and tool_name in {'calculator', 'unit_conversion'}:
+                    answer = self._format_tool_result_summary(result)
+                    yield answer
+                    final_text_parts.append(answer)
+                    tool_call = None
+                    break
 
                 # Build observation message for the model
                 observation = self._format_observation(tool_name, result)
@@ -473,7 +606,7 @@ class AgentEngine:
         # Store the final response in memory
         full_final = "".join(final_text_parts)
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -522,6 +655,8 @@ class AgentEngine:
         model_id: Optional[str] = None,
         user_role: Optional[str] = None,
         user_id: Optional[str] = None,
+        tools_enabled: bool = True,
+        attachment_descriptor: Optional[dict] = None,
     ) -> AsyncIterator:
         """
         Two-step multimodal streaming with agentic tool loop.
@@ -543,7 +678,7 @@ class AgentEngine:
         t0 = time.monotonic()
 
         self._ensure_session(session_id)
-        self._memory.add_user_message(session_id, user_message)
+        self._memory.add_user_message(session_id, user_message, attachment=attachment_descriptor)
 
         # ---- Step 1: Vision analysis via LLaVA ----
         yield {"type": "agent_status", "status": "analyzing_image"}
@@ -559,9 +694,7 @@ class AgentEngine:
         except Exception as exc:
             logger.error("Failed to resolve vision model '%s': %s", vision_model_id, exc)
             yield {"type": "agent_status", "status": "vision_error"}
-            yield f"Vision execution failed: Could not resolve or reach configured vision model '{vision_model_id}'. Error: {str(exc)}"
-            yield []  # empty sources sentinel
-            return
+            raise RuntimeError("Vision analysis is temporarily unavailable.")
 
         yield {
             "type": "tool_start",
@@ -588,12 +721,10 @@ class AgentEngine:
                 "type": "tool_result",
                 "tool": "vision_analysis",
                 "success": False,
-                "summary": f"Vision error: {str(exc)[:100]}",
+                "summary": "Vision analysis unavailable",
             }
             yield {"type": "agent_status", "status": "vision_error"}
-            yield f"Vision model error: {str(exc)[:200]}. Cannot perform image analysis without vision capability."
-            yield []  # empty sources sentinel
-            return
+            raise RuntimeError("Vision analysis is temporarily unavailable.")
 
         logger.info(
             "vision_complete | session=%s observation_len=%d",
@@ -604,14 +735,14 @@ class AgentEngine:
             "type": "tool_result",
             "tool": "vision_analysis",
             "success": True,
-            "summary": f"Visual observation: {visual_observation.strip()[:100]}...",
+            "summary": "Model-generated visual interpretation received; not a verified measurement.",
         }
 
         # ---- Step 2: Inject observation into reasoning tool loop ----
         yield {"type": "agent_status", "status": "reasoning"}
 
         # Build the visual context injection
-        visual_context = build_visual_context_message(visual_observation, user_message)
+        visual_context = build_visual_context_message(visual_observation, user_message, vision_model_name)
 
         # Use chat/reasoning model for tool loop (not vision model)
         try:
@@ -629,7 +760,7 @@ class AgentEngine:
         base_messages = self._build_messages(session_id, user_message, sources)
 
         # Inject tool definitions
-        if self._tool_registry:
+        if tools_enabled and self._tool_registry:
             tool_prompt = self._tool_registry.format_tools_for_prompt()
             if tool_prompt:
                 tool_msg = Message(role="system", content=tool_prompt)
@@ -655,6 +786,7 @@ class AgentEngine:
         working_messages = list(base_messages)
         iteration = 0
         final_text_parts = []
+        history_tool_events = []
         tool_call = None
 
         while iteration < self._max_tool_iterations:
@@ -669,14 +801,21 @@ class AgentEngine:
             )
 
             accumulated = []
-            async for chunk in provider.chat_stream(request):
-                if chunk.delta:
-                    accumulated.append(chunk.delta)
-                if chunk.done:
-                    break
-
+            completed = False
+            async with aclosing(provider.chat_stream(request)) as provider_stream:
+                async for chunk in provider_stream:
+                    if chunk.delta:
+                        accumulated.append(chunk.delta)
+                    if chunk.done:
+                        completed = True
+                        break
+            if not completed:
+                raise RuntimeError('Model response interrupted')
             full_response = "".join(accumulated)
             tool_call = self._parse_tool_call(full_response)
+            if tool_call is None and ('<tool_call' in full_response.lower() or '</tool_call' in full_response.lower()):
+                yield 'The model returned an invalid tool request. Please try again.'
+                return
 
             if tool_call is None:
                 # Final answer — verify visual grounding before streaming and storing
@@ -692,28 +831,28 @@ class AgentEngine:
                 tool_name = tool_call.get("name", "")
                 tool_args = tool_call.get("arguments", {})
 
-                pre_tool_text = self._extract_pre_tool_text(full_response)
-                if pre_tool_text.strip():
-                    yield pre_tool_text
-                    final_text_parts.append(pre_tool_text)
-
                 yield {
                     "type": "tool_start",
                     "tool": tool_name,
                     "arguments": self._sanitize_args_for_display(tool_args),
                 }
 
-                if self._tool_registry:
-                    result = await self._tool_registry.execute(
-                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id
+                if tools_enabled and self._tool_registry:
+                    result = await self._dispatch_tool(
+                        tool_name, tool_args, session_id=session_id, user_role=user_role, user_id=user_id,
+                        tools_enabled=tools_enabled,
                     )
                 else:
                     from backend.tools.registry import ToolResult
                     result = ToolResult(
                         tool=tool_name, success=False,
-                        error="Tool system is not initialized.",
+                        error="Tools are disabled or the tool system is not initialized.",
                     )
 
+                result, evidence_verified = self._verify_registered_tool_result(tool_name, tool_args, result)
+                if len(history_tool_events) < 32:
+                    history_tool_events.append({'tool': tool_name, 'success': bool(result.success),
+                                                'invocation_id': str(uuid.uuid4())})
                 result_summary = self._format_tool_result_summary(result)
                 yield {
                     "type": "tool_result",
@@ -722,6 +861,13 @@ class AgentEngine:
                     "summary": result_summary,
                 }
 
+                if not result.success:
+                    yield 'The requested tool operation could not be completed.'
+                    return
+                if evidence_verified and tool_name in {'calculator', 'unit_conversion'}:
+                    yield result_summary
+                    final_text_parts.append(result_summary)
+                    break
                 observation = self._format_observation(tool_name, result)
                 working_messages.append(Message(role="assistant", content=full_response))
                 working_messages.append(Message(role="user", content=observation))
@@ -744,7 +890,7 @@ class AgentEngine:
         # Store final response in memory
         full_final = "".join(final_text_parts)
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -759,13 +905,39 @@ class AgentEngine:
     # Public API — Phase 6: Planned task execution with approval gates
     # ------------------------------------------------------------------
 
-    async def run_agent_task(
+    async def run_agent_task(self, session_id, user_message, model_id=None, user_role=None, user_id=None,
+                             *, numeric_expression=None, prior_numeric_receipt=None):
+        """Close interrupted executions without claiming that side effects were undone."""
+        from backend.agent.task import TaskStatus, TaskStateError
+        task_id = None
+        try:
+            async with aclosing(self._run_agent_task_impl(
+                session_id, user_message, model_id, user_role, user_id,
+                numeric_expression=numeric_expression, prior_numeric_receipt=prior_numeric_receipt,
+            )) as stream:
+                async for event in stream:
+                    if isinstance(event, dict) and event.get('type') == 'task_started':
+                        task_id = event.get('task_id')
+                    yield event
+        finally:
+            if task_id and getattr(self, '_task_manager', None):
+                try:
+                    task = self._task_manager.get_task(task_id)
+                    if task and task.status in (TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.EXECUTING):
+                        self._task_manager.update_status(task_id, TaskStatus.FAILED_INTERRUPTED, error='Execution interrupted; outcomes may require review')
+                except Exception:
+                    logger.exception('Unable to record interrupted task')
+
+    async def _run_agent_task_impl(
         self,
         session_id: str,
         user_message: str,
         model_id: Optional[str] = None,
         user_role: Optional[str] = None,
         user_id: Optional[str] = None,
+        *,
+        numeric_expression: str | None = None,
+        prior_numeric_receipt=None,
     ) -> AsyncIterator:
         """
         Phase 6: Execute a user request via the planning pipeline.
@@ -786,7 +958,8 @@ class AgentEngine:
             list — sources sentinel
         """
         from backend.agent.task import TaskManager, TaskStatus, TaskStateError
-        from backend.agent.planner import AgentPlanner, PlanStatus, StepStatus
+        from backend.agent.planner import AgentPlan, PlanStep, AgentPlanner, PlanStatus, StepStatus
+        from backend.agent.numeric_receipts import NumericReceipt, resolve_numeric_followup
         from backend.agent.plan_validator import PlanValidator
         from backend.agent.approval import ApprovalManager, compute_arguments_hash
 
@@ -794,13 +967,24 @@ class AgentEngine:
 
         # Verify Phase 6 components are wired
         if not hasattr(self, '_task_manager') or self._task_manager is None:
+            if numeric_expression is not None or prior_numeric_receipt is not None:
+                yield {"type": "error"}
+                return
             logger.warning("Phase 6 not initialised — falling back to tool loop")
             async for item in self.chat_stream_with_tools(session_id, user_message, model_id, user_role=user_role):
                 yield item
             return
 
         self._ensure_session(session_id)
-        self._memory.add_user_message(session_id, user_message)
+        user_turn = self._memory.add_user_message(session_id, user_message)
+        origin_identity = self._memory.stream_identity(session_id) if user_id else (None, None)
+
+        def prior_result_is_current():
+            if self._memory.numeric_receipt(session_id, following_message_id=user_turn.id) is not prior_numeric_receipt:
+                return False
+            original = self._task_manager.get_task(prior_numeric_receipt.task_id)
+            return bool(original and original.status == TaskStatus.COMPLETED
+                        and original.session_id == session_id and original.user_id == user_id)
 
         # ---- 1. Create task ----
         task = self._task_manager.create_task(session_id, user_message, user_id=user_id, user_role=user_role)
@@ -811,15 +995,36 @@ class AgentEngine:
         try:
             self._task_manager.update_status(task.task_id, TaskStatus.PLANNING)
 
-            provider, model_name = self._router.get_provider_for_model(model_id)
+            if prior_numeric_receipt is not None or numeric_expression is not None:
+                if prior_numeric_receipt is not None:
+                    if not prior_result_is_current():
+                        raise ValueError("Prior result is unavailable")
+                    tool, arguments = resolve_numeric_followup(user_message, prior_numeric_receipt)
+                else:
+                    tool, arguments = "calculator", {"expression": numeric_expression}
+                plan = AgentPlan(task_id=task.task_id, objective=user_message, steps=[
+                    PlanStep(description="Compute verified numeric result", tool_name=tool, arguments=arguments)
+                ])
+            else:
+                provider, model_name = self._router.get_provider_for_model(model_id)
+                plan = await self._planner.create_plan(
+                    task_id=task.task_id,
+                    objective=user_message,
+                    tool_registry=self._tool_registry,
+                    provider=provider,
+                    model_name=model_name,
+                )
 
-            plan = await self._planner.create_plan(
-                task_id=task.task_id,
-                objective=user_message,
-                tool_registry=self._tool_registry,
-                provider=provider,
-                model_name=model_name,
-            )
+            # The planner's object may still be held by its producer. Execute a
+            # private, recursively detached copy and validate that exact copy.
+            plan = plan.model_copy(deep=True)
+            registrations = {}
+            for planned_step in plan.steps:
+                if planned_step.tool_name:
+                    token = self._tool_registry.registration_token(planned_step.tool_name)
+                    if token is None:
+                        raise ValueError('Tool registration cannot be verified')
+                    registrations[planned_step.tool_name] = token
 
             # ---- 3. Validate plan ----
             errors = self._plan_validator.validate(plan)
@@ -828,13 +1033,16 @@ class AgentEngine:
                 self._task_manager.update_status(
                     task.task_id, TaskStatus.FAILED, error=error_msg
                 )
-                yield {"type": "task_failed", "task_id": task.task_id, "error": error_msg}
-                yield f"I couldn't create a valid execution plan: {error_msg}"
+                yield {"type": "task_failed", "task_id": task.task_id, "error": "Plan validation failed"}
+                yield "I couldn't create a valid execution plan. Please revise your request."
                 yield []  # sources sentinel
                 return
 
             # Enforce approval requirements
             self._plan_validator.enforce_approval_requirements(plan)
+            if any(self._tool_registry.registration_token(name) != token
+                   for name, token in registrations.items()):
+                raise ValueError('Tool registration changed during validation')
 
             # Check if task was cancelled concurrently during planning
             fresh_task = self._task_manager.get_task(task.task_id)
@@ -887,17 +1095,18 @@ class AgentEngine:
                 )
             except TaskStateError:
                 pass
-            yield {"type": "task_failed", "task_id": task.task_id, "error": str(exc)[:200]}
-            yield f"Planning error: {str(exc)[:200]}"
+            yield {"type": "task_failed", "task_id": task.task_id, "error": "Planning unavailable"}
+            yield "Planning is temporarily unavailable."
             yield []  # sources sentinel
             return
 
         # ---- 4. Execute steps ----
-        if self._is_standalone_non_rag_task(user_message):
+        if numeric_expression is not None or prior_numeric_receipt is not None or self._is_standalone_non_rag_task(user_message):
             sources = []
         else:
             sources = await self._retrieve_context(user_message, user_clearance=user_role or "viewer")
         final_text_parts = []
+        history_tool_events = []
         executed_step_results: List[Dict[str, Any]] = []
 
         for step_idx, step in enumerate(plan.steps):
@@ -907,6 +1116,42 @@ class AgentEngine:
                 yield {"type": "task_cancelled", "task_id": task.task_id if task else "unknown"}
                 yield []
                 return
+
+            # Bind only actual, independently checked outputs from completed
+            # earlier read-only steps of this run. Never interpolate model text.
+            if step.bindings:
+                try:
+                    target = self._tool_registry.get(step.tool_name)
+                    if not target or not target.enabled or not target.read_only or target.requires_approval:
+                        raise ValueError('Dependency unavailable')
+                    resolved = dict(step.arguments)
+                    states = {item.id: item.status for item in task.plan.steps} if task.plan else {}
+                    for argument, binding in step.bindings.items():
+                        prior = next((item for item in executed_step_results if item.get('step_id') == binding.step_id), None)
+                        if (argument in resolved or not prior or prior.get('evidence_verified') is not True
+                                or prior.get('success') is not True or states.get(binding.step_id) != StepStatus.completed.value):
+                            raise ValueError('Dependency unavailable')
+                        output = prior.get('result')
+                        if not isinstance(output, dict) or binding.field not in output:
+                            raise ValueError('Dependency unavailable')
+                        value = output[binding.field]
+                        if (type(value) not in (str, int, float, bool) or (isinstance(value, str) and len(value) > 4096)
+                                or (type(value) is int and value.bit_length() > 850)):
+                            raise ValueError('Dependency unavailable')
+                        if isinstance(value, float) and not math.isfinite(value):
+                            raise ValueError('Dependency unavailable')
+                        resolved[argument] = value
+                    target.input_schema.model_validate(resolved)
+                    step.arguments = resolved
+                except Exception:
+                    self._task_manager.update_step_status(task.task_id, step.id, StepStatus.running.value)
+                    self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error='Dependency unavailable')
+                    self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error='Dependency unavailable')
+                    yield {'type': 'plan_step', 'task_id': task.task_id, 'step_id': step.id, 'status': 'failed'}
+                    yield {'type': 'task_failed', 'task_id': task.task_id, 'error': 'Dependency unavailable'}
+                    yield 'A required verified result was unavailable or invalid.'
+                    yield sources
+                    return
 
             # Dynamic resolution for file_write steps before approval/execution
             if step.tool_name == "file_write":
@@ -1233,23 +1478,7 @@ class AgentEngine:
                 step.arguments["expected_content"] = filtered_exp
                 self._task_manager.set_plan(task.task_id, plan)
 
-            # Dynamic resolution for calculator steps
-            elif step.tool_name == "calculator":
-                expr = step.arguments.get("expression", "")
-                if not expr or re.search(r"[a-zA-Z_]", str(expr)) or executed_step_results:
-                    resolved_expr = await self._resolve_calculator_expression(
-                        expression=str(expr),
-                        step_description=step.description,
-                        user_request=task.user_request,
-                        executed_step_results=executed_step_results,
-                        provider=provider,
-                        model_name=model_name,
-                    )
-                    if resolved_expr:
-                        step.arguments["expression"] = resolved_expr
-                        self._task_manager.set_plan(task.task_id, plan)
-                    elif re.search(r"[a-zA-Z_]", str(expr)):
-                        logger.warning("Could not resolve numeric expression for calculator: %s", expr)
+            # Calculator references are resolved deterministically immediately before dispatch.
 
             # Dynamic canonical path resolution for file_read steps
             elif step.tool_name == "file_read":
@@ -1307,11 +1536,16 @@ class AgentEngine:
                 )
 
                 accumulated = []
-                async for chunk in provider.chat_stream(request):
-                    if chunk.delta:
-                        accumulated.append(chunk.delta)
-                    if chunk.done:
-                        break
+                reasoning_complete = False
+                async with aclosing(provider.chat_stream(request)) as reasoning_stream:
+                    async for chunk in reasoning_stream:
+                        if chunk.delta:
+                            accumulated.append(chunk.delta)
+                        if chunk.done:
+                            reasoning_complete = True
+                            break
+                if not reasoning_complete:
+                    raise RuntimeError('Model response interrupted')
 
                 full_response = "".join(accumulated).strip()
                 logger.debug("[DEBUG-PLANNING] Reasoning raw output from model: %s", full_response)
@@ -1415,6 +1649,36 @@ class AgentEngine:
                     yield sources
                     return
 
+            # Calculator dependencies are resolved only from successfully verified
+            # earlier calculator outputs in this execution, never from model text.
+            if step.tool_name == 'calculator' and isinstance(step.arguments.get('expression'), str):
+                expression = step.arguments['expression']
+                def resolve_calculator_reference(match):
+                    prior = next((item for item in executed_step_results
+                                  if item.get('step_id') == match.group(1)
+                                  and item.get('tool') == 'calculator' and item.get('success') is True
+                                  and item.get('evidence_verified') is True), None)
+                    if not prior or not isinstance(prior.get('result'), dict):
+                        raise ValueError('Calculator dependency unavailable')
+                    value = prior['result'].get('result')
+                    if type(value) not in (int, float):
+                        raise ValueError('Calculator dependency unavailable')
+                    return '(' + str(value) + ')'
+                try:
+                    expression = re.sub(r'@([A-Za-z0-9_]+)\.result', resolve_calculator_reference, expression)
+                    if '@' in expression:
+                        raise ValueError('Calculator dependency unavailable')
+                    step.arguments = {**step.arguments, 'expression': expression}
+                except ValueError:
+                    self._task_manager.update_step_status(task.task_id, step.id, StepStatus.running.value)
+                    self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error='Calculator dependency unavailable')
+                    self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error='Calculator dependency unavailable')
+                    yield {'type': 'plan_step', 'task_id': task.task_id, 'step_id': step.id, 'status': 'failed'}
+                    yield {'type': 'task_failed', 'task_id': task.task_id, 'error': 'Calculator dependency unavailable'}
+                    yield 'Calculation stopped because a required result was unavailable.'
+                    yield sources
+                    return
+
             # ---- Tool step (Approval gate check) ----
             if step.requires_approval:
                 self._task_manager.update_step_status(
@@ -1469,12 +1733,22 @@ class AgentEngine:
                 "arguments": self._sanitize_args_for_display(step.arguments),
             }
 
-            if self._tool_registry:
+            current_task = self._task_manager.get_task(task.task_id)
+            if current_task is None or current_task.status == TaskStatus.CANCELLED:
+                yield {'type': 'task_cancelled', 'task_id': task.task_id}
+                yield sources
+                return
+
+            if prior_numeric_receipt is not None and not prior_result_is_current():
+                from backend.tools.registry import ToolResult
+                result = ToolResult(tool=step.tool_name, success=False, error="Prior result is unavailable")
+            elif self._tool_registry:
                 effective_uid = user_id or getattr(task, "user_id", None)
-                result = await self._tool_registry.execute(
+                result = await self._dispatch_tool(
                     step.tool_name, step.arguments, session_id=session_id, user_role=user_role,
                     user_id=effective_uid,
                     task_id=task.task_id, step_id=step.id,
+                    expected_registration=registrations[step.tool_name],
                 )
             else:
                 from backend.tools.registry import ToolResult
@@ -1483,6 +1757,19 @@ class AgentEngine:
                     error="Tool system is not initialized.",
                 )
 
+            if self._tool_registry and self._tool_registry.registration_token(step.tool_name) != registrations[step.tool_name]:
+                from backend.tools.registry import ToolResult
+                result = ToolResult(tool=step.tool_name, success=False, error='Tool registration changed during execution; outcome cannot be verified.')
+            result, evidence_verified = self._verify_registered_tool_result(step.tool_name, step.arguments, result)
+            invocation_id = str(uuid.uuid4())
+            if len(history_tool_events) < 32:
+                history_tool_events.append({'tool': step.tool_name, 'success': bool(result.success),
+                                            'invocation_id': invocation_id})
+            fresh_task = self._task_manager.get_task(task.task_id)
+            if fresh_task is None or fresh_task.status == TaskStatus.CANCELLED:
+                yield {'type': 'task_cancelled', 'task_id': task.task_id}
+                yield sources
+                return
             result_summary = self._format_tool_result_summary(result)
             yield {
                 "type": "tool_result",
@@ -1568,7 +1855,12 @@ class AgentEngine:
                     "task_id": task.task_id,
                     "error": fail_reason,
                 }
-                yield f"\n\n**Task Failed:** {fail_reason}"
+                public_reason = result.error if result.error in {
+                    'Document retrieval is unavailable.', 'Workspace document content unavailable.',
+                    'Calculator result verification failed', 'Tool result verification failed',
+                    'Verified artifact generation is unavailable.', 'Verified artifact execution is unavailable.',
+                } else 'A required tool operation did not complete.'
+                yield f"\n\n**Task failed:** {public_reason}"
                 yield sources
                 return
 
@@ -1578,6 +1870,8 @@ class AgentEngine:
                 "description": step.description,
                 "arguments": step.arguments,
                 "success": result.success,
+                "evidence_verified": evidence_verified,
+                "invocation_id": invocation_id,
                 "error": str(result.error) if not result.success else None,
                 "result": result.result if result.success else None,
                 "summary": result_summary,
@@ -1590,8 +1884,17 @@ class AgentEngine:
                 "status": "completed" if result.success else "failed",
             }
 
-        # ---- All steps complete ----
-        failed_steps = [s for s in plan.steps if s.status == StepStatus.failed.value]
+        # Read authoritative persisted step states before reporting completion.
+        current_task = self._task_manager.get_task(task.task_id)
+        if current_task is None or current_task.status == TaskStatus.CANCELLED:
+            yield {'type': 'task_cancelled', 'task_id': task.task_id}
+            yield sources
+            return
+        if current_task.plan is None:
+            raise RuntimeError('Task plan unavailable')
+        plan = current_task.plan
+        failed_steps = [s for s in plan.steps if s.status != StepStatus.completed.value]
+        synthesized_completion = None
         if not failed_steps:
             has_code_and_reasoning = any(s.tool_name == "code_execution" for s in plan.steps) and any(p.strip() for p in final_text_parts)
             has_completion = any("### Execution Plan Completed" in p for p in final_text_parts)
@@ -1601,12 +1904,8 @@ class AgentEngine:
                     executed_step_results=executed_step_results,
                 )
                 final_text_parts.append(synthesized_completion)
-                yield synthesized_completion
 
         full_final = "\n".join(final_text_parts) if final_text_parts else ""
-        if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
-
         # Check if task was cancelled concurrently before transitioning
         fresh_task = self._task_manager.get_task(task.task_id)
         if fresh_task and fresh_task.status == TaskStatus.CANCELLED:
@@ -1619,7 +1918,7 @@ class AgentEngine:
             return
 
         # Evaluate if any required steps failed
-        failed_steps = [s for s in plan.steps if s.status == StepStatus.failed.value]
+        failed_steps = [s for s in plan.steps if s.status != StepStatus.completed.value]
         completed_steps = [s for s in plan.steps if s.status == StepStatus.completed.value]
 
         if failed_steps:
@@ -1658,6 +1957,32 @@ class AgentEngine:
                     yield sources
                     return
                 raise
+            assistant_turn = None
+            if full_final:
+                assistant_turn = self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
+            if synthesized_completion:
+                yield synthesized_completion
+            if (assistant_turn and assistant_turn.id and user_turn.id and user_id
+                    and origin_identity[0] == user_id and origin_identity[1]
+                    and (numeric_expression is not None or prior_numeric_receipt is not None)
+                    and not sources and len(plan.steps) == len(executed_step_results) == 1):
+                evidence = executed_step_results[0]
+                from backend.tools.calculator import verify_calculator_output
+                from backend.tools.unit_conversion import verify_unit_conversion
+                from math import isfinite
+                verifier = {"calculator": verify_calculator_output,
+                            "unit_conversion": verify_unit_conversion}.get(evidence["tool"])
+                output = evidence["result"]
+                if (evidence["evidence_verified"] and verifier and isinstance(output, dict)
+                        and verifier(evidence["arguments"], output)):
+                    value = output["result"]
+                    if (type(value) is int and abs(value) < 10**100
+                            or type(value) is float and isfinite(value)):
+                        self._memory.remember_numeric_receipt(session_id, NumericReceipt(
+                            owner=user_id, generation=origin_identity[1], task_id=task.task_id,
+                            invocation_id=evidence["invocation_id"], message_id=assistant_turn.id,
+                            value=value, unit=output.get("to_unit"), expires_at=time.monotonic() + 900,
+                        ), user_turn.id)
             elapsed = time.monotonic() - t0
             logger.info("agent_task_done | task=%s steps=%d time=%.2fs", task.task_id, len(plan.steps), elapsed)
             yield {
@@ -1687,6 +2012,15 @@ class AgentEngine:
 
         Yields the same event types as run_agent_task().
         """
+        # No existing task records have authoritative, transitive source
+        # provenance. Resuming can expose stored step results or execute a
+        # side effect based on data the caller may no longer be allowed to see.
+        # Deny before reading the task or touching approval state.
+        from backend.security.task_access import TASK_RESUME_WITHHELD, task_content_revalidation_available
+        if not task_content_revalidation_available():
+            yield {"type": "error", "content": TASK_RESUME_WITHHELD}
+            return
+
         from backend.agent.task import TaskStatus, TaskStateError
         from backend.agent.planner import StepStatus
         from backend.agent.approval import compute_arguments_hash
@@ -1813,6 +2147,7 @@ class AgentEngine:
             raise
 
         session_id = task.session_id
+        history_tool_events = []
 
         yield {
             "type": "tool_start",
@@ -1823,14 +2158,17 @@ class AgentEngine:
         effective_role = user_role if user_role is not None else getattr(task, "user_role", None)
         effective_user_id = user_id if user_id is not None else getattr(task, "user_id", None)
         if self._tool_registry:
-            result = await self._tool_registry.execute(
+            result = await self._dispatch_tool(
                 awaiting_step.tool_name, awaiting_step.arguments,
                 session_id=session_id,
                 user_role=effective_role,
                 user_id=effective_user_id,
                 task_id=task_id,
                 step_id=awaiting_step.id,
+                approval_id=approval_id,
             )
+            history_tool_events.append({'tool': awaiting_step.tool_name, 'success': bool(result.success),
+                                        'invocation_id': str(uuid.uuid4())})
         else:
             from backend.tools.registry import ToolResult
             result = ToolResult(
@@ -2417,11 +2755,14 @@ class AgentEngine:
             if self._tool_registry:
                 effective_step_role = user_role if user_role is not None else getattr(task, "user_role", None)
                 effective_step_uid = user_id if user_id is not None else getattr(task, "user_id", None)
-                result = await self._tool_registry.execute(
+                result = await self._dispatch_tool(
                     step.tool_name, step.arguments, session_id=session_id, user_role=effective_step_role,
                     user_id=effective_step_uid,
                     task_id=task_id, step_id=step.id,
                 )
+                if len(history_tool_events) < 32:
+                    history_tool_events.append({'tool': step.tool_name, 'success': bool(result.success),
+                                                'invocation_id': str(uuid.uuid4())})
             else:
                 from backend.tools.registry import ToolResult
                 result = ToolResult(
@@ -2550,7 +2891,7 @@ class AgentEngine:
 
         full_final = "\n".join(final_text_parts) if final_text_parts else ""
         if full_final:
-            self._memory.add_assistant_message(session_id, full_final)
+            self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
 
         all_steps = fresh_task.plan.steps if fresh_task and fresh_task.plan else []
         failed_steps = [s for s in all_steps if s.status == StepStatus.failed.value]
@@ -2737,6 +3078,18 @@ class AgentEngine:
         Format an executed tool result into clean, unescaped text for reasoning, synthesis,
         and grounding prompts. Preserves [DOCUMENT CONTENT] blocks for document retrieval.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if tool_name in ('document_search', 'file_read', 'file_list') and not document_content_allowed():
+            return 'Document content unavailable.'
+        from backend.security.artifact_presentation import ARTIFACT_TOOLS, artifact_presentation
+        from backend.security.tool_presentation import RESTRICTED_TOOLS, restricted_tool_presentation
+        if tool_name == 'calculator':
+            from backend.security.tool_presentation import calculator_presentation
+            return calculator_presentation(raw_res)
+        if tool_name in RESTRICTED_TOOLS:
+            return restricted_tool_presentation(tool_name, raw_res)
+        if tool_name in ARTIFACT_TOOLS:
+            return json.dumps(artifact_presentation(tool_name, raw_res))
         if raw_res is None:
             return ""
 
@@ -2838,9 +3191,7 @@ class AgentEngine:
         elif tool_name in ("reasoning", None):
             return str(raw_res)
 
-        if isinstance(raw_res, (dict, list)):
-            return json.dumps(raw_res, indent=2, default=str)
-        return str(raw_res)
+        return 'Tool result unavailable for presentation.'
 
     @classmethod
     def _is_placeholder_code(cls, code: Optional[str]) -> bool:
@@ -3156,7 +3507,7 @@ class AgentEngine:
                 return None
             if re.match(r"^[\d\.\s\+\-\*\/\(\)\^%]+$", content):
                 return content
-            logger.warning("Model returned non-arithmetic expression for calculator: %s", content)
+            logger.warning("Model returned a non-arithmetic expression for calculator")
             return None
         except Exception as exc:
             logger.error("Failed to resolve calculator expression: %s", exc)
@@ -3174,7 +3525,9 @@ class AgentEngine:
         execution log and grounding instructions so the LLM is strictly grounded in what
         succeeded and what failed.
         """
-        history = self._memory.get_history(session_id)
+        # Assistant text may reflect sources whose clearance has changed.
+        # Exclude prior assistant answers until dependency lineage is tracked.
+        history = [m for m in self._memory.get_history(session_id) if m.role != 'assistant']
 
         # Build execution log
         log_lines = ["STRUCTURED EXECUTION LOG (Steps executed so far in this task):"]
@@ -3183,6 +3536,9 @@ class AgentEngine:
             desc = item.get("description", "")
             success = item.get("success", True)
             args = item.get("arguments")
+            from backend.security.artifact_presentation import ARTIFACT_TOOLS
+            if tool in ARTIFACT_TOOLS:
+                args = None
             args_str = f" args={json.dumps(args, default=str)}" if args else ""
 
             if success:
@@ -3192,7 +3548,7 @@ class AgentEngine:
                     res_str = res_str[:15000] + "\n... (truncated)"
                 log_lines.append(f"- Step {idx} ({tool}{args_str}): SUCCESS\n  Result:\n{res_str}")
             else:
-                err = item.get("error", "Unknown error")
+                err = 'Tool execution failed'
                 log_lines.append(f"- Step {idx} ({tool}{args_str}): FAILED\n  Error: {err}")
 
         execution_log = "\n\n".join(log_lines)
@@ -3266,7 +3622,7 @@ class AgentEngine:
             role="system",
             content=f"{execution_log}\n\n{doc_context}\n\n{grounding_instructions}".strip()
         )
-        logger.debug("[DEBUG-PLANNING] _build_task_reasoning_messages system context:\n%s", task_context_msg.content)
+        logger.debug("Built task reasoning context")
 
         if history and history[-1].role == "user":
             return list(history[:-1]) + [task_context_msg, history[-1]]
@@ -4871,6 +5227,8 @@ class AgentEngine:
     def set_approval_manager(self, manager) -> None:
         """Wire in the ApprovalManager for Phase 6."""
         self._approval_manager = manager
+        if self._tool_registry is not None and hasattr(self._tool_registry, "set_approval_manager"):
+            self._tool_registry.set_approval_manager(manager)
         if hasattr(self, "_task_manager") and hasattr(self._task_manager, "set_approval_manager"):
             self._task_manager.set_approval_manager(manager)
         logger.info("AgentEngine: ApprovalManager wired — Phase 6 approvals enabled")
@@ -4952,21 +5310,27 @@ class AgentEngine:
         if not text:
             return None
 
+        # Never silently execute the first of multiple or malformed tagged calls.
+        if '<tool_call' in text.lower() or '</tool_call' in text.lower():
+            if (len(re.findall(r'<tool_call\b', text, re.IGNORECASE)) != 1 or
+                    len(re.findall(r'</tool_call\s*>', text, re.IGNORECASE)) != 1 or
+                    len(_TOOL_CALL_PATTERN.findall(text)) != 1):
+                return None
+
         # 1. <tool_call>...</tool_call>
         match = _TOOL_CALL_PATTERN.search(text)
         if match:
             inner = match.group(1).strip()
             # Try JSON first
             try:
-                cleaned = re.sub(r",\s*}", "}", inner)
-                cleaned = re.sub(r",\s*]", "]", cleaned)
-                parsed = json.loads(cleaned)
+                parsed = _strict_tool_json(inner)
                 if isinstance(parsed, dict) and "name" in parsed:
                     if "arguments" not in parsed:
                         parsed["arguments"] = {}
                     return parsed
-            except json.JSONDecodeError:
-                pass
+            except ValueError:
+                if inner.startswith('{'):
+                    return None
 
             # Try func call inside <tool_call>
             func_m = _FUNC_CALL_PATTERN.search(inner)
@@ -4974,17 +5338,18 @@ class AgentEngine:
                 t_name = func_m.group(1)
                 t_args = cls._parse_func_call_args(t_name, func_m.group(2))
                 return {"name": t_name, "arguments": t_args}
+            return None
 
         # 2. Markdown code block containing tool JSON
         md_json = re.search(r"```(?:tool_call|json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if md_json:
             try:
-                parsed = json.loads(md_json.group(1).strip())
+                parsed = _strict_tool_json(md_json.group(1).strip())
                 if isinstance(parsed, dict) and parsed.get("name") in _KNOWN_TOOL_NAMES:
                     if "arguments" not in parsed:
                         parsed["arguments"] = {}
                     return parsed
-            except json.JSONDecodeError:
+            except ValueError:
                 pass
 
         # 3. Bare JSON with tool name
@@ -4994,10 +5359,10 @@ class AgentEngine:
         )
         if bare_json_match and bare_json_match.group(2) in _KNOWN_TOOL_NAMES:
             try:
-                parsed = json.loads(bare_json_match.group(1).strip())
+                parsed = _strict_tool_json(bare_json_match.group(1).strip())
                 if isinstance(parsed, dict):
                     return parsed
-            except json.JSONDecodeError:
+            except ValueError:
                 pass
 
         # 4. Direct Python-style tool call: tool_name(param='val')
@@ -5040,6 +5405,35 @@ class AgentEngine:
     @staticmethod
     def _format_tool_result_summary(result) -> str:
         """Format a tool result into a concise summary for SSE."""
+        from backend.security.artifact_presentation import ARTIFACT_TOOLS
+        tool_name = result.get('tool') if isinstance(result, dict) else getattr(result, 'tool', None)
+        from backend.security.tool_presentation import RESTRICTED_TOOLS, restricted_tool_presentation
+        if tool_name == 'unit_conversion':
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            raw = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            if success and isinstance(raw, dict) and type(raw.get('result')) in (int, float) and raw.get('to_unit') in {'mm','cm','m','km','g','kg','s','min','h'}:
+                return f"Result: {raw['result']} {raw['to_unit']}"
+            return 'Unit conversion unavailable.'
+        if tool_name == 'calculator':
+            from backend.security.tool_presentation import calculator_presentation
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            raw = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            return calculator_presentation(raw) if success else 'Tool execution failed.'
+        if tool_name in RESTRICTED_TOOLS:
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            raw = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            return restricted_tool_presentation(tool_name, raw, success)
+        if tool_name in ARTIFACT_TOOLS:
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            if tool_name == 'artifact_verifier':
+                return 'Artifact verification completed' if success else 'Artifact verification failed'
+            if not success:
+                return 'Artifact creation failed'
+            payload = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            name = payload.get('display_name') if isinstance(payload, dict) else None
+            if isinstance(name, str) and 0 < len(name) <= 255 and '/' not in name and '\\' not in name and not any(ord(c) < 32 for c in name):
+                return f'Artifact: {name}'
+            return 'Artifact created'
         if not getattr(result, "success", True) and not (isinstance(result, dict) and result.get("success", True)):
             err = getattr(result, "error", None) or (result.get("error") if isinstance(result, dict) else None)
             return f"Error: {err[:200]}" if err else "Error"
@@ -5077,12 +5471,34 @@ class AgentEngine:
     @classmethod
     def _format_direct_tool_answer(cls, tool_name: str, result, user_message: str = "") -> str:
         """Format a tool result into a clean, direct natural-language response."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if tool_name in ('document_search', 'file_read', 'file_list') and not document_content_allowed():
+            return 'Document content unavailable.'
+        from backend.security.artifact_presentation import ARTIFACT_TOOLS, artifact_presentation
+        from backend.security.tool_presentation import RESTRICTED_TOOLS, restricted_tool_presentation
+        if tool_name == 'calculator':
+            from backend.security.tool_presentation import calculator_presentation
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            raw = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            return calculator_presentation(raw) if success else 'Tool execution failed.'
+        if tool_name in RESTRICTED_TOOLS:
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            raw = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            return restricted_tool_presentation(tool_name, raw, success)
+        if tool_name in ARTIFACT_TOOLS:
+            success = result.get('success', False) if isinstance(result, dict) else getattr(result, 'success', False)
+            if tool_name == 'artifact_verifier':
+                return 'Artifact verification completed.' if success else 'Artifact verification failed.'
+            if not success:
+                return 'Artifact creation failed.'
+            raw = result.get('result') if isinstance(result, dict) else getattr(result, 'result', None)
+            details = artifact_presentation(tool_name, raw)
+            return 'Artifact created: ' + details.get('display_name', 'unnamed artifact')
         is_success = getattr(result, "success", True) if not isinstance(result, dict) else result.get("success", True)
         if not is_success:
-            err = getattr(result, "error", None) or (result.get("error") if isinstance(result, dict) else None)
             if tool_name == "file_read":
-                return f"Unable to read the requested file: {err or 'File not found in workspace.'}"
-            return f"The tool `{tool_name}` failed: {err or 'Execution error'}"
+                return "Unable to read the requested file."
+            return "The requested tool operation failed."
 
         r = getattr(result, "result", result)
         if isinstance(result, dict) and "result" in result:
@@ -5213,12 +5629,27 @@ class AgentEngine:
             return "\n".join(lines)
 
         if isinstance(r, dict):
-            return json.dumps(r, indent=2, default=str)
+            return "Tool completed; its result is unavailable for display."
         return str(r)
 
     @staticmethod
     def _format_observation(tool_name: str, result) -> str:
         """Format a tool execution result as an observation for the model."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if tool_name in ('document_search', 'file_read', 'file_list') and not document_content_allowed():
+            return 'Document content unavailable.'
+        from backend.security.artifact_presentation import ARTIFACT_TOOLS, artifact_presentation
+        from backend.security.tool_presentation import RESTRICTED_TOOLS, restricted_tool_presentation
+        if tool_name == 'calculator':
+            from backend.security.tool_presentation import calculator_presentation
+            return calculator_presentation(getattr(result, 'result', None)) if getattr(result, 'success', False) else 'Tool execution failed.'
+        if tool_name in RESTRICTED_TOOLS:
+            return restricted_tool_presentation(tool_name, getattr(result, 'result', None), getattr(result, 'success', False))
+        if tool_name in ARTIFACT_TOOLS:
+            if not getattr(result, 'success', False):
+                return f'[TOOL RESULT: {tool_name}]\nStatus: failed\n[END TOOL RESULT]'
+            safe = artifact_presentation(tool_name, getattr(result, 'result', None))
+            return f'[TOOL RESULT: {tool_name}]\nStatus: success\n{json.dumps(safe)}\n[END TOOL RESULT]'
         if tool_name == "code_execution":
             if result.success:
                 stdout_val = result.result.get("stdout", "") if isinstance(result.result, dict) else str(result.result)
@@ -5232,7 +5663,7 @@ class AgentEngine:
                     f"Do NOT include exit codes, internal execution messages, or Python source code unless the user explicitly asked to see the code."
                 )
             else:
-                err_val = result.error or (result.result.get("stderr") if isinstance(result.result, dict) else "Execution failed")
+                err_val = "Code execution failed"
                 return (
                     f"[TOOL RESULT: code_execution]\n"
                     f"Status: blocked / error\n"
@@ -5247,10 +5678,10 @@ class AgentEngine:
             return (
                 f"[TOOL RESULT: {tool_name}]\n"
                 f"Status: error\n"
-                f"Error: {result.error}\n"
+                f"Error: Tool execution failed\n"
                 f"[END TOOL RESULT]\n\n"
                 f"The tool returned an error. "
-                f"Report the actual tool failure directly to the user. "
+                f"Report that the tool failed without claiming success. "
                 f"Do NOT invent a fallback result, and do NOT claim execution succeeded."
             )
 
@@ -5372,18 +5803,12 @@ class AgentEngine:
             )
 
         # Fallback for generic tools
-        content_str = json.dumps(result.result, indent=2, default=str)
-        if len(content_str) > 15000:
-            content_str = content_str[:15000] + "\n... (truncated)"
-
         return (
-            f"[TOOL RESULT: {tool_name}]\n"
+            f"[TOOL RESULT]\n"
             f"Status: success\n"
-            f"Result:\n{content_str}\n"
+            f"Result is unavailable for display.\n"
             f"[END TOOL RESULT]\n\n"
-            f"GROUNDING REQUIREMENTS:\n"
-            f"1. Base findings ONLY on factual statements in the tool result.\n"
-            f"2. Provide your clean natural-language answer now."
+            f"Do not invent or infer the contents of the unavailable result."
         )
 
     # ------------------------------------------------------------------
@@ -5408,6 +5833,8 @@ class AgentEngine:
 
         The agent continues normally in all cases.
         """
+        from backend.auth.request_context import cap_clearance
+        user_clearance = cap_clearance(user_clearance)
         if self._doc_service is None:
             return []
         if not self._doc_service.has_documents():
@@ -5417,7 +5844,7 @@ class AgentEngine:
         # and self-contained tasks (standalone code/calculation, system diagnostics)
         # that have no equipment IDs or document-specific keywords.
         if self._is_general_knowledge_query(query) or self._is_standalone_non_rag_task(query):
-            logger.debug("Skipping RAG retrieval for general-knowledge/standalone query: %s", query[:80])
+            logger.debug("Skipping RAG retrieval for a general-knowledge/standalone query")
             return []
 
         try:
@@ -5426,7 +5853,7 @@ class AgentEngine:
                 timeout=15.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("RAG retrieval timed out after 15s for query: %s", query[:80])
+            logger.warning("RAG retrieval timed out after 15s")
             return []
         except Exception as exc:
             logger.warning("RAG retrieval failed (continuing without context): %s", exc)
@@ -5434,6 +5861,9 @@ class AgentEngine:
 
     async def _retrieve_context_inner(self, query: str, user_clearance: str = "viewer") -> List:
         """Inner retrieval logic — called within asyncio.wait_for timeout."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            return []
         top_k = self._agent_config.get("rag", {}).get("top_k", 5)
         candidate_k = max(top_k * 2, 8)
         chunks = await self._doc_service.retrieve(query, top_k=candidate_k, user_clearance=user_clearance)
@@ -5518,6 +5948,40 @@ class AgentEngine:
         from backend.agent.planner import is_standalone_non_rag_task
         return is_standalone_non_rag_task(query)
 
+    def _independent_plain_input(self, session_id, messages, sources):
+        """Recognize only a complete dependency-free input; ambiguity stays withheld."""
+        from backend.security.provenance_foundation import document_content_allowed
+        from backend.agent.memory import ConversationMemory
+        if document_content_allowed() or sources != [] or not isinstance(self._memory, ConversationMemory):
+            return None
+        try:
+            identity = self._memory.stream_identity(session_id)
+            for message in messages:
+                if message.images:
+                    return None
+                if message.role == 'system':
+                    if not self._system_prompt or message.content != self._system_prompt:
+                        return None
+                elif message.role == 'assistant':
+                    if not self._memory.verify_independent_plain_chat(session_id, message):
+                        return None
+                elif message.role != 'user':
+                    return None
+            return identity
+        except (PermissionError, AttributeError, TypeError):
+            return None
+
+    def _plain_response_provenance(self, session_id, content, sources, identity):
+        from backend.security.conversation_access import source_provenance
+        from backend.security.provenance_foundation import document_content_allowed
+        if identity is not None and not document_content_allowed():
+            try:
+                if self._memory.stream_identity(session_id) == identity:
+                    return self._memory.sign_independent_plain_chat(session_id, content)
+            except PermissionError:
+                raise
+        return source_provenance(sources)
+
     def _build_messages(
         self,
         session_id: str,
@@ -5537,7 +6001,19 @@ class AgentEngine:
         this model call.  It is explicitly framed as external evidence so
         the model cannot be confused by instructions inside documents.
         """
-        history = self._memory.get_history(session_id)
+        from backend.security.conversation_access import may_read_assistant
+        history = []
+        for message in self._memory.get_history(session_id):
+            if message.role != 'assistant':
+                history.append(message)
+                continue
+            provenance = message.extra_fields.get('access_provenance_v1')
+            # Only the deterministic calculator has verified independent inputs.
+            # Source-derived, tool and legacy output need transitive lineage first.
+            if (self._memory.verify_independent_plain_chat(session_id, message)
+                    or (isinstance(provenance, dict) and provenance.get('kind') == 'deterministic_calculation'
+                        and may_read_assistant(message, None, 'viewer'))):
+                history.append(message)
 
         if not sources:
             return history

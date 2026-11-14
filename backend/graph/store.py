@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager, closing
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -37,17 +38,20 @@ class KnowledgeGraphStore:
         self._lock = threading.RLock()
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self):
         conn = sqlite3.connect(
             str(self.db_path),
             timeout=30.0,
             check_same_thread=False,
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        return conn
+        with closing(conn):
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            with conn:
+                yield conn
 
     def _init_db(self) -> None:
         with self._lock, self._get_connection() as conn:

@@ -1,0 +1,41 @@
+"""Server-derived clearance carried through asynchronous request execution."""
+from contextvars import ContextVar
+
+effective_clearance = ContextVar('effective_clearance', default=None)
+effective_owner = ContextVar('effective_owner', default=None)
+local_legacy_access = ContextVar('local_legacy_access', default=False)
+request_tools_enabled = ContextVar('request_tools_enabled', default=None)
+# Bound only after server authentication; never populated from tool arguments.
+dispatch_identity_resolver = ContextVar('dispatch_identity_resolver', default=None)
+
+
+class ClearanceContextMiddleware:
+    """Isolate caller context across HTTP requests and streaming responses."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        token = effective_clearance.set(None)
+        owner_token = effective_owner.set(None)
+        legacy_token = local_legacy_access.set(False)
+        tools_token = request_tools_enabled.set(None)
+        identity_token = dispatch_identity_resolver.set(None)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            dispatch_identity_resolver.reset(identity_token)
+            effective_clearance.reset(token)
+            effective_owner.reset(owner_token)
+            local_legacy_access.reset(legacy_token)
+            request_tools_enabled.reset(tools_token)
+
+
+def cap_clearance(requested: str) -> str:
+    """Never raise a component's requested clearance above the caller's ceiling."""
+    from backend.auth.models import resolve_user_clearance
+    levels = {'viewer': 1, 'operator': 2, 'admin': 3}
+    ceiling = effective_clearance.get()
+    desired = resolve_user_clearance(requested)
+    if ceiling is None:
+        return desired
+    return min((desired, resolve_user_clearance(ceiling)), key=lambda value: levels[value])

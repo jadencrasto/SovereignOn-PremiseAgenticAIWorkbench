@@ -10,12 +10,12 @@ import type { ChatMessage, ImageAttachment, SourceReference, ToolEvent } from '.
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { useWorkbench } from '../../context/WorkbenchContext';
-import { streamChat, streamChatMultimodal } from '../../api/chat';
+import { createSession, fetchSessions, streamChat, streamChatMultimodal, guardChatCallbacks } from '../../api/chat';
+import { useAuth } from '../../context/AuthContext';
+import { capabilityFor, chatDisabled, describeCapability, permitsCapability, modelInInventory } from '../../api/capabilities';
 import { approveTaskStep, rejectTaskStep } from '../../api/tasks';
 import {
-  ChatHistorySidebar,
-  loadAllSessions,
-  saveSessionToStorage,
+  ChatHistorySidebar, loadSession,
   type ChatSession,
 } from './ChatHistorySidebar';
 import {
@@ -27,50 +27,76 @@ export const ChatView: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
-  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
-    return 'sess_' + Math.random().toString(36).substring(2, 10);
-  });
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [sessionTitle, setSessionTitle] = useState<string>('New Conversation');
   const [sessionCount, setSessionCount] = useState<number>(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
-  const { selectedModel, addToast } = useWorkbench();
-
-  // Load last active session on initial mount if available
+  const selectionVersion = useRef(0);
+  const creating = useRef(false);
+  const restorePending = useRef(false);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [restoring, setRestoring] = useState(false);
+  const attachmentUrls = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const all = loadAllSessions();
-    setSessionCount(all.length);
-    if (all.length > 0 && messages.length === 0) {
-      const latest = all[0];
-      setActiveSessionId(latest.id);
-      setSessionTitle(latest.title);
-      setMessages(latest.messages);
-    }
+    const current = new Set(messages.flatMap(message =>
+      (message.attachments || []).map(attachment => attachment.objectUrl).filter((url): url is string => !!url)));
+    for (const url of attachmentUrls.current) if (!current.has(url)) URL.revokeObjectURL(url);
+    attachmentUrls.current = current;
+  }, [messages]);
+  useEffect(() => () => {
+    for (const url of attachmentUrls.current) URL.revokeObjectURL(url);
+    attachmentUrls.current.clear();
   }, []);
+  const { user } = useAuth();
+  const selectionKey = `sovereign-active-conversation:${user?.id || ''}`;
+  const { selectedModel, addToast, capabilities, isCheckingHealth } = useWorkbench();
+  const approvalsAllowed = permitsCapability(capabilities, 'approval_resume');
+  const textDisabled = chatDisabled(capabilities, false, selectedModel);
+  // Image requests also use the selected text model for the reasoning stage.
+  const imageDisabled = chatDisabled(capabilities, true) || textDisabled;
+  const chatStatus = capabilityFor(capabilities, capabilities ? 'chat' : 'backend', !isCheckingHealth);
+  const imageStatus = capabilityFor(capabilities, 'multimodal', !isCheckingHealth);
+  const selectedModelMissing = capabilities?.capabilities?.ollama?.state === 'available' &&
+    selectedModel !== capabilities.models.default_chat.id &&
+    !modelInInventory(capabilities, selectedModel);
 
-  // Sync session count whenever history is loaded
+  // Conversation contents are owned and persisted by the server.
   const updateSessionCount = useCallback(() => {
-    setSessionCount(loadAllSessions().length);
+    setHistoryRevision(value => value + 1);
+    void fetchSessions().then(result => setSessionCount(result.count)).catch(() => {});
   }, []);
+  useEffect(() => {
+    updateSessionCount();
+    return () => { abortControllerRef.current?.abort(); };
+  }, [updateSessionCount]);
+  useEffect(() => {
+    const saved = sessionStorage.getItem(selectionKey);
+    if (!saved || !user?.id) return;
+    const version = selectionVersion.current;
+    restorePending.current = true;
+    setRestoring(true);
+    void loadSession(saved).then(session => {
+      if (selectionVersion.current !== version) return;
+      setActiveSessionId(session.id);
+      setSessionTitle(session.title);
+      setMessages(session.messages);
+    }).catch(() => {
+      if (selectionVersion.current !== version) return;
+      sessionStorage.removeItem(selectionKey);
+      addToast('info', 'The previous conversation is unavailable.');
+    }).finally(() => { if (selectionVersion.current === version) { restorePending.current = false; setRestoring(false); } });
+    return () => { selectionVersion.current++; };
+  }, [selectionKey, user?.id]);
+  useEffect(() => {
+    if (!user?.id || restoring || restorePending.current) return;
+    if (activeSessionId) sessionStorage.setItem(selectionKey, activeSessionId);
+    else sessionStorage.removeItem(selectionKey);
+  }, [activeSessionId, selectionKey, restoring, user?.id]);
 
-  // Helper to persist current conversation to storage
-  const persistSession = useCallback(
-    (newMessages: ChatMessage[], customTitle?: string) => {
-      if (newMessages.length === 0) return;
-      const titleToSave = customTitle || sessionTitle;
-      const sessionObj: ChatSession = {
-        id: activeSessionId,
-        title: titleToSave,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messages: newMessages,
-        model: selectedModel,
-      };
-      saveSessionToStorage(sessionObj);
-      updateSessionCount();
-    },
-    [activeSessionId, sessionTitle, selectedModel, updateSessionCount]
-  );
+  const persistSession = useCallback((_messages: ChatMessage[], _title?: string) => {
+    // Server-side chat handling persists messages; browser history is quarantined.
+  }, []);
 
   const handleApproveRef = useRef<(taskId: string) => Promise<void>>(async () => {});
   const handleRejectRef = useRef<(taskId: string) => Promise<void>>(async () => {});
@@ -80,7 +106,11 @@ export const ChatView: React.FC = () => {
    */
   const handleSendMessage = useCallback(
     async (text: string, image?: File) => {
-      if (!text.trim() || isStreaming) return;
+      if (!text.trim() || isStreaming || restoring || creating.current) return;
+      if (image ? imageDisabled : textDisabled) {
+        addToast('info', describeCapability(image ? imageStatus : chatStatus));
+        return;
+      }
 
       // Natural language approval / rejection interception when an approval is pending
       const activePendingMsg = messages.slice().reverse().find(
@@ -92,6 +122,11 @@ export const ChatView: React.FC = () => {
         const cleanText = text.trim().toLowerCase().replace(/^[^\w]+|[^\w]+$/g, '');
         const isApproval = /^(yes(\s+approve)?|approve[d]?|proceed|continue|confirm)$/i.test(cleanText);
         const isRejection = /^(no|reject(ed)?|deny|denied|cancel(led)?)$/i.test(cleanText);
+
+        if ((isApproval || isRejection) && !approvalsAllowed) {
+          addToast('info', 'Task approval and resume are blocked while task authorization cannot be safely revalidated.');
+          return;
+        }
 
         if (isApproval) {
           const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -118,6 +153,27 @@ export const ChatView: React.FC = () => {
         }
       }
 
+      let sessionId = activeSessionId;
+      if (!sessionId) {
+        const version = selectionVersion.current;
+        creating.current = true;
+        setIsStreaming(true);
+        try {
+          const created = await createSession();
+          if (selectionVersion.current !== version) return;
+          sessionId = created.session_id;
+          setActiveSessionId(sessionId);
+          updateSessionCount();
+        } catch {
+          if (selectionVersion.current === version) {
+            setIsStreaming(false);
+            addToast('error', 'Conversation could not be created. Please try again.');
+          }
+          return;
+        } finally {
+          creating.current = false;
+        }
+      }
       const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       let userAttachments: ImageAttachment[] | undefined;
@@ -169,6 +225,7 @@ export const ChatView: React.FC = () => {
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
+      let taskCompletionReported = false;
 
       const callbacks = {
         onDelta: (delta: string) => {
@@ -196,27 +253,10 @@ export const ChatView: React.FC = () => {
           );
         },
         onAgentStatus: (status: string) => {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantId
-                ? {
-                    ...msg,
-                    toolEvents: [
-                      ...(msg.toolEvents || []),
-                      {
-                        type: 'tool_start' as const,
-                        tool: status === 'analyzing_image'
-                          ? '🔍 Vision Analysis'
-                          : status === 'reasoning'
-                          ? '🧠 Reasoning & Diagramming'
-                          : `⚙ ${status}`,
-                        arguments: {},
-                      },
-                    ],
-                  }
-                : msg
-            )
-          );
+          if (status === 'planning' || status === 'executing') {
+            setMessages(prev => prev.map(msg => msg.id === assistantId
+              ? { ...msg, workflowStatus: status } : msg));
+          }
         },
         onPlanCreated: (planData: any) => {
           setMessages((prev) =>
@@ -224,6 +264,7 @@ export const ChatView: React.FC = () => {
               msg.id === assistantId
                 ? {
                     ...msg,
+                    workflowStatus: 'executing',
                     plan: {
                       taskId: planData.task_id,
                       objective: planData.plan?.objective || '',
@@ -264,7 +305,8 @@ export const ChatView: React.FC = () => {
               msg.id === assistantId
                 ? {
                     ...msg,
-                    isStreaming: false,
+                    isStreaming: true,
+                    workflowStatus: 'awaiting_approval' as const,
                     pendingApproval: {
                       approval_id: approvalData.approval_id,
                       task_id: approvalData.task_id,
@@ -284,7 +326,6 @@ export const ChatView: React.FC = () => {
             persistSession(next, currentTitle);
             return next;
           });
-          setIsStreaming(false);
           addToast('info', `Human approval required for tool: ${approvalData.tool_name}`);
         },
         onApprovalResolved: (_status: string) => {
@@ -300,34 +341,50 @@ export const ChatView: React.FC = () => {
           );
         },
         onTaskStatus: (status: string, _taskId: string) => {
-          if (status === 'task_completed' || status === 'task_failed' || status === 'task_cancelled') {
-            setMessages((prev) => {
-              const next = prev.map((msg) =>
-                msg.id === assistantId ? { ...msg, isStreaming: false } : msg
-              );
-              persistSession(next, currentTitle);
-              return next;
-            });
-            setIsStreaming(false);
+          if (status === 'task_completed') {
+            taskCompletionReported = true;
+            return;
           }
+          const states = { task_started: 'planning',
+            task_failed: 'failed', task_cancelled: 'cancelled' } as const;
+          if (status === 'task_failed' || status === 'task_cancelled') taskCompletionReported = false;
+          const nextStatus = states[status as keyof typeof states];
+          if (nextStatus) setMessages(prev => prev.map(msg => msg.id === assistantId
+            ? { ...msg, workflowStatus: nextStatus } : msg));
+          // Final text may follow the task event; wait for the SSE terminal event.
         },
         onDone: (_returnedSessionId: string, modelUsed: string) => {
           setMessages((prev) => {
             const next = prev.map((msg) =>
               msg.id === assistantId
-                ? { ...msg, isStreaming: false, model_used: modelUsed || selectedModel }
+                ? { ...msg, isStreaming: false, model_used: modelUsed || selectedModel,
+                    ...(taskCompletionReported && !msg.pendingApproval ? { workflowStatus: 'completed' as const } : {}) }
                 : msg
             );
             persistSession(next, currentTitle);
             return next;
           });
           setIsStreaming(false);
+          updateSessionCount();
         },
         onError: (errorText: string) => {
+          if (errorText === 'Conversation unavailable' || errorText === 'Conversation not found') {
+            selectionVersion.current++;
+            setActiveSessionId('');
+            setSessionTitle('New Conversation');
+            setMessages([]);
+            sessionStorage.removeItem(selectionKey);
+            setIsStreaming(false);
+            updateSessionCount();
+            addToast('error', 'This conversation is no longer available.');
+            return;
+          }
           setMessages((prev) => {
             const next = prev.map((msg) =>
               msg.id === assistantId
-                ? { ...msg, content: errorText, error: true, isStreaming: false }
+                ? { ...msg, content: errorText, error: true, isStreaming: false,
+                    ...(msg.workflowStatus === 'planning' || msg.workflowStatus === 'executing'
+                      ? { workflowStatus: 'interrupted' as const } : {}) }
                 : msg
             );
             persistSession(next, currentTitle);
@@ -338,32 +395,36 @@ export const ChatView: React.FC = () => {
         },
       };
 
+      // Ignore late events from a cancelled or previously selected conversation.
+      const guardedCallbacks = guardChatCallbacks(callbacks,
+        () => abortControllerRef.current === controller && !controller.signal.aborted);
       try {
         if (image) {
           await streamChatMultimodal(
             {
-              session_id: activeSessionId,
+              session_id: sessionId,
               message: text,
               model: selectedModel,
               stream: true,
               image,
             },
-            callbacks,
+            guardedCallbacks,
             controller.signal
           );
         } else {
           await streamChat(
             {
-              session_id: activeSessionId,
+              session_id: sessionId,
               message: text,
               model: selectedModel,
               stream: true,
             },
-            callbacks,
+            guardedCallbacks,
             controller.signal
           );
         }
       } catch (err: any) {
+        if (abortControllerRef.current !== controller) return;
         if (err.name !== 'AbortError') {
           setMessages((prev) => {
             const next = prev.map((msg) =>
@@ -382,16 +443,17 @@ export const ChatView: React.FC = () => {
         }
         setIsStreaming(false);
       } finally {
-        abortControllerRef.current = null;
+        if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, isStreaming, addToast, sessionTitle, messages, persistSession]
+    [activeSessionId, selectedModel, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, textDisabled, imageDisabled, chatStatus, imageStatus, restoring, selectionKey]
   );
 
   /**
    * Handle human approval of a pending task step
    */
   const handleApprove = async (taskId: string) => {
+    if (!approvalsAllowed) return;
     try {
       addToast('info', 'Submitting approval...');
       let targetMessageId: string | null = null;
@@ -523,14 +585,14 @@ export const ChatView: React.FC = () => {
             ? {
                 ...m,
                 isStreaming: false,
-                content: m.content || 'Task completed successfully.',
+                content: m.content || 'Approval response received.',
               }
             : m
         );
         persistSession(next);
         return next;
       });
-      addToast('success', 'Step approved and executed.');
+      addToast('info', 'Approval response received.');
     } catch (err: any) {
       addToast('error', `Approval execution failed: ${err.message}`);
       setIsStreaming(false);
@@ -550,6 +612,7 @@ export const ChatView: React.FC = () => {
    * Handle human rejection
    */
   const handleReject = async (taskId: string) => {
+    if (!approvalsAllowed) return;
     try {
       addToast('info', 'Rejecting step...');
       setMessages((prev) =>
@@ -579,12 +642,16 @@ export const ChatView: React.FC = () => {
   handleRejectRef.current = handleReject;
 
   const handleStopStream = () => {
+    if (creating.current) {
+      selectionVersion.current++;
+      setIsStreaming(false);
+    }
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
       setIsStreaming(false);
       setMessages((prev) => {
-        const next = prev.map((msg) => (msg.isStreaming ? { ...msg, isStreaming: false } : msg));
+        const next = prev.map((msg) => (msg.isStreaming ? { ...msg, isStreaming: false, ...(msg.workflowStatus === 'planning' || msg.workflowStatus === 'executing' ? { workflowStatus: 'interrupted' as const } : {}) } : msg));
         persistSession(next);
         return next;
       });
@@ -595,8 +662,10 @@ export const ChatView: React.FC = () => {
   // Start a fresh, clean conversation session
   const handleStartNewChat = () => {
     handleStopStream();
-    const newId = 'sess_' + Math.random().toString(36).substring(2, 10);
-    setActiveSessionId(newId);
+    selectionVersion.current++;
+    restorePending.current = false;
+    setRestoring(false);
+    setActiveSessionId('');
     setSessionTitle('New Conversation');
     setMessages([]);
     addToast('info', 'Started new conversation session.');
@@ -605,6 +674,9 @@ export const ChatView: React.FC = () => {
   // Switch to a previous conversation session from history
   const handleSelectSession = (session: ChatSession) => {
     handleStopStream();
+    selectionVersion.current++;
+    restorePending.current = false;
+    setRestoring(false);
     setActiveSessionId(session.id);
     setSessionTitle(session.title);
     setMessages(session.messages);
@@ -690,7 +762,7 @@ export const ChatView: React.FC = () => {
               {sessionTitle}
             </span>
             <span className="text-xs text-slate-400">
-              ({activeSessionId.substring(0, 8)}...)
+              {activeSessionId ? `(${activeSessionId.substring(0, 8)}...)` : ''}
             </span>
           </div>
         </div>
@@ -700,33 +772,45 @@ export const ChatView: React.FC = () => {
           <span className="text-xs text-slate-500 hidden md:inline">
             Model: <strong className="text-blue-600">{selectedModel}</strong>
           </span>
-          <span className="text-xs px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-600 font-medium shadow-sm">
-            {messages.length} {messages.length === 1 ? 'msg' : 'msgs'}
-          </span>
+
         </div>
       </div>
 
       {/* 2. Persistent Chat History Drawer */}
-      <ChatHistorySidebar
+      {isHistoryOpen && <ChatHistorySidebar
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
         currentSessionId={activeSessionId}
         onSelectSession={handleSelectSession}
         onNewChat={handleStartNewChat}
-      />
+        onDeleted={updateSessionCount}
+        refreshKey={historyRevision}
+        onRenamed={(id, title) => { if (id === activeSessionId) setSessionTitle(title); }}
+      />}
 
       {/* 3. Message List with Visual Explanations & Mermaid Renderers */}
       <MessageList
         messages={messages}
         onSelectPrompt={handleSendMessage}
         onRetry={handleRetry}
-        onApprove={handleApprove}
-        onReject={handleReject}
+        onApprove={approvalsAllowed ? handleApprove : undefined}
+        onReject={approvalsAllowed ? handleReject : undefined}
       />
 
+      {!approvalsAllowed && messages.some(message => message.pendingApproval?.status === 'pending') &&
+        <p className="px-6 py-2 text-xs text-slate-700" role="status">
+          {describeCapability(capabilityFor(capabilities, 'approval_resume', !isCheckingHealth))}
+        </p>}
       {/* 4. Input Composer */}
       <ChatInput
+        key={activeSessionId || "new-draft"}
         onSendMessage={handleSendMessage}
+        sendBlocked={textDisabled || restoring}
+        imageBlocked={imageDisabled}
+        sendStatus={selectedModelMissing && chatStatus.state !== 'blocked' && chatStatus.state !== 'unavailable'
+          ? 'The selected model was not found in the checked inventory. Select an available model.'
+          : textDisabled || chatStatus.state === 'unknown' ? describeCapability(chatStatus) : undefined}
+        imageStatus={imageDisabled ? (textDisabled ? 'The selected chat model is unavailable. Choose an available model before sending an image.' : describeCapability(imageStatus)) : undefined}
         onStopStream={handleStopStream}
         isStreaming={isStreaming}
         onClearSession={handleStartNewChat}

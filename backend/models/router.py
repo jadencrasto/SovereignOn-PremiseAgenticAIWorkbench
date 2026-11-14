@@ -35,6 +35,7 @@ from backend.config import Settings
 from backend.models.base import BaseModelProvider
 from backend.models.hardware import HardwareManager, ModelAllocationDecision, SystemTelemetry
 from backend.models.ollama_provider import OllamaProvider
+from backend.health.capabilities import model_key
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,20 @@ class ModelRouter:
         provider = self.get_provider(provider_name)
         return provider, model_name
 
+    async def aclose(self) -> None:
+        """Close only adapters actually created during this application's lifetime."""
+        providers = list(self._provider_cache.values())
+        self._provider_cache.clear()
+        failed = False
+        for provider in providers:
+            try:
+                await provider.aclose()
+            except Exception:
+                failed = True
+                logger.error('Model provider cleanup failed')
+        if failed:
+            raise RuntimeError('Model provider cleanup failed')
+
     async def list_available_models(self) -> Dict[str, list]:
         """Query each configured provider for its available models."""
         results: Dict[str, list] = {}
@@ -153,23 +168,27 @@ class ModelRouter:
         Raises:
             ValueError: If no model is configured for the capability.
         """
-        routing = self._config.get("capability_routing", {})
-        model_id = routing.get(capability)
-        if not model_id:
-            # Fall back: scan models config for first model with this capability
-            models_config = self._config.get("models", {})
-            for mid, mconf in models_config.items():
-                if capability in mconf.get("capabilities", []):
-                    model_id = mid
-                    break
-
+        model_id = self.configured_model_id(capability)
         if not model_id:
             raise ValueError(
                 f"No model configured for capability '{capability}'. "
                 f"Check config/models.yaml capability_routing section."
             )
 
+        if capability not in self.get_model_capabilities(model_id):
+            raise ValueError(f"Configured model does not support capability '{capability}'.")
         return self.get_provider_for_model(model_id)
+
+    def configured_model_id(self, capability: str) -> Optional[str]:
+        """Read routing configuration without instantiating a provider."""
+        routing = self._config.get("capability_routing", {})
+        model_id = routing.get(capability)
+        if model_id:
+            return model_id
+        for candidate, config in self._config.get("models", {}).items():
+            if capability in config.get("capabilities", []):
+                return candidate
+        return None
 
     def resolve_chat_model(self) -> Tuple[BaseModelProvider, str]:
         """Return (provider, model_name) for text chat (qwen2.5:7b)."""
@@ -183,7 +202,7 @@ class ModelRouter:
         """Return (provider, model_name) for embeddings (nomic-embed-text)."""
         return self.resolve_by_capability("embedding")
 
-    async def list_models_with_capabilities(self) -> List[Dict]:
+    async def list_models_with_capabilities(self, available_models: Optional[Dict[str, list]] = None) -> List[Dict]:
         """
         Return a list of model dicts enriched with capabilities.
 
@@ -202,23 +221,20 @@ class ModelRouter:
             ]
         """
         # Get actually-installed models from live Ollama
-        available_raw = await self.list_available_models()
-        installed_names: set = set()
-        for provider_name, model_list in available_raw.items():
-            for m in model_list:
-                installed_names.add(f"{provider_name}/{m}")
-                # Also add without provider prefix for matching
-                installed_names.add(m)
+        available_raw = available_models if available_models is not None else await self.list_available_models()
+        installed_names = {
+            (provider_name, model_key(name) if provider_name == "ollama" else name)
+            for provider_name, model_list in available_raw.items()
+            for name in model_list if isinstance(name, str)
+        }
 
         models_config = self._config.get("models", {})
         result = []
 
         for model_id, mconf in models_config.items():
             provider_name, model_name = self.resolve_model(model_id)
-            is_installed = (
-                model_id in installed_names
-                or model_name in installed_names
-            )
+            key = model_key(model_name) if provider_name == "ollama" else model_name
+            is_installed = (provider_name, key) in installed_names
             result.append({
                 "id": model_id,
                 "name": model_name,
@@ -295,7 +311,12 @@ class ModelRouter:
         """Instantiate a provider adapter by name."""
         if name == "ollama":
             logger.info("Creating OllamaProvider at %s", self._settings.ollama_base_url)
-            return OllamaProvider(base_url=self._settings.ollama_base_url)
+            from backend.health.capabilities import loopback_tags_url
+            try:
+                base_url = loopback_tags_url(self._settings.ollama_base_url).removesuffix('/api/tags')
+            except ValueError:
+                base_url = self._settings.ollama_base_url
+            return OllamaProvider(base_url=base_url)
 
         # Future providers will be added here without touching agent code:
         # elif name == "openai":

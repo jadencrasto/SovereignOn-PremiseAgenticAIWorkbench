@@ -1,0 +1,41 @@
+# Batch 2B.3B — pending ingestion / ACTIVE WITHHELD
+
+Date: 2026-11-08. Branch `phase1-5-recovery-security`; pre-existing uncommitted changes preserved. This is a pending-only integration, not authorized retrieval or a production-readiness claim. Batch 1 remains PARTIAL; Phase 1.5.4 and Phase 2 remain NO-GO.
+
+## Call graph and schema
+
+Application startup creates `QuarantinedSources` in the existing `tasks_db_path` and passes it to `DocumentService`. The existing authenticated upload route binds the server user and normalized clearance, reads bounded bytes and calls `ingest_document`. The service rejects missing registry, mismatched request-context clearance or missing owner; it reserves a server-generated `doc_v1_<uuid>` PENDING row **before** exclusive file creation. This ID is then used for opaque storage and indexed chunks. Direct service ingestion without the registry is rejected. The route reports status `pending`, not `indexed`. The existing registry schema is migrated additively with nullable `storage_ref`, `index_model`, `manifest_json`, and `verification_state`; prior nullable digest, revision and classification columns remain. Legacy rows are not assigned owners, promoted or deleted.
+
+Pending records store the server-context owner/classification, revision 1, expected full-byte SHA-256, opaque `<id>.bin` reference and timestamps. `record_manifest` and `record_readback` use short SQLite transactions with owner, classification, state and revision predicates; readback additionally requires the same stored manifest and model string. Neither method activates a source. The model field is the configured model **name**, not a verified immutable model digest/version. Workspace or conversation binding is not established. Request context is not a continuous authoritative reload; an in-process caller can manipulate context or registry methods. Consequently these rows are not proof sufficient for a future authorization grant.
+
+## File/index evidence and failure behavior
+
+Exclusive creation and initial readback use the existing Batch 2B.3A helper. The service re-reads and hashes the stored bytes again before parsing; the display name is retained separately. The parser and chunker generate ordered IDs bound to the new document ID. The service persists the ordered chunk ID/index/SHA-256 manifest and configured embedding name in SQLite before vector upsert. It then reads back all entries selected for that document and checks exact ID set, no duplicates, lengths, document ID, revision, chunk index, configured model name and text hashes. A conditional SQLite update records `readback_verified_nondurable` for an in-memory fallback or `readback_verified_durability_unproven` for another backend. Neither is a claim of durable indexing, ACTIVE, current authorization, tamper resistance or cross-store atomicity. There is no verified embedding-model version or full runtime/index configuration binding.
+
+| Interruption or failure | Observed/design behavior |
+| --- | --- |
+| Reservation failure | No file creation is attempted; the service propagates the error. |
+| Exclusive create/partial write/digest/parser/embedding failure | Row remains pending; a partial or complete file may remain. No automatic deletion or promotion. |
+| Index failure, missing/extra/mismatched chunks | Row remains pending; a file or partial index may remain. Tests cover fake backend missing/extra/content mismatch and failure. |
+| Revocation during readback | Conditional evidence update fails; revoked state remains. Synthetic test exercises deterministic revocation at readback, not a multi-process race. |
+| Cleanup | Owner-scoped new records are revoked in SQLite before index/file cleanup; failed cleanup leaves revoked state. Runtime legacy/unknown records are denied deletion by this path; no legacy files are automatically deleted. Pending records with no index may require manual reconciliation. |
+| Restart | SQLite preserves pending/revoked state and evidence. No startup reconciliation or automatic promotion/cleanup is implemented. Idempotent client retries, process-kill recovery, and cross-process synchronization are not verified. |
+
+Existing `document_content_allowed()` continues to deny all RAG retrieval, document list/detail, workspace tool reads, public vector reads, graph and tested source-result paths. Raw internal collection/maintenance interfaces remain outside that boundary. Independent writers, file replacement/reparse races, SQLite rollback, partial vector indexing, legacy code paths, logging and cache confidentiality, and clearance changes during work remain security risks. ACTIVE is unavailable; existing authorization, task approval/resume, arbitrary-code and artifact restrictions were not loosened.
+
+## Verification
+
+The new regression initially failed because `DocumentService` did not accept a source registry. Synthetic tests cover PENDING before file creation, owner and clearance context, full input digest, exact readback with fake collection, nondurable labeling, missing/extra/modified chunks, source mismatch, index failure, deterministic revocation at readback, restart retaining pending/revoked records, cross-owner denial and revoke-before-failed-cleanup. Existing tests were adapted to create an explicit temporary registry and server-context identity; the legacy synthetic collision test still verifies both contents survive. A first combined run exposed a pre-existing test fixture constructed with `__new__` without registry; it was adapted to create a synthetic pending record and verify revoke-before-cleanup rather than bypass the new requirement.
+
+Windows/Python targeted command, synthetic temporary storage, fake embeddings/vector collection:
+
+```powershell
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; $env:PYTHONDONTWRITEBYTECODE='1'; python -c "import socket,pytest; original=socket.socket.connect; socket.socket.connect=lambda self,address: original(self,address) if isinstance(address,tuple) and address[0] in ('127.0.0.1','::1') else (_ for _ in ()).throw(OSError('Network disabled for test')); raise SystemExit(pytest.main(['-p','pytest_asyncio.plugin','tests/backend/test_batch2b3b_pending_ingestion.py','tests/backend/test_batch2b3a_upload_integrity.py','tests/backend/test_batch2b3_ingestion_preconditions.py','tests/backend/test_batch2b_document_lifecycle.py','tests/backend/test_batch2a_provenance_foundation.py','tests/backend/test_batch2b2c_execution_disablement.py','tests/backend/test_batch2b2a_content_boundary.py','tests/backend/test_batch2b2_retrieval_boundary.py','tests/backend/test_phase153g_stream_revocation.py','tests/backend/test_phase153c_task_security.py','tests/backend/test_phase153_stabilization.py','tests/backend/test_phase153h_artifact_integrity.py','tests/backend/test_approval.py','tests/backend/test_docx_and_execution.py::TestDocxCreate','tests/backend/test_phase153h7_presentation.py','-q','-p','no:cacheprovider','--tb=short']))"
+# 98 passed, 2 skipped in 5.71s
+```
+
+Two skips are Windows symlink privilege limitations. The run predates only a test-function rename; its behavior did not change. No live Chroma, local model, Docker, browser, process-kill recovery, cross-process race, or OS-level network isolation was verified. The previously rejected full suite was not retried; Python socket guards are not OS isolation. Older integrations constructing `DocumentService` without a registry or expecting immediate `indexed` status may fail and were not all run.
+
+Changed files: `backend/security/provenance_foundation.py`, `backend/rag/service.py`, `backend/main.py`, `tests/backend/test_batch2b3b_pending_ingestion.py`, `tests/backend/test_batch2b3a_upload_integrity.py`, `tests/backend/test_batch2b3_ingestion_preconditions.py`, `tests/backend/test_batch2b2a_content_boundary.py`, and this report. No stage, commit, push, merge or deploy.
+
+**Conditional ACTIVE: NO-GO.** Implement and independently validate trusted filesystem handling, durable backend and model identity, exact index/manifest guarantees, real restart/crash reconciliation, revocation synchronization, current identity/clearance and rollback assumptions before changing pending state or retrieval. No Batch 2C work started.

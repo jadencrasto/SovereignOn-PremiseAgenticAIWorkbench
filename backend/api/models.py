@@ -41,7 +41,7 @@ async def list_models(
     # router doesn't support it (e.g., in legacy test mocks).
     models_with_caps = []
     try:
-        models_with_caps = await model_router.list_models_with_capabilities()
+        models_with_caps = await model_router.list_models_with_capabilities(available)
     except Exception:
         pass
 
@@ -147,8 +147,8 @@ async def scan_local_models(
                         "modified_at": m.get("modified_at", ""),
                         "capabilities": caps,
                     })
-    except Exception as exc:
-        error_msg = str(exc)
+    except Exception:
+        error_msg = 'Local model scan is temporarily unavailable.'
 
     # Dynamic detection based on discovered model capabilities
     reasoning_models = [m["name"] for m in discovered_models if "chat" in m["capabilities"] or "reasoning" in m["capabilities"]]
@@ -165,6 +165,7 @@ async def scan_local_models(
         "models_count": len(discovered_models),
         "models": discovered_models,
         "error": error_msg,
+        "error_code": "MODEL_SCAN_FAILED" if error_msg else None,
         "readiness": {
             "reasoning_model_ready": has_reasoning,
             "reasoning_model_name": reasoning_models[0] if reasoning_models else None,
@@ -201,13 +202,14 @@ async def preload_model(
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             # Trigger generate with empty prompt and 30m keep_alive to load weights
-            await client.post(
+            response = await client.post(
                 f"{ollama_url}/api/generate",
                 json={"model": clean_model, "prompt": "", "keep_alive": "30m"},
             )
+            response.raise_for_status()
         return {"status": "ok", "model": clean_model, "warmed": True}
     except Exception as exc:
         logger.warning("Failed to preload model: %s", exc)
-        return {"status": "warning", "error": str(exc)}
+        return {"status": "warning", "error": "Model preload is temporarily unavailable.", "error_code": "MODEL_PRELOAD_FAILED"}
 
 

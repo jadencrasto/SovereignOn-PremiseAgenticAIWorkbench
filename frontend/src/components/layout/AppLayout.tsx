@@ -24,6 +24,7 @@ import { DemoScenarioLauncher } from '../demo/DemoScenarioLauncher';
 import { ArtifactViewer } from '../artifacts/ArtifactViewer';
 import { RolePortalView } from '../auth/RolePortalView';
 import { StatusBar } from './StatusBar';
+import { capabilityFor, describeCapability, permitsCapability, type CapabilityName } from '../../api/capabilities';
 import type { ActiveTab } from '../../types';
 import {
   Zap,
@@ -55,7 +56,7 @@ interface TabItem {
 
 export const AppLayout: React.FC = () => {
   const { activeTab, setActiveTab, isBackendConnected, documents, selectedModel } = useWorkbench();
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
   // Check URL pathname on mount and on history changes (/admin, /manager, /user)
@@ -122,7 +123,7 @@ export const AppLayout: React.FC = () => {
                 Sovereign Dashboard
               </div>
               <div className="text-[10px] text-slate-500 font-medium tracking-wide mt-1 uppercase">
-                Air-Gapped Agentic Workbench
+                Local development workbench
               </div>
             </div>
           </div>
@@ -208,10 +209,10 @@ export const AppLayout: React.FC = () => {
       {/* Main Full-Screen Native Studio Workspace */}
       <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[#f0f7ff]">
         {activeTab === 'demo' && <DemoScenarioLauncher />}
-        {activeTab === 'chat' && <ChatView />}
+        {activeTab === 'chat' && !isLoading && user && <ChatView key={user.id} />}
         {activeTab === 'tasks' && <TaskHistoryView />}
-        {activeTab === 'artifacts' && <ArtifactViewer />}
-        {activeTab === 'documents' && <DocumentsView />}
+        {activeTab === 'artifacts' && <CapabilityView name="artifact_access" allowed={<ArtifactViewer />} />}
+        {activeTab === 'documents' && <CapabilityView name="document_rag" allowed={<DocumentsView />} />}
         {activeTab === 'graph' && <CompanyKnowledgeGraph />}
         {activeTab === 'models' && <ModelScanner />}
         {activeTab === 'tools' && <ToolsView />}
@@ -229,3 +230,13 @@ export const AppLayout: React.FC = () => {
     </div>
   );
 };
+
+function CapabilityView({ name, allowed }: { name: CapabilityName; allowed: React.ReactNode }) {
+  const { capabilities, isCheckingHealth } = useWorkbench();
+  if (permitsCapability(capabilities, name)) return allowed;
+  const status = capabilityFor(capabilities, name, !isCheckingHealth);
+  return <section className="m-6 p-5 border rounded-xl bg-white text-slate-800">
+    <h2 className="font-semibold capitalize">{status.state}</h2>
+    <p className="mt-1 text-sm">{describeCapability(status)}</p>
+  </section>;
+}

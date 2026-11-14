@@ -20,6 +20,7 @@ Phase 5: vision support
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 from typing import AsyncIterator, List, Optional
 
@@ -51,6 +52,7 @@ class OllamaProvider(BaseModelProvider):
         # High-performance client with persistent connection pooling & keep-alive
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
+            trust_env=False,
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=120.0),
             timeout=httpx.Timeout(connect=5.0, read=timeout, write=15.0, pool=5.0),
         )
@@ -64,83 +66,59 @@ class OllamaProvider(BaseModelProvider):
     # Public interface implementation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _decode_response(data: object) -> tuple[str, bool]:
+        if not isinstance(data, dict) or not isinstance(data.get("done"), bool):
+            raise RuntimeError("Invalid model response")
+        message = data.get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise RuntimeError("Invalid model response")
+        if data.get("error") or message.get("tool_calls"):
+            raise RuntimeError("Invalid model response")
+        return message["content"], data["done"]
+
+    @staticmethod
+    def _http_error(exc: Exception) -> RuntimeError:
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+            return RuntimeError("Selected model is unavailable")
+        if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+            return RuntimeError("Model request timed out")
+        return RuntimeError("Model provider unavailable")
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
-        """Non-streaming chat completion.  Waits for full response."""
-        payload = self._build_payload(request, stream=False)
-        has_images = any(m.images for m in request.messages) or bool(request.images)
-        logger.debug(
-            "Ollama chat: model=%s messages=%d vision=%s",
-            request.model, len(request.messages), has_images,
-        )
         try:
-            resp = await self._client.post("/api/chat", json=payload)
-            resp.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise RuntimeError(
-                f"Cannot reach Ollama at {self._base_url}. "
-                "Make sure Ollama is running: 'ollama serve'"
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"Ollama API error {exc.response.status_code}: {exc.response.text}"
-            ) from exc
-
-        data = resp.json()
-        content = data.get("message", {}).get("content", "")
-        finish_reason = "stop" if data.get("done") else "length"
-
-        return ChatResponse(
-            content=content,
-            model=request.model,
-            provider=self.provider_name,
-            finish_reason=finish_reason,
-        )
+            async with asyncio.timeout(self._timeout):
+                resp = await self._client.post("/api/chat", json=self._build_payload(request, stream=False))
+                resp.raise_for_status()
+                try:
+                    content, done = self._decode_response(resp.json())
+                except (ValueError, TypeError) as exc:
+                    raise RuntimeError("Invalid model response") from exc
+                if not done or not content.strip():
+                    raise RuntimeError("Incomplete model response")
+                return ChatResponse(content=content, model=request.model, provider=self.provider_name)
+        except (httpx.HTTPError, TimeoutError) as exc:
+            raise self._http_error(exc) from exc
 
     async def chat_stream(self, request: ChatRequest) -> AsyncIterator[ChatChunk]:
-        """
-        Streaming chat completion.
-
-        Ollama sends one JSON object per line while streaming.
-        Each line has {"message": {"content": "..."}, "done": false/true}.
-
-        Phase 5: vision images are included in the payload when present;
-        the streaming protocol is identical regardless.
-        """
-        payload = self._build_payload(request, stream=True)
-        has_images = any(m.images for m in request.messages) or bool(request.images)
-        logger.debug(
-            "Ollama stream: model=%s messages=%d vision=%s",
-            request.model, len(request.messages), has_images,
-        )
         try:
-            async with self._client.stream(
-                "POST", "/api/chat", json=payload
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.warning("Ollama stream: could not parse line: %r", line)
-                        continue
-
-                    delta = data.get("message", {}).get("content", "")
-                    done = data.get("done", False)
-                    yield ChatChunk(delta=delta, done=done)
-                    if done:
-                        break
-
-        except httpx.ConnectError as exc:
-            raise RuntimeError(
-                f"Cannot reach Ollama at {self._base_url}. "
-                "Make sure Ollama is running: 'ollama serve'"
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"Ollama API error {exc.response.status_code}: {exc.response.text}"
-            ) from exc
+            async with asyncio.timeout(self._timeout):
+                async with self._client.stream("POST", "/api/chat", json=self._build_payload(request, stream=True)) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except (ValueError, TypeError) as exc:
+                            raise RuntimeError("Invalid model response") from exc
+                        delta, done = self._decode_response(data)
+                        yield ChatChunk(delta=delta, done=done)
+                        if done:
+                            return
+                    raise RuntimeError("Model response interrupted")
+        except (httpx.HTTPError, TimeoutError) as exc:
+            raise self._http_error(exc) from exc
 
     async def list_models(self) -> List[str]:
         """Return model tags available in the local Ollama instance."""

@@ -78,6 +78,10 @@ def create_document_search(retriever) -> callable:
         **kwargs: Any,
     ) -> List[dict]:
         """Search the local vector store for relevant document chunks with clearance gating."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            from backend.rag.retriever import RetrievalBlocked
+            raise RetrievalBlocked("Document retrieval is unavailable.")
         from backend.auth.models import resolve_user_clearance
 
         # SEC-01: Authenticated clearance context MUST come only from server-injected
@@ -89,6 +93,9 @@ def create_document_search(retriever) -> callable:
             user_clearance = resolve_user_clearance(kwargs["user_role"])
         else:
             user_clearance = "viewer"
+
+        from backend.auth.request_context import cap_clearance
+        user_clearance = cap_clearance(user_clearance)
 
         # Enforce explicit hard RAG timeout (Test B)
         from backend.config import settings

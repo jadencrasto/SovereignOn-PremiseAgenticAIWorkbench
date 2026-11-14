@@ -5,7 +5,7 @@ Industrial XLSX / Spreadsheet report generation tool with formatting and styling
 
 Security & Integrity:
 - Writes strictly within data/sandbox/
-- Atomic file generation via temporary files
+- Exclusive opaque file creation
 - Rejection of path traversal and unsafe filenames
 - Computes SHA-256 artifact hash for cryptographic audit logging
 - Full support for openpyxl styling (headers, borders, color-coded compliance status)
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from backend.tools.safety import atomic_write_file, sanitize_filename, validate_path_within
+from backend.tools.safety import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
         if not safe_name.lower().endswith(".xlsx"):
             safe_name += ".xlsx"
 
-        target_path = validate_path_within(safe_name, sandbox_dir)
+        display_name = safe_name
 
         # Build workbook using openpyxl
         try:
@@ -143,7 +143,10 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
 
             # Row 1: Title
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(args.headers), 4))
-            ws.cell(row=1, column=1, value=args.title).font = title_font
+            title_cell = ws.cell(row=1, column=1, value=args.title)
+            if isinstance(args.title, str) and args.title.startswith("="):
+                title_cell.data_type = "s"
+            title_cell.font = title_font
 
             # Row 2: Metadata / Notes
             ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max(len(args.headers), 4))
@@ -156,6 +159,8 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
             header_row = 4
             for col_idx, header in enumerate(args.headers, 1):
                 cell = ws.cell(row=header_row, column=col_idx, value=header)
+                if isinstance(header, str) and header.startswith("="):
+                    cell.data_type = "s"
                 cell.font = header_font
                 cell.fill = header_fill
                 cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -185,6 +190,8 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
                             cell_value = items[0]
 
                     cell = ws.cell(row=current_row, column=col_idx, value=cell_value)
+                    if isinstance(cell_value, str) and cell_value.startswith("="):
+                        cell.data_type = "s"
                     cell.font = regular_font
                     cell.border = thin_border
                     cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
@@ -219,14 +226,16 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 18)
 
 
-            # Write out to temp file and rename atomically
-            temp_target = target_path.with_suffix(".tmp.xlsx")
-            wb.save(temp_target)
-            wb.close()
-
-            # Atomic replace
+            # An incomplete file remains quarantined if writing fails.
+            from backend.tools.artifact_storage import create_artifact_file
             import os
-            os.replace(temp_target, target_path)
+            artifact_id, safe_name, stream = create_artifact_file(sandbox_dir, display_name)
+            target_path = sandbox_dir.resolve() / safe_name
+            with stream:
+                wb.save(stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            wb.close()
 
         except Exception as exc:
             logger.error("XlsxReport generation failed: %s", exc)
@@ -245,6 +254,8 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
         return {
             "created_path": rel_path,
             "filename": safe_name,
+            "artifact_id": artifact_id,
+            "display_name": display_name,
             "size_bytes": len(file_bytes),
             "row_count": len(args.rows),
             "column_count": len(args.headers),

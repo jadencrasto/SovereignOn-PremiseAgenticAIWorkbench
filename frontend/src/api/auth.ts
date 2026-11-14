@@ -28,13 +28,14 @@ export async function loginApi(username: string, password: string): Promise<{ to
 }
 
 export async function logoutApi(): Promise<void> {
-  await fetch(`${BASE_URL}/logout`, {
+  const response = await fetch(`${BASE_URL}/logout`, {
     method: 'POST',
     credentials: 'include',
     headers: {
       'X-Requested-With': 'XMLHttpRequest',
     },
   });
+  if (!response.ok) throw new Error('Sign out could not be confirmed. The server session may still be active.');
 }
 
 export async function getMeApi(): Promise<User> {

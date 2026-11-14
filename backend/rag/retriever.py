@@ -53,6 +53,10 @@ class RetrievedChunk:
 # Retriever
 # ---------------------------------------------------------------------------
 
+class RetrievalBlocked(PermissionError):
+    """Retrieval was denied by the document security policy."""
+
+
 class Retriever:
     """
     Semantic retrieval over the local ChromaDB collection.
@@ -104,6 +108,9 @@ class Retriever:
             List of RetrievedChunk, ordered by relevance (most relevant first).
             Returns [] if the collection is empty or embedding fails.
         """
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            raise RetrievalBlocked("Document retrieval is unavailable.")
         from backend.auth.models import is_clearance_sufficient, parse_clearance
 
         k = top_k or self._top_k
@@ -118,8 +125,8 @@ class Retriever:
         try:
             query_embedding = await self._embedder.embed(query)
         except Exception as exc:
-            logger.error("Retriever: failed to embed query: %s", exc)
-            return []
+            logger.error("Retriever: failed to embed query")
+            raise RuntimeError("Document embedding unavailable.") from exc
 
         # Oversample candidate chunks so clearance filtering returns up to requested top_k permitted chunks
         candidate_k = min(max(k * 4, 25), store_count)
@@ -128,8 +135,8 @@ class Retriever:
         try:
             raw = self._store.query(query_embedding=query_embedding, top_k=candidate_k)
         except Exception as exc:
-            logger.error("Retriever: ChromaDB query failed: %s", exc)
-            return []
+            logger.error("Retriever: index query failed")
+            raise RuntimeError("Document retrieval failed.") from exc
 
         # Parse results and apply clearance filtering
         results: List[RetrievedChunk] = []

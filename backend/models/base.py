@@ -40,6 +40,10 @@ class Message:
     # Phase 5: optional base64-encoded images for multimodal messages.
     # Empty list → text-only message (100% backward compatible).
     images: List[str] = field(default_factory=list)
+    # Persistence metadata is never sent to inference providers.
+    id: Optional[str] = None
+    created_at: Optional[str] = None
+    extra_fields: dict = field(default_factory=dict, repr=False)
 
 
 @dataclass

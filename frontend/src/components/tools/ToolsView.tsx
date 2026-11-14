@@ -64,7 +64,7 @@ export const ToolsView: React.FC = () => {
             Agent Tool Registry &amp; Capabilities
           </h1>
           <p className="text-sm text-slate-500 mt-1 max-w-xl">
-            Controlled tool integrations available to the agent engine. Tools execute strictly inside isolated local boundaries with audit logging and policy controls.
+            Tools registered with the agent engine and their configured policy.
           </p>
         </div>
 
@@ -72,7 +72,7 @@ export const ToolsView: React.FC = () => {
         <div className="p-4 rounded-xl border border-slate-200 bg-white flex items-center gap-3 shadow-sm">
           <Shield className="w-6 h-6 text-blue-500 shrink-0" />
           <div className="text-sm text-slate-600 leading-relaxed">
-            <span className="font-bold text-slate-900">Tool Sandbox Policy:</span> All tool dispatches are constrained to local directories and subprocesses. Outbound cloud API requests and uncontrolled filesystem operations are prohibited by design. Every execution is audit-logged.
+            <span className="font-bold text-slate-900">Tool Sandbox Policy:</span> Generated code execution and approval-dependent tool operations are blocked in this build.
           </div>
         </div>
 
@@ -96,8 +96,8 @@ export const ToolsView: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {tools.map((tool) => {
               const Icon = TOOL_ICONS[tool.name] || Wrench;
-              const statusVariant = tool.enabled ? 'emerald' as const : 'slate' as const;
-              const statusText = tool.enabled ? 'Active' : 'Disabled';
+              const statusVariant = tool.availability === 'blocked' || !tool.enabled ? 'slate' as const : 'emerald' as const;
+              const statusText = tool.availability === 'blocked' ? 'Unavailable' : tool.enabled ? 'Configured' : 'Disabled';
 
               return (
                 <div
@@ -119,6 +119,7 @@ export const ToolsView: React.FC = () => {
                     </div>
 
                     <p className="text-sm text-slate-600 leading-relaxed">{tool.description}</p>
+                    {tool.availability === 'blocked' && <p className="text-sm text-slate-600">{tool.availability_reason || 'This tool is unavailable.'}</p>}
 
                     {/* Parameter Schema */}
                     <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 font-mono text-xs space-y-2">

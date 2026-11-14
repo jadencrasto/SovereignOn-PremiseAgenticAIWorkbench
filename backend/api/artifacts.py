@@ -22,6 +22,7 @@ from backend.auth.dependencies import require_permission
 from backend.auth.models import Permission, User
 from backend.config import settings
 from backend.tools.safety import validate_path_within
+from backend.security.public_errors import public_error
 
 router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 
@@ -37,34 +38,32 @@ _MIME_TYPES = {
 }
 
 
-def _is_artifact_accessible(filename: str, user: User, task_store: Optional[Any]) -> bool:
+def _is_artifact_accessible(filename: str, user: User, task_store: Optional[Any], memory: Optional[Any] = None) -> bool:
     """
     Evaluate whether user is authorized to access the artifact:
     - Admins have access to all artifacts.
-    - Operators with MANAGE_TASKS have access to legacy/unowned artifacts and their own.
-    - Non-operators can only access artifacts matching their own user.id.
-    - Legacy unowned artifacts (no DB record or user_id is None) are hidden from ordinary viewers.
+    - Administrators have explicit cross-owner and legacy access.
+    - Everyone else requires a matching server-owned artifact record.
+    - A linked task must have the same owner as the artifact.
     """
-    from backend.auth.models import UserRole, has_permission, Permission
-    if user.role == UserRole.ADMIN:
+    # Existing artifacts do not carry revalidatable transitive task/source
+    # provenance. Even an unlinked legacy file may contain a task result.
+    # Withhold access until that provenance can be verified (including admins).
+    from backend.security.task_access import task_content_revalidation_available
+    if not task_content_revalidation_available():
+        return False
+
+    from backend.auth.models import UserRole
+    record = task_store.get_artifact(filename) if task_store else None
+    if record and record.get('task_id'):
+        task = task_store.get_task(record['task_id'])
+        owner = str(record.get('user_id') or '')
+        if (not task or not owner or str(task.get('user_id') or '') != owner or not memory
+                or not memory.is_owned_by(str(task.get('session_id') or ''), owner)):
+            return False
+    if user.role == UserRole.ADMIN or user.role == UserRole.ADMIN.value:
         return True
-    if has_permission(user.role, Permission.MANAGE_TASKS):
-        return True
-
-    if not task_store:
-        # Without task store, fail safe for non-operators
-        return False
-
-    record = task_store.get_artifact(filename)
-    if not record:
-        # Legacy artifact: not accessible to ordinary users
-        return False
-
-    art_user_id = record.get("user_id")
-    if not art_user_id:
-        return False
-
-    return str(art_user_id) == str(user.id)
+    return bool(record and record.get('user_id') and str(record['user_id']) == str(user.id))
 
 
 @router.get("", summary="List generated artifacts")
@@ -73,14 +72,19 @@ async def list_artifacts(
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
 ):
     """Returns metadata for all files currently in the sandbox output directory visible to caller."""
-    sb_dir = settings.sandbox_dir
+    from backend.security.task_access import task_content_revalidation_available
+    if not task_content_revalidation_available():
+        raise HTTPException(status_code=503, detail='Artifact access is temporarily unavailable.',
+                            headers={'X-Error-Code': 'ARTIFACT_UNAVAILABLE'})
+    sb_dir = getattr(request.app.state, 'settings', settings).sandbox_dir
     sb_dir.mkdir(parents=True, exist_ok=True)
 
     task_store = getattr(request.app.state, "task_store", None)
+    memory = getattr(getattr(request.app.state, 'engine', None), '_memory', None)
     artifacts: List[Dict[str, Any]] = []
     for entry in sorted(sb_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if entry.is_file() and not entry.name.startswith("."):
-            if not _is_artifact_accessible(entry.name, current_user, task_store):
+        if entry.is_file() and not entry.is_symlink() and not entry.name.startswith("."):
+            if not _is_artifact_accessible(entry.name, current_user, task_store, memory):
                 continue
             stat = entry.stat()
             file_bytes = entry.read_bytes()
@@ -88,7 +92,6 @@ async def list_artifacts(
             suffix = entry.suffix.lower()
             artifacts.append({
                 "filename": entry.name,
-                "path": f"data/sandbox/{entry.name}",
                 "size_bytes": stat.st_size,
                 "modified_at": stat.st_mtime,
                 "format": suffix.lstrip("."),
@@ -121,14 +124,15 @@ async def preview_artifact(
         raise HTTPException(status_code=400, detail="Invalid filename format.")
 
     task_store = getattr(request.app.state, "task_store", None)
-    if not _is_artifact_accessible(filename, current_user, task_store):
+    memory = getattr(getattr(request.app.state, 'engine', None), '_memory', None)
+    if not _is_artifact_accessible(filename, current_user, task_store, memory):
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
 
-    sb_dir = settings.sandbox_dir
+    sb_dir = getattr(request.app.state, 'settings', settings).sandbox_dir
     try:
         target_path = validate_path_within(filename, sb_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
@@ -151,8 +155,8 @@ async def preview_artifact(
                 "truncated": truncated,
                 "metadata": {"size_bytes": file_size, "encoding": "utf-8"}
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to read text file: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     # Handle DOCX
     elif suffix == ".docx":
@@ -190,8 +194,8 @@ async def preview_artifact(
                     "table_count": len(tables),
                 }
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to parse DOCX document: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     # Handle XLSX
     elif suffix in (".xlsx", ".xls"):
@@ -234,8 +238,8 @@ async def preview_artifact(
                     "columns": len(headers),
                 }
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to parse XLSX workbook: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     # Handle PDF
     elif suffix == ".pdf":
@@ -264,8 +268,8 @@ async def preview_artifact(
                     "page_count": len(reader.pages),
                 }
             }
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to parse PDF document: {str(exc)}")
+        except Exception:
+            raise HTTPException(status_code=422, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     else:
         return {
@@ -291,14 +295,15 @@ async def download_artifact(
         raise HTTPException(status_code=400, detail="Invalid filename format.")
 
     task_store = getattr(request.app.state, "task_store", None)
-    if not _is_artifact_accessible(filename, current_user, task_store):
+    memory = getattr(getattr(request.app.state, 'engine', None), '_memory', None)
+    if not _is_artifact_accessible(filename, current_user, task_store, memory):
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")
 
-    sb_dir = settings.sandbox_dir
+    sb_dir = getattr(request.app.state, 'settings', settings).sandbox_dir
     try:
         target_path = validate_path_within(filename, sb_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=public_error('OPERATION_UNAVAILABLE')) from None
 
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"Artifact '{filename}' not found.")

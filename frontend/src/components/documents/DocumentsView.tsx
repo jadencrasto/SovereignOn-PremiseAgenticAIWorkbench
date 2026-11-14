@@ -4,10 +4,11 @@ import { DropZone } from './DropZone';
 import { DocumentList } from './DocumentList';
 import { DocumentDetailModal } from './DocumentDetailModal';
 import { uploadDocument, deleteDocument } from '../../api/documents';
+import { capabilityFor, describeCapability } from '../../api/capabilities';
 import { FileText, RefreshCw, Database, Shield, Layers } from 'lucide-react';
 
 export const DocumentsView: React.FC = () => {
-  const { documents, isDocsLoading, refreshDocuments, addToast } = useWorkbench();
+  const { documents, isDocsLoading, documentsError, refreshDocuments, addToast, capabilities } = useWorkbench();
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
 
@@ -36,6 +37,29 @@ export const DocumentsView: React.FC = () => {
       addToast('error', err.message || 'Failed to delete document.');
     }
   };
+
+  const status = capabilityFor(capabilities, 'document_rag');
+  if (status.state !== 'available') {
+    return (
+      <div className="flex-1 bg-white p-6">
+        <h1 className="text-xl font-bold text-slate-900">Document Knowledge &amp; Local RAG</h1>
+        <p role="status" className="mt-3 text-sm text-slate-700">
+          Document ingestion and retrieval are {status.state}. {describeCapability(status)}
+        </p>
+        <p className="mt-2 text-xs text-slate-500">
+          Planned text formats: PDF, DOCX, TXT and Markdown. No documents can be indexed or searched while this capability is unavailable.
+        </p>
+      </div>
+    );
+  }
+
+  if (documentsError) {
+    return <div className="flex-1 bg-white p-6">
+      <h1 className="text-xl font-bold text-slate-900">Document Knowledge &amp; Local RAG</h1>
+      <p role="alert" className="mt-3 text-sm text-slate-700">{documentsError}</p>
+      <button className="mt-3 text-sm underline" onClick={() => refreshDocuments()} disabled={isDocsLoading}>Retry</button>
+    </div>;
+  }
 
   const totalChunks = documents.reduce((acc, d) => acc + d.chunk_count, 0);
 
@@ -90,7 +114,7 @@ export const DocumentsView: React.FC = () => {
               <Shield className="w-4 h-4 text-blue-600" />
             </div>
             <div className="text-sm font-semibold text-blue-600 font-mono mt-1">PDF, DOCX, TXT, MD</div>
-            <div className="text-[11px] text-slate-500 font-mono">100% On-Premise Air-Gapped</div>
+            <div className="text-[11px] text-slate-500 font-mono">Local workspace</div>
           </div>
         </div>
 

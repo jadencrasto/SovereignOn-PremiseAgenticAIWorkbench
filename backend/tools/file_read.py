@@ -138,6 +138,9 @@ def create_file_read(upload_dir: Path) -> callable:
 
     async def execute_file_read(args: FileReadInput) -> dict:
         """Read a text file from the controlled workspace."""
+        from backend.security.provenance_foundation import document_content_allowed
+        if not document_content_allowed():
+            raise PermissionError('Workspace document content unavailable.')
         raw_path = args.relative_path or args.filename or args.path or args.file_path
         if not raw_path:
             raise ValueError("file_read requires 'relative_path' or 'filename'")

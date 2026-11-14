@@ -75,7 +75,7 @@ class TestExitCodeClassification:
 
     @pytest.mark.asyncio
     async def test_control_c_treated_as_failure_with_description(self, tmp_path: Path):
-        """When a worker returns exit code 3221225786, success MUST be False with clear description."""
+        """Disabled execution never invokes a worker, regardless of its hypothetical status."""
         sandbox = tmp_path / "sandbox"
         sandbox.mkdir()
 
@@ -88,11 +88,11 @@ class TestExitCodeClassification:
             "output_limit_exceeded": False,
         }
 
-        with patch("backend.tools.code_execution._run_subprocess_worker", return_value=fake_result):
-            res = await exec_fn(CodeExecutionInput(code="print('hello')"))
-            assert res["success"] is False
-            assert res["exit_code"] == 3221225786
-            assert "STATUS_CONTROL_C_EXIT" in res["exit_code_description"]
+        with patch("backend.tools.code_execution._run_subprocess_worker", return_value=fake_result) as worker:
+            with pytest.raises(PermissionError):
+                await exec_fn(CodeExecutionInput(code="print('hello')"))
+            worker.assert_not_called()
+        assert classify_exit_code(fake_result["exit_code"]) == "STATUS_CONTROL_C_EXIT"
 
 
 # ============================================================================

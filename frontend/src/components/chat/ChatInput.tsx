@@ -15,6 +15,10 @@ interface ChatInputProps {
   onSendMessage: (text: string, image?: File) => void;
   onStopStream: () => void;
   isStreaming: boolean;
+  sendBlocked: boolean;
+  imageBlocked: boolean;
+  sendStatus?: string;
+  imageStatus?: string;
   onClearSession: () => void;
 }
 
@@ -22,6 +26,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   onStopStream,
   isStreaming,
+  sendBlocked,
+  imageBlocked,
+  sendStatus,
+  imageStatus,
   onClearSession,
 }) => {
   const [value, setValue] = useState('');
@@ -39,7 +47,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   }, [imagePreviewUrl]);
 
   const handleSubmit = useCallback(() => {
-    if (!value.trim() || isStreaming) return;
+    if (!value.trim() || isStreaming || (attachedImage ? imageBlocked : sendBlocked)) return;
     onSendMessage(value.trim(), attachedImage ?? undefined);
     setValue('');
     setAttachedImage(null);
@@ -49,7 +57,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [value, isStreaming, onSendMessage, attachedImage, imagePreviewUrl]);
+  }, [value, isStreaming, onSendMessage, attachedImage, imagePreviewUrl, sendBlocked, imageBlocked]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -68,22 +76,28 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   const handleAttachClick = () => {
-    fileInputRef.current?.click();
+    if (!imageBlocked) fileInputRef.current?.click();
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || imageBlocked) return;
 
     e.target.value = '';
 
     if (!ALLOWED_IMAGE_TYPES.includes(file.type as any)) {
+      setAttachedImage(null);
+      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+      setImagePreviewUrl(null);
       setImageError(`INVALID FORMAT: Allowed PNG, JPEG, WebP.`);
       return;
     }
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+    if (file.size === 0 || file.size > MAX_IMAGE_SIZE_BYTES) {
+      setAttachedImage(null);
+      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+      setImagePreviewUrl(null);
       const mb = (file.size / (1024 * 1024)).toFixed(1);
-      setImageError(`OVERSIZE ERROR: (${mb} MB exceeds 10 MB limit).`);
+      setImageError(file.size === 0 ? 'Image file is empty.' : `OVERSIZE ERROR: (${mb} MB exceeds 10 MB limit).`);
       return;
     }
 
@@ -102,17 +116,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setImageError(null);
   };
 
-  const canSend = !isStreaming && value.trim().length > 0;
+  const canSend = !isStreaming && !(attachedImage ? imageBlocked : sendBlocked) && value.trim().length > 0;
 
   return (
     <div className="shrink-0 border-t border-slate-200 bg-white px-6 py-4 font-sans shadow-sm">
+      {(attachedImage ? imageStatus : sendStatus) && <p role="status" className="text-xs text-slate-600 mb-2">{attachedImage ? imageStatus : sendStatus}</p>}
       {imageError && (
-        <div className="mb-2.5 flex items-center justify-between p-2.5 bg-[#ffe4e6] text-[#be123c] font-bold text-xs border-2 border-[#f43f5e]">
+        <div role="alert" className="mb-2.5 flex items-center justify-between p-2.5 bg-[#ffe4e6] text-[#be123c] font-bold text-xs border-2 border-[#f43f5e]">
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0" />
             <span>{imageError}</span>
           </div>
-          <button onClick={() => setImageError(null)}>
+          <button aria-label="Dismiss image error" onClick={() => setImageError(null)}>
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -152,8 +167,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         {/* Attach button */}
         <button
           onClick={handleAttachClick}
-          disabled={isStreaming}
-          title="Attach image"
+          aria-label="Attach image"
+          disabled={isStreaming || imageBlocked}
+          title={imageStatus || "Attach image"}
           className={`
             flex-none w-11 h-11 border rounded-lg flex items-center justify-center transition-colors
             ${attachedImage
@@ -171,6 +187,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           <textarea
             ref={textareaRef}
             id="chat-input-textarea"
+            aria-label="Message"
             value={value}
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
@@ -217,6 +234,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
           <button
             id="clear-session-btn"
+            aria-label="Start new conversation"
             onClick={onClearSession}
             disabled={isStreaming}
             className="w-11 h-11 rounded-lg border border-slate-200 bg-slate-50 text-slate-500 hover:text-rose-500 hover:border-rose-200 hover:bg-rose-50 transition-colors flex items-center justify-center disabled:opacity-50"

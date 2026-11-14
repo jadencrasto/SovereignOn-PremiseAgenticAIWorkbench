@@ -21,6 +21,7 @@ Design:
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import AsyncIterator
 
 from backend.models.base import ChatRequest, Message
@@ -113,7 +114,12 @@ class MultimodalService:
             stream=False,
         )
 
-        response = await self._provider.chat(request)
+        try:
+            response = await asyncio.wait_for(self._provider.chat(request), timeout=60.0)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Vision provider timed out.") from exc
+        if not isinstance(getattr(response, 'content', None), str) or not response.content.strip():
+            raise RuntimeError("Vision provider returned an invalid response.")
 
         logger.info(
             "vision_done | model=%s observation_len=%d",
@@ -162,7 +168,7 @@ class MultimodalService:
                 break
 
 
-def build_visual_context_message(observation: str, user_prompt: str) -> str:
+def build_visual_context_message(observation: str, user_prompt: str, model: str = "llava:7b") -> str:
     """
     Build the context string that injects the visual observation into
     the reasoning agent's working memory with strict provenance boundaries.
@@ -170,13 +176,13 @@ def build_visual_context_message(observation: str, user_prompt: str) -> str:
     from backend.agent.injection_guard import wrap_untrusted_visual_observation
 
     wrapped_vis = wrap_untrusted_visual_observation(
-        model="llava:7b",
+        model=model,
         observation=observation.strip(),
         source_image="uploaded_image",
     )
 
     return (
-        "[VISUAL OBSERVATION from local vision model (llava:7b)]\n"
+        f"[VISUAL OBSERVATION from local vision model ({model})]\n"
         f"User question regarding image: {user_prompt}\n\n"
         f"{wrapped_vis}\n"
         "[END VISUAL OBSERVATION]\n\n"
