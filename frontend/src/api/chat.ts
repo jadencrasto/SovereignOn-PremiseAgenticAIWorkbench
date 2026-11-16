@@ -110,7 +110,7 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
 }
 
 
-export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; created_at?: string | null; updated_at?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: {id?: string | null; role: 'system' | 'user' | 'assistant'; content: string; created_at?: string | null; withheld?: boolean; tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[]}[]}> {
+export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; created_at?: string | null; updated_at?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: {id?: string | null; role: 'system' | 'user' | 'assistant'; content: string; created_at?: string | null; withheld?: boolean; response_state?: 'interrupted' | 'failed' | null; tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[]}[]}> {
   return apiRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 

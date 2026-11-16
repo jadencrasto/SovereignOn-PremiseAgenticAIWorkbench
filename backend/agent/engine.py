@@ -289,26 +289,41 @@ class AgentEngine:
         )
 
         accumulated = []
+        emitted = []
         completed = False
         pending = ""
-        async with aclosing(provider.chat_stream(request)) as provider_stream:
-            async for chunk in provider_stream:
-                if chunk.delta:
-                    accumulated.append(chunk.delta)
-                    pending += chunk.delta
-                    if "<tool_call" in pending.lower() or "</tool_call" in pending.lower():
-                        raise RuntimeError("Invalid model response")
-                    # Retain enough characters to detect a tag split across deltas.
-                    if len(pending) > 11:
-                        yield pending[:-11]
-                        pending = pending[-11:]
-                if chunk.done:
-                    completed = True
-                    break
-        if not completed or not "".join(accumulated).strip():
-            raise RuntimeError("Model response interrupted")
-        if pending:
-            yield pending
+        origin_identity = self._memory.stream_identity(session_id)
+        try:
+            async with aclosing(provider.chat_stream(request)) as provider_stream:
+                async for chunk in provider_stream:
+                    if chunk.delta:
+                        accumulated.append(chunk.delta)
+                        pending += chunk.delta
+                        if "<tool_call" in pending.lower() or "</tool_call" in pending.lower():
+                            raise RuntimeError("Invalid model response")
+                        if len(pending) > 11:
+                            visible, pending = pending[:-11], pending[-11:]
+                            emitted.append(visible)
+                            yield visible
+                    if chunk.done:
+                        completed = True
+                        break
+            if not completed or not "".join(accumulated).strip():
+                raise RuntimeError("Model response interrupted")
+            if pending:
+                emitted.append(pending)
+                yield pending
+        except BaseException as exc:
+            # Do not persist the withheld detection buffer or mask the original failure.
+            try:
+                partial = ''.join(emitted)
+                provenance = self._plain_response_provenance(session_id, partial, sources, independent)
+                self._memory.record_incomplete_plain_response(
+                    session_id, origin_identity, partial,
+                    'failed' if isinstance(exc, Exception) else 'interrupted', provenance)
+            except Exception:
+                logger.warning('Could not persist incomplete response', exc_info=True)
+            raise
 
         full_response = "".join(accumulated)
         from backend.security.conversation_access import source_provenance
@@ -6006,6 +6021,8 @@ class AgentEngine:
         for message in self._memory.get_history(session_id):
             if message.role != 'assistant':
                 history.append(message)
+                continue
+            if message.extra_fields.get('response_state_v1') in ('interrupted', 'failed'):
                 continue
             provenance = message.extra_fields.get('access_provenance_v1')
             # Only the deterministic calculator has verified independent inputs.

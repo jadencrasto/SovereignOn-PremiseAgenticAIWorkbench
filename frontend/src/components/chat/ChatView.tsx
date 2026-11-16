@@ -350,8 +350,13 @@ export const ChatView: React.FC = () => {
           if (status === 'task_failed' || status === 'task_cancelled') taskCompletionReported = false;
           const nextStatus = states[status as keyof typeof states];
           if (nextStatus) setMessages(prev => prev.map(msg => msg.id === assistantId
-            ? { ...msg, workflowStatus: nextStatus } : msg));
-          // Final text may follow the task event; wait for the SSE terminal event.
+            ? { ...msg, workflowStatus: nextStatus,
+                ...((status === 'task_failed' || status === 'task_cancelled') ? { isStreaming: false } : {}) } : msg));
+          if (status === 'task_failed' || status === 'task_cancelled') {
+            setIsStreaming(false);
+            updateSessionCount();
+          }
+          // Successful task events can precede the final text and done event.
         },
         onDone: (_returnedSessionId: string, modelUsed: string) => {
           setMessages((prev) => {
@@ -651,11 +656,11 @@ export const ChatView: React.FC = () => {
       abortControllerRef.current = null;
       setIsStreaming(false);
       setMessages((prev) => {
-        const next = prev.map((msg) => (msg.isStreaming ? { ...msg, isStreaming: false, ...(msg.workflowStatus === 'planning' || msg.workflowStatus === 'executing' ? { workflowStatus: 'interrupted' as const } : {}) } : msg));
+        const next = prev.map((msg) => (msg.isStreaming ? { ...msg, isStreaming: false, workflowStatus: 'interrupted' as const } : msg));
         persistSession(next);
         return next;
       });
-      addToast('info', 'Generation interrupted.');
+      addToast('info', 'Stopped receiving the response. The operation may still be running.');
     }
   };
 
@@ -681,13 +686,6 @@ export const ChatView: React.FC = () => {
     setSessionTitle(session.title);
     setMessages(session.messages);
     addToast('info', `Resumed session: ${session.title}`);
-  };
-
-  const handleRetry = () => {
-    const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
-    if (lastUserMessage) {
-      handleSendMessage(lastUserMessage.content);
-    }
   };
 
   // Listen to Demo Scenario triggers
@@ -792,7 +790,6 @@ export const ChatView: React.FC = () => {
       <MessageList
         messages={messages}
         onSelectPrompt={handleSendMessage}
-        onRetry={handleRetry}
         onApprove={approvalsAllowed ? handleApprove : undefined}
         onReject={approvalsAllowed ? handleReject : undefined}
       />

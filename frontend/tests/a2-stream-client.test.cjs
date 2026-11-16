@@ -40,11 +40,19 @@ test('abandoned generation callbacks cannot alter the new conversation', () => {
  guarded.onDelta('late'); guarded.onDone(); guarded.onError('late error');
  assert.deepEqual(events, ['first']);
 });
-test('provider error remains a terminal error', async () => {
+test('malformed done after provider error remains a terminal error', async () => {
  const events = [];
  global.fetch = async () => response(['data: {"type":"error","content":"Selected model is unavailable"}\n\ndata: {"type":"done"}\n\n']);
  await streamSSE('/api/chat', {}, callbacks(events));
  assert.deepEqual(events, [['error','Selected model is unavailable']]);
+});
+test('malformed duplicate and late events after failed or cancelled tasks are ignored', async () => {
+ for (const status of ['task_failed', 'task_cancelled']) {
+  const events = [];
+  global.fetch = async () => response([`data: {"type":"${status}","task_id":"t"}\n\ndata: {"type":"${status}","task_id":"t"}\n\ndata: {"type":"delta","content":"late"}\n\ndata: {"type":"done"}\n\n`]);
+  await streamSSE('/api/chat', {}, {...callbacks(events), onTaskStatus: s => events.push(['task', s])});
+  assert.deepEqual(events, [['task', status]]);
+ }
 });
 test('terminal event cancels an otherwise open response body', async () => {
  const events=[]; let cancelled=false;

@@ -1,5 +1,5 @@
 # =============================================================================
-# .gitignore — Sovereign On-Premise Agentic AI Workbench
+# .gitignore â€” Sovereign On-Premise Agentic AI Workbench
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -71,3 +71,30 @@ eval/results/*_20*.md
 
 data/memory.json
 data/memory.json.lock
+
+# -----------------------------------------------------------------------------
+# .NET Build Outputs
+# -----------------------------------------------------------------------------
+bin/
+obj/
+
+# -----------------------------------------------------------------------------
+# Disk Images & ISOs
+# -----------------------------------------------------------------------------
+*.iso
+
+# -----------------------------------------------------------------------------
+# VM-Specific Scripts, Tools & Documentation
+# -----------------------------------------------------------------------------
+build-native-vm-iso.ps1
+test-sih-vm.ps1
+prototype/windows_vm_bootstrap/
+tools/offline_verification/native_vm/
+tools/offline_verification/build_native_vm_iso.py
+tools/offline_verification/test_native_vm_iso.py
+tests/backend/batch2b3lmn_vm_probe.ps1
+tests/backend/batch2b3o_vm_workflow.ps1
+tests/backend/setup_batch2b3o_vm.ps1
+tests/backend/test_batch2b3o_vm_workflow.ps1
+docs/audit/phase1_5/BATCH2B3O2_ONE_COMMAND_VM_BOOTSTRAP_REPORT.md
+docs/audit/phase1_5/BATCH2B3O_NATIVE_VM_PACKAGE_REPORT.md

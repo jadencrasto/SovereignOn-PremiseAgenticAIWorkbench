@@ -239,7 +239,6 @@ async def chat(
                             @_guard_conversation_stream()
                             async def _stream_denied_approval(engine, session_id):
                                 yield f"data: {json.dumps({'type': 'error', 'content': f'Permission denied: role \'{current_user.role}\' cannot approve tasks.'})}\n\n"
-                                yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
 
                             return guarded_response(
                                 _stream_denied_approval(engine, session_id, guard_initial_identity=initial_identity),
@@ -259,26 +258,27 @@ async def chat(
 
                         @_guard_conversation_stream()
                         async def _stream_intercepted_approval(engine, session_id):
-                            async for item in engine.resume_agent_task(
+                            async with aclosing(engine.resume_agent_task(
                                 task_id=pending_task.task_id,
                                 approval_id=pending.approval_id,
                                 approved=is_nlp_approval,
                                 user_role=current_user.role,
                                 user_id=approval_uid,
-                            ):
-                                if isinstance(item, str):
-                                    yield f"data: {json.dumps({'type': 'delta', 'content': item})}\n\n"
-                                elif isinstance(item, dict):
-                                    from backend.security.artifact_presentation import public_planner_event
-                                    from backend.security.task_access import TASK_RESUME_WITHHELD
-                                    if item.get('type') == 'error':
-                                        text = TASK_RESUME_WITHHELD if item.get('content') == TASK_RESUME_WITHHELD else 'Task unavailable'
-                                        public_item = {'type': 'error', 'content': text}
-                                    else:
-                                        public_item = public_planner_event(item)
-                                    yield f"data: {json.dumps(public_item)}\n\n"
-                                    if item.get('type') == 'error':
-                                        return
+                            )) as resume_stream:
+                                async for item in resume_stream:
+                                    if isinstance(item, str):
+                                        yield f"data: {json.dumps({'type': 'delta', 'content': item})}\n\n"
+                                    elif isinstance(item, dict):
+                                        from backend.security.artifact_presentation import public_planner_event
+                                        from backend.security.task_access import TASK_RESUME_WITHHELD
+                                        if item.get('type') == 'error':
+                                            text = TASK_RESUME_WITHHELD if item.get('content') == TASK_RESUME_WITHHELD else 'Task unavailable'
+                                            public_item = {'type': 'error', 'content': text}
+                                        else:
+                                            public_item = public_planner_event(item)
+                                        yield f"data: {json.dumps(public_item)}\n\n"
+                                        if item.get('type') in ('error', 'task_failed', 'task_cancelled'):
+                                            return
                             yield f"data: {json.dumps({'type': 'done', 'task_id': pending_task.task_id})}\n\n"
 
                         return guarded_response(
@@ -1100,6 +1100,8 @@ async def _stream_sse_with_tools_tracked(
             fresh_task = task_manager.get_task(task_id)
             if fresh_task and (fresh_task.status == "cancelled" or getattr(fresh_task.status, "value", None) == "cancelled"):
                 logger.info("tracked_task_cancelled | task=%s was cancelled before finalization", task_id)
+                yield f"data: {StreamChunk(type='task_cancelled', content='', task_id=task_id).model_dump_json()}\n\n"
+                return
             else:
                 # Persist the final plan
                 final_plan = AgentPlan(
@@ -1120,10 +1122,13 @@ async def _stream_sse_with_tools_tracked(
                         )
                         task_fail = StreamChunk(type="task_failed", content=task_id, task_id=task_id, session_id=session_id)
                         yield f"data: {task_fail.model_dump_json()}\n\n"
+                        return
                     except TaskStateError:
                         fresh_after = task_manager.get_task(task_id)
                         if fresh_after and (fresh_after.status == "cancelled" or getattr(fresh_after.status, "value", None) == "cancelled"):
                             logger.info("tracked_task_cancelled_race | task=%s cancelled during finalization", task_id)
+                            yield f"data: {StreamChunk(type='task_cancelled', content='', task_id=task_id).model_dump_json()}\n\n"
+                            return
                         else:
                             raise
                 else:
@@ -1138,6 +1143,8 @@ async def _stream_sse_with_tools_tracked(
                         fresh_after = task_manager.get_task(task_id)
                         if fresh_after and (fresh_after.status == "cancelled" or getattr(fresh_after.status, "value", None) == "cancelled"):
                             logger.info("tracked_task_cancelled_race | task=%s cancelled during finalization", task_id)
+                            yield f"data: {StreamChunk(type='task_cancelled', content='', task_id=task_id).model_dump_json()}\n\n"
+                            return
                         else:
                             raise
 
@@ -1364,6 +1371,8 @@ async def _stream_sse_with_planning(
                     ):
                         from backend.security.artifact_presentation import public_planner_event
                         yield f"data: {_json.dumps(public_planner_event(item))}\n\n"
+                        if event_type in ("task_failed", "task_cancelled"):
+                            return
 
                     elif event_type == "error":
                         chunk = StreamChunk(type="error", content="Operation unavailable", error_code="OPERATION_UNAVAILABLE")
@@ -1525,6 +1534,7 @@ async def read_session(
             "id": message.id, "role": message.role,
             "content": message.content if allowed else '[Response withheld: source access cannot be verified.]',
             "created_at": message.created_at if allowed else None,
+            "response_state": message.extra_fields.get('response_state_v1') if message.role == 'assistant' and message.extra_fields.get('response_state_v1') in ('interrupted', 'failed') else None,
             "tool_events": safe_tool_history(message.extra_fields.get('tool_events_v1'))
             if message.role == 'assistant' and allowed else [],
             "withheld": not allowed,

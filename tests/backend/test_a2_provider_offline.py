@@ -79,6 +79,58 @@ def test_provider_stream_completion_and_interruption(monkeypatch):
         immediate(collect(provider(monkeypatch, FakeResponse(lines=['not json']))))
 
 
+def test_truncated_terminal_reason_is_not_a_completed_answer(monkeypatch):
+    truncated = {'done': True, 'done_reason': 'length', 'message': {'content': 'partial'}}
+    with pytest.raises(RuntimeError, match='Incomplete'):
+        immediate(provider(monkeypatch, FakeResponse(truncated)).chat(request()))
+    async def collect(obj): return [chunk async for chunk in obj.chat_stream(request())]
+    with pytest.raises(RuntimeError, match='Incomplete'):
+        immediate(collect(provider(monkeypatch, FakeResponse(lines=[json.dumps(truncated)]))))
+
+
+def test_truncated_provider_stream_never_persists_or_emits_done(tmp_path, monkeypatch):
+    from test_a21_conversation_offline import make_app, setup_engine
+    from test_a22_async_offline import run_offline
+    engine, _ = setup_engine(tmp_path)
+    lines = [json.dumps({'done': False, 'message': {'content': 'Partial response before cutoff'}}),
+             json.dumps({'done': True, 'done_reason': 'length', 'message': {'content': ''}})]
+    fake_provider = provider(monkeypatch, FakeResponse(lines=lines))
+    engine._router.get_provider_for_model = lambda _: (fake_provider, 'fake')
+    app = make_app(engine)
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                                     headers={'Authorization': 'Bearer a'}) as client:
+            response = await client.post('/api/chat', json={'session_id': 's', 'message': 'Explain pumps',
+                                                            'stream': True, 'tools_enabled': False})
+            events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+            assert events[-1]['type'] == 'error'
+            assert all(event['type'] != 'done' for event in events)
+            history = await client.get('/api/chat/sessions/s')
+            assert history.status_code == 200
+            assistant = [message for message in history.json()['messages'] if message['role'] == 'assistant']
+            assert len(assistant) == 1
+            assert assistant[0]['response_state'] == 'failed'
+            assert assistant[0]['content'] == ''.join(event.get('content', '') for event in events if event['type'] == 'delta')
+    run_offline(exercise())
+
+
+def test_provider_closes_line_iterator_on_consumer_cancellation(monkeypatch):
+    closed = []
+    class Response(FakeResponse):
+        async def aiter_lines(self):
+            try:
+                yield json.dumps({'done': False, 'message': {'content': 'partial'}})
+                yield json.dumps({'done': True, 'message': {'content': 'end'}})
+            finally:
+                closed.append(True)
+    async def exercise():
+        stream = provider(monkeypatch, Response()).chat_stream(request())
+        assert (await stream.__anext__()).delta == 'partial'
+        await stream.aclose()
+    immediate(exercise())
+    assert closed == [True]
+
+
 def test_real_engine_does_not_persist_incomplete_stream():
     engine = AgentEngine.__new__(AgentEngine)
     engine._ensure_session = MagicMock()

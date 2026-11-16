@@ -223,7 +223,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             {message.workflowStatus && <p role="status" className="mb-3 text-xs font-medium text-slate-600">
               {({ planning: 'Planning', executing: 'Executing', awaiting_approval: 'Waiting for approval',
                 completed: 'Workflow completed', failed: 'Workflow failed', cancelled: 'Workflow cancelled; an operation already started may require review.',
-                interrupted: 'Workflow interrupted; any operation already started may require review.' })[message.workflowStatus]}
+                interrupted: 'Response interrupted; an operation already started may require review.' })[message.workflowStatus]}
             </p>}
             {/* Tool Activity Timeline */}
             {hasToolEvents && <ToolActivity events={message.toolEvents!} isStreaming={message.isStreaming} />}

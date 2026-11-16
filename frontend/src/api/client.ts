@@ -178,6 +178,7 @@ export async function streamSSE(
             }
           } else if (chunk.type === 'task_started' || chunk.type === 'task_completed' || chunk.type === 'task_failed' || chunk.type === 'task_cancelled') {
             // Phase 6: Task lifecycle event
+            if (chunk.type === 'task_failed' || chunk.type === 'task_cancelled') terminal = true;
             if (callbacks.onTaskStatus) {
               callbacks.onTaskStatus(chunk.type, chunk.task_id || chunk.content || '');
             }
@@ -308,6 +309,7 @@ export async function streamSSEFromFormData(
           } else if (chunk.type === 'approval_granted' || chunk.type === 'approval_rejected') {
             if (callbacks.onApprovalResolved) callbacks.onApprovalResolved(chunk.type, chunk);
           } else if (chunk.type === 'task_started' || chunk.type === 'task_completed' || chunk.type === 'task_failed' || chunk.type === 'task_cancelled') {
+            if (chunk.type === 'task_failed' || chunk.type === 'task_cancelled') terminal = true;
             if (callbacks.onTaskStatus) callbacks.onTaskStatus(chunk.type, chunk.task_id || chunk.content || '');
           }
         } catch (parseError) {

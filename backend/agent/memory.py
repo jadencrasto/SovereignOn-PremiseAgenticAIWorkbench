@@ -371,12 +371,33 @@ class ConversationMemory:
         payload = json.dumps([session_id, owner, generation, content], ensure_ascii=False, separators=(',', ':')).encode('utf-8')
         return hmac.new(self._plain_chat_key, payload, hashlib.sha256).hexdigest()
 
+    def _incomplete_plain_chat_mac(self, session_id: str, message: Message) -> str:
+        owner, generation = self.stream_identity(session_id)
+        if not owner or not generation or owner != self._current_owner():
+            raise PermissionError('Conversation unavailable')
+        payload = json.dumps(['incomplete_plain_chat_v2', session_id, owner, generation,
+                              message.id, message.role, message.content, message.created_at,
+                              message.extra_fields.get('response_state_v1')],
+                             ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        return hmac.new(self._plain_chat_key, payload, hashlib.sha256).hexdigest()
+
     def sign_independent_plain_chat(self, session_id: str, content: str) -> dict:
         return {'version': 1, 'kind': 'ephemeral_independent_chat', 'sources': [],
                 'mac': self._plain_chat_mac(session_id, content)}
 
     def verify_independent_plain_chat(self, session_id: str, message: Message) -> bool:
         proof = message.extra_fields.get('access_provenance_v1')
+        if isinstance(proof, dict) and proof.get('kind') == 'ephemeral_incomplete_chat':
+            if (message.role != 'assistant' or not message.id or not message.created_at
+                    or message.extra_fields.get('response_state_v1') not in ('interrupted', 'failed')
+                    or set(proof) != {'version', 'kind', 'sources', 'mac'}
+                    or type(proof.get('version')) is not int or proof['version'] != 2
+                    or proof.get('sources') != [] or not isinstance(proof.get('mac'), str)):
+                return False
+            try:
+                return hmac.compare_digest(proof['mac'], self._incomplete_plain_chat_mac(session_id, message))
+            except (PermissionError, TypeError, ValueError):
+                return False
         if (message.role != 'assistant' or not isinstance(proof, dict) or
                 set(proof) != {'version', 'kind', 'sources', 'mac'} or
                 type(proof.get('version')) is not int or proof.get('version') != 1 or proof.get('kind') != 'ephemeral_independent_chat' or
@@ -421,6 +442,27 @@ class ConversationMemory:
             msg.extra_fields['tool_events_v1'] = safe_events
         if access_provenance is not None:
             msg.extra_fields['access_provenance_v1'] = access_provenance
+        self._save()
+        return msg
+
+    @_synchronized
+    def record_incomplete_plain_response(self, session_id, identity, content, status, access_provenance):
+        """Record an incomplete plain response only for the original live conversation."""
+        if status not in ('interrupted', 'failed') or not isinstance(content, str):
+            raise ValueError('Invalid incomplete response')
+        if self.stream_identity(session_id) != identity:
+            raise PermissionError('Conversation unavailable')
+        conv = self._store[session_id]
+        msg = conv.add_message('assistant', content)
+        msg.extra_fields['response_state_v1'] = status
+        if access_provenance is not None:
+            msg.extra_fields['access_provenance_v1'] = access_provenance
+            if self.verify_independent_plain_chat(session_id, msg):
+                msg.extra_fields['access_provenance_v1'] = {
+                    'version': 2, 'kind': 'ephemeral_incomplete_chat', 'sources': [],
+                    'mac': self._incomplete_plain_chat_mac(session_id, msg),
+                }
+        conv.extra_fields['updated_at'] = msg.created_at
         self._save()
         return msg
 

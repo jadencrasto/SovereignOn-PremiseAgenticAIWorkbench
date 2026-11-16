@@ -2,6 +2,7 @@
 import json
 
 import httpx
+import pytest
 
 from backend.models.base import ChatChunk, ChatResponse
 from backend.tools.unit_conversion import register_unit_conversion
@@ -84,4 +85,31 @@ def test_planning_error_is_terminal_on_production_route(tmp_path):
                                                            'stream': True, 'tools_enabled': True})
             assert [e['type'] for e in events(response)] == ['error']
             assert 'must not be emitted' not in response.text
+    run_offline(exercise())
+
+
+@pytest.mark.parametrize('terminal', ['task_failed', 'task_cancelled'])
+def test_planning_failure_and_cancellation_are_terminal(tmp_path, terminal):
+    engine = setup_workflow(tmp_path, '[]')
+    closed = []
+
+    async def interrupted(*args, **kwargs):
+        try:
+            yield 'partial response'
+            yield {'type': terminal, 'task_id': 'synthetic-task'}
+            yield 'must not be emitted'
+        finally:
+            closed.append(True)
+
+    engine.run_agent_task = interrupted
+    app = make_app(engine)
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                                     headers={'Authorization': 'Bearer a'}) as client:
+            response = await client.post('/api/chat', json={'session_id': 's', 'message': 'What is 25 + 17?',
+                                                           'stream': True, 'tools_enabled': True})
+            assert [e['type'] for e in events(response)] == ['delta', terminal]
+            assert 'must not be emitted' not in response.text
+            assert closed == [True]
     run_offline(exercise())

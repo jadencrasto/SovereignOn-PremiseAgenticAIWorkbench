@@ -39,6 +39,7 @@ export async function loadSession(id: string): Promise<ChatSession> {
     id: m.id || `${id}-${i}`, role: m.role, content: m.content,
     timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
     toolEvents: m.tool_events || [], withheld: m.withheld === true,
+    workflowStatus: m.response_state || undefined,
   }));
   for (const task of record.tasks || []) {
     const taskStatus = task.status.replace(/[^a-zA-Z0-9_-]/g, '');
@@ -81,6 +82,8 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const [loading, setLoading] = useState(false);
   const [canExportLegacy, setCanExportLegacy] = useState(false);
   const generation = useRef(0);
+  const currentSessionRef = useRef(currentSessionId);
+  currentSessionRef.current = currentSessionId;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -119,12 +122,12 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     try {
       if (!await deleteOwnedHistory(id, clearSession, () => generation.current === current)) return;
       setSessions(prev => prev.filter(s => s.id !== id));
-      if (id === currentSessionId) onNewChat();
+      if (id === currentSessionRef.current) onNewChat();
       onDeleted?.();
     } catch (err) {
       if (generation.current === current && err instanceof ApiError && err.status === 404) {
         setSessions(prev => prev.filter(s => s.id !== id));
-        if (id === currentSessionId) onNewChat();
+        if (id === currentSessionRef.current) onNewChat();
         onDeleted?.();
         setError('Conversation is no longer available.');
       } else if (generation.current === current) {

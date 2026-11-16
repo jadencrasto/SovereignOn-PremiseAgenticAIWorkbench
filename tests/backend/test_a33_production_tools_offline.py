@@ -152,6 +152,32 @@ def test_tracked_tool_cancellation_before_dispatch(tmp_path):
     finally:request_tools_enabled.reset(tools);effective_owner.reset(owner)
 
 
+def test_tracked_cancellation_during_finalization_has_no_done(tmp_path):
+    from backend.api.chat import _stream_sse_with_tools_tracked
+    engine = setup_conversion(tmp_path, [])
+
+    async def stream(*args, **kwargs):
+        yield {'type': 'tool_start', 'tool': 'unit_conversion', 'arguments': {}}
+        yield {'type': 'tool_result', 'tool': 'unit_conversion', 'success': True, 'summary': 'ok'}
+        task = engine._task_manager.list_tasks(user_id='a')[0]
+        engine._task_manager.cancel_task(task.task_id)
+
+    engine.chat_stream_with_tools = stream
+    async def run():
+        lines = [json.loads(line[6:]) async for line in _stream_sse_with_tools_tracked(
+            engine, 's', 'Convert one kilometre', None, 'fake', user_role='admin', user_id='a')]
+        assert lines[-1]['type'] == 'task_cancelled'
+        assert not any(event['type'] == 'done' for event in lines)
+    owner = effective_owner.set('a')
+    tools = request_tools_enabled.set(True)
+    try:
+        engine._memory.prepare_new_chat('s', 'a', 'Be helpful.')
+        immediate(run())
+    finally:
+        request_tools_enabled.reset(tools)
+        effective_owner.reset(owner)
+
+
 def test_tracked_tool_route_returns_verified_result_and_persisted_completion(tmp_path):
     import httpx
     engine=setup_conversion(tmp_path,[]);engine._max_tool_iterations=3

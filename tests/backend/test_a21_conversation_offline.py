@@ -1,5 +1,6 @@
 """In-process chat route and ephemeral provenance; synthetic files and providers only."""
 from types import SimpleNamespace
+from copy import deepcopy
 from unittest.mock import MagicMock
 import httpx
 import pytest
@@ -104,8 +105,8 @@ def test_proof_tamper_restart_and_revocation(tmp_path):
     finally: effective_owner.reset(token)
 
 
-def test_stream_and_cancel_do_not_persist_partial(tmp_path):
-    engine, _ = setup_engine(tmp_path); memory=engine._memory
+def test_stream_and_cancel_persist_partial_without_replay(tmp_path):
+    engine, captured = setup_engine(tmp_path); memory=engine._memory
     token=effective_owner.set('a')
     try:
         memory.prepare_new_chat('s','a','Be helpful.')
@@ -114,13 +115,46 @@ def test_stream_and_cancel_do_not_persist_partial(tmp_path):
             first=await stream.__anext__()
             assert first
             await stream.aclose()
-        immediate(exercise())
-        assert all(m.role != 'assistant' for m in memory.get_history('s'))
+            return first
+        partial = immediate(exercise())
+        msg = memory.get_history('s')[-1]
+        assert msg.content == partial and msg.extra_fields['response_state_v1'] == 'interrupted'
+        restarted = ConversationMemory(tmp_path / 'memory.json', security_registry=ConversationRegistry(tmp_path / 'registry.db'))
+        restored = restarted.get_history('s')[-1]
+        assert restored.content == partial and restored.extra_fields['response_state_v1'] == 'interrupted'
+        assert not restarted.verify_independent_plain_chat('s', restored)
         async def complete(): return [x async for x in engine.chat_stream('s','again')]
         chunks=immediate(complete())
         assert ''.join(x for x in chunks if isinstance(x,str)) == 'Pumps move fluid.'
+        assert ('assistant', partial) not in captured[-1]
         assert memory.verify_independent_plain_chat('s', memory.get_history('s')[-1])
     finally: effective_owner.reset(token)
+
+
+def test_incomplete_provenance_binds_status_identity_and_content(tmp_path):
+    engine, _ = setup_engine(tmp_path)
+    memory = engine._memory
+    token = effective_owner.set('a')
+    try:
+        memory.prepare_new_chat('s', 'a', 'Be helpful.')
+        identity = memory.stream_identity('s')
+        proof = memory.sign_independent_plain_chat('s', 'partial')
+        original = memory.record_incomplete_plain_response('s', identity, 'partial', 'interrupted', proof)
+        assert memory.verify_independent_plain_chat('s', original)
+        for change in ('status', 'remove_status', 'id', 'timestamp', 'content'):
+            altered = deepcopy(original)
+            if change == 'status': altered.extra_fields['response_state_v1'] = 'failed'
+            elif change == 'remove_status': altered.extra_fields.pop('response_state_v1')
+            elif change == 'id': altered.id = 'other'
+            elif change == 'timestamp': altered.created_at = 'other'
+            else: altered.content = 'changed'
+            assert not memory.verify_independent_plain_chat('s', altered)
+        memory.prepare_new_chat('other', 'a', 'Be helpful.')
+        assert not memory.verify_independent_plain_chat('other', original)
+        restarted = ConversationMemory(tmp_path / 'memory.json', security_registry=ConversationRegistry(tmp_path / 'registry.db'))
+        assert not restarted.verify_independent_plain_chat('s', original)
+    finally:
+        effective_owner.reset(token)
 
 
 def test_untrusted_and_source_dependent_history_not_laundered(tmp_path):
@@ -161,7 +195,7 @@ def test_cancellation_closes_provider_iterator(tmp_path):
             await stream.aclose()
         immediate(cancel())
         assert closed == [True]
-        assert all(message.role != 'assistant' for message in memory.get_history('s'))
+        assert memory.get_history('s')[-1].extra_fields['response_state_v1'] == 'interrupted'
     finally: effective_owner.reset(token)
 
 
