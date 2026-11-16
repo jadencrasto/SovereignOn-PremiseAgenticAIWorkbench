@@ -54,6 +54,23 @@ def safe_tool_history(events):
     return result
 
 
+def safe_image_attachment(item):
+    """Project one validated metadata descriptor without exposing bytes or paths."""
+    if not isinstance(item, dict):
+        return None
+    try:
+        identifier = str(uuid.UUID(str(item.get('attachment_id'))))
+    except ValueError:
+        return None
+    filename, mime, size = item.get('filename'), item.get('mime_type'), item.get('size_bytes')
+    if (not isinstance(filename, str) or not filename.strip() or len(filename) > 255
+            or re.search(r'[/\\:\x00-\x1f\x7f]', filename)
+            or mime not in ('image/png', 'image/jpeg', 'image/webp')
+            or type(size) is not int or not 0 < size <= 20 * 1024 * 1024):
+        return None
+    return {'attachment_id': identifier, 'filename': filename, 'mime_type': mime, 'size_bytes': size}
+
+
 def _synchronized(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -411,22 +428,18 @@ class ConversationMemory:
     @_synchronized
     def add_user_message(self, session_id: str, content: str, attachment=None) -> Message:
         """Append a user message to the session."""
-        descriptor = None
-        if attachment is not None:
-            # This descriptor is server-produced; bytes and filesystem paths never enter history.
-            identifier = str(uuid.UUID(str(attachment['attachment_id'])))
-            filename = attachment['filename']
-            if not isinstance(filename, str) or not filename or len(filename) > 255 or '/' in filename or '\\' in filename:
-                raise ValueError('Invalid attachment filename')
-            mime = attachment['mime_type']
-            size = attachment['size_bytes']
-            if mime not in {'image/png', 'image/jpeg', 'image/webp'} or not isinstance(size, int) or size <= 0 or size > 20 * 1024 * 1024:
-                raise ValueError('Invalid attachment metadata')
-            descriptor = {'attachment_id': identifier, 'filename': filename, 'mime_type': mime, 'size_bytes': size}
+        from backend.multimodal.text_file import safe_text_attachment
+
+        text_descriptor = safe_text_attachment(attachment)
+        descriptor = text_descriptor or safe_image_attachment(attachment)
+        if attachment is not None and descriptor is None:
+            raise ValueError('Invalid attachment metadata')
         conv = self._get_or_create(session_id)
         msg = conv.add_message("user", content)
         conv.extra_fields['updated_at'] = msg.created_at
-        if descriptor:
+        if text_descriptor:
+            msg.extra_fields['text_attachment_v1'] = text_descriptor
+        elif descriptor:
             msg.extra_fields['attachments_v1'] = [descriptor]
         self._save()
         return msg

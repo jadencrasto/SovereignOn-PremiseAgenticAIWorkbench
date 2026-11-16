@@ -62,8 +62,8 @@ export const SettingsView: React.FC = () => {
             </div>
 
             <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 space-y-1">
-              <div className="text-slate-500 font-medium">Backend API URL:</div>
-              <div className="text-slate-800 font-semibold">http://localhost:8000</div>
+              <div className="text-slate-500 font-medium">Workbench API path:</div>
+              <div className="text-slate-800 font-semibold">/api on this site</div>
             </div>
           </div>
         </div>

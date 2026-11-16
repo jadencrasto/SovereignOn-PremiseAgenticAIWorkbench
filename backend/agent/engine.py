@@ -36,7 +36,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -86,6 +86,10 @@ def _strict_tool_json(raw: str) -> dict:
             not isinstance(value.get('name'), str) or not isinstance(value.get('arguments', {}), dict)):
         raise ValueError('Invalid tool request')
     return value
+
+
+class InvalidModelToolRequest(RuntimeError):
+    """The model emitted tool-call markup that could not be parsed safely."""
 
 
 class AgentEngine:
@@ -452,8 +456,7 @@ class AgentEngine:
                     }
 
             if tool_call is None and ('<tool_call' in full_response.lower() or '</tool_call' in full_response.lower()):
-                yield 'The model returned an invalid tool request. Please try again.'
-                return
+                raise InvalidModelToolRequest
             if tool_call is None:
                 # No tool call — this is the final answer
                 # Sanitize: strip leaked tool markup, JSON, FSM state, unrequested Mermaid/Python
@@ -672,6 +675,9 @@ class AgentEngine:
         user_id: Optional[str] = None,
         tools_enabled: bool = True,
         attachment_descriptor: Optional[dict] = None,
+        *,
+        vision_model_id: str | None = None,
+        check_readiness: Callable[[str], None] | None = None,
     ) -> AsyncIterator:
         """
         Two-step multimodal streaming with agentic tool loop.
@@ -688,40 +694,45 @@ class AgentEngine:
             {"type": "agent_status", "status": "analyzing_image"}
             {"type": "agent_status", "status": "reasoning"}
         """
-        from backend.multimodal.service import MultimodalService, build_visual_context_message
+        from backend.multimodal.service import MultimodalService, VisionAnalysisUnavailable, build_visual_context_message
 
         t0 = time.monotonic()
 
         self._ensure_session(session_id)
-        self._memory.add_user_message(session_id, user_message, attachment=attachment_descriptor)
+        current_turn = self._memory.add_user_message(session_id, user_message, attachment=attachment_descriptor)
 
         # ---- Step 1: Vision analysis via LLaVA ----
         yield {"type": "agent_status", "status": "analyzing_image"}
 
         # Resolve vision model
         vision_config = self._agent_config.get("vision", {})
-        vision_model_id = vision_config.get("model", "ollama/llava:7b")
         try:
-            if hasattr(self._router, "resolve_vision_model"):
+            if vision_model_id is not None:
+                vision_provider, vision_model_name = self._router.get_provider_for_model(vision_model_id)
+            elif hasattr(self._router, "resolve_vision_model"):
                 vision_provider, vision_model_name = self._router.resolve_vision_model()
             else:
-                vision_provider, vision_model_name = self._router.get_provider_for_model(vision_model_id)
-        except Exception as exc:
-            logger.error("Failed to resolve vision model '%s': %s", vision_model_id, exc)
+                vision_provider, vision_model_name = self._router.get_provider_for_model(
+                    vision_config.get("model", "ollama/llava:7b"))
+        except Exception:
+            logger.warning("Failed to resolve vision model")
             yield {"type": "agent_status", "status": "vision_error"}
-            raise RuntimeError("Vision analysis is temporarily unavailable.")
+            raise VisionAnalysisUnavailable from None
 
-        yield {
-            "type": "tool_start",
-            "tool": "vision_analysis",
-            "arguments": {"model": vision_model_name},
-        }
+        if tools_enabled:
+            yield {
+                "type": "tool_start",
+                "tool": "vision_analysis",
+                "arguments": {"model": vision_model_name},
+            }
 
         mm_service = MultimodalService(
             vision_provider=vision_provider,
             vision_model=vision_model_name,
         )
 
+        if check_readiness is not None:
+            check_readiness('vision')
         try:
             visual_observation = await mm_service.analyze_image(
                 image_b64=image_b64,
@@ -730,28 +741,30 @@ class AgentEngine:
             )
             if not visual_observation or not visual_observation.strip():
                 raise RuntimeError("Vision model returned an empty observation.")
-        except Exception as exc:
-            logger.error("Vision analysis failed: %s", exc)
-            yield {
-                "type": "tool_result",
-                "tool": "vision_analysis",
-                "success": False,
-                "summary": "Vision analysis unavailable",
-            }
+        except Exception:
+            logger.warning("Vision analysis failed")
+            if tools_enabled:
+                yield {
+                    "type": "tool_result",
+                    "tool": "vision_analysis",
+                    "success": False,
+                    "summary": "Vision analysis unavailable",
+                }
             yield {"type": "agent_status", "status": "vision_error"}
-            raise RuntimeError("Vision analysis is temporarily unavailable.")
+            raise VisionAnalysisUnavailable from None
 
         logger.info(
             "vision_complete | session=%s observation_len=%d",
             session_id, len(visual_observation),
         )
 
-        yield {
-            "type": "tool_result",
-            "tool": "vision_analysis",
-            "success": True,
-            "summary": "Model-generated visual interpretation received; not a verified measurement.",
-        }
+        if tools_enabled:
+            yield {
+                "type": "tool_result",
+                "tool": "vision_analysis",
+                "success": True,
+                "summary": "Model-generated visual interpretation received; not a verified measurement.",
+            }
 
         # ---- Step 2: Inject observation into reasoning tool loop ----
         yield {"type": "agent_status", "status": "reasoning"}
@@ -759,20 +772,20 @@ class AgentEngine:
         # Build the visual context injection
         visual_context = build_visual_context_message(visual_observation, user_message, vision_model_name)
 
-        # Use chat/reasoning model for tool loop (not vision model)
-        try:
-            provider, model_name = self._router.resolve_chat_model()
-            if model_id:
-                # User explicitly selected a model — respect it
-                provider, model_name = self._router.get_provider_for_model(model_id)
-        except Exception:
+        # The public route pins the independently checked reasoning model.
+        if model_id:
             provider, model_name = self._router.get_provider_for_model(model_id)
+        else:
+            try:
+                provider, model_name = self._router.resolve_chat_model()
+            except (AttributeError, ValueError):
+                provider, model_name = self._router.get_provider_for_model(None)
 
-        # RAG: retrieve relevant chunks for the user message
-        sources = await self._retrieve_context(user_message, user_clearance=user_role or "viewer")
+        sources = (await self._retrieve_context(user_message, user_clearance=user_role or "viewer")
+                   if tools_enabled else [])
 
         # Build base messages (system prompt + history + RAG context)
-        base_messages = self._build_messages(session_id, user_message, sources)
+        base_messages = self._build_messages(session_id, user_message, sources, current_image_turn=current_turn.id)
 
         # Inject tool definitions
         if tools_enabled and self._tool_registry:
@@ -784,8 +797,8 @@ class AgentEngine:
                 else:
                     base_messages = [tool_msg] + base_messages
 
-        # Insert visual context as a system message just before the last user message
-        visual_msg = Message(role="system", content=visual_context)
+        # The generated image interpretation is untrusted input.
+        visual_msg = Message(role="user", content=visual_context)
         if base_messages and base_messages[-1].role == "user":
             base_messages = list(base_messages[:-1]) + [visual_msg, base_messages[-1]]
         else:
@@ -817,6 +830,8 @@ class AgentEngine:
 
             accumulated = []
             completed = False
+            if check_readiness is not None:
+                check_readiness('chat')
             async with aclosing(provider.chat_stream(request)) as provider_stream:
                 async for chunk in provider_stream:
                     if chunk.delta:
@@ -827,10 +842,12 @@ class AgentEngine:
             if not completed:
                 raise RuntimeError('Model response interrupted')
             full_response = "".join(accumulated)
+            if not full_response.strip():
+                raise RuntimeError('Empty image response')
             tool_call = self._parse_tool_call(full_response)
-            if tool_call is None and ('<tool_call' in full_response.lower() or '</tool_call' in full_response.lower()):
-                yield 'The model returned an invalid tool request. Please try again.'
-                return
+            if (tool_call is None and ('<tool_call' in full_response.lower() or '</tool_call' in full_response.lower())
+                    or tool_call is not None and not tools_enabled):
+                raise InvalidModelToolRequest
 
             if tool_call is None:
                 # Final answer — verify visual grounding before streaming and storing
@@ -3542,7 +3559,9 @@ class AgentEngine:
         """
         # Assistant text may reflect sources whose clearance has changed.
         # Exclude prior assistant answers until dependency lineage is tracked.
-        history = [m for m in self._memory.get_history(session_id) if m.role != 'assistant']
+        from backend.multimodal.context import request_scoped_history
+        history = [m for m in request_scoped_history(self._memory.get_history(session_id))
+                   if m.role != 'assistant']
 
         # Build execution log
         log_lines = ["STRUCTURED EXECUTION LOG (Steps executed so far in this task):"]
@@ -6002,6 +6021,8 @@ class AgentEngine:
         session_id: str,
         user_message: str,
         sources: List,
+        *,
+        current_image_turn: str | None = None,
     ) -> List[Message]:
         """
         Build the message list to send to the model for this turn.
@@ -6016,9 +6037,11 @@ class AgentEngine:
         this model call.  It is explicitly framed as external evidence so
         the model cannot be confused by instructions inside documents.
         """
+        from backend.multimodal.context import request_scoped_history
         from backend.security.conversation_access import may_read_assistant
         history = []
-        for message in self._memory.get_history(session_id):
+        for message in request_scoped_history(self._memory.get_history(session_id),
+                                              current_image_turn=current_image_turn):
             if message.role != 'assistant':
                 history.append(message)
                 continue

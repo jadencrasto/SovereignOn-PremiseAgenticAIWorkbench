@@ -5,7 +5,7 @@ import type {
   HealthResponse,
   DocumentItem,
 } from '../types';
-import { checkHealth, fetchCapabilities, checkModelInference } from '../api/health';
+import { checkHealth, fetchCapabilities, checkModelInference, checkVisionInference } from '../api/health';
 import { permitsCapability, type CapabilityReport } from '../api/capabilities';
 import { fetchDocuments } from '../api/documents';
 
@@ -32,6 +32,9 @@ interface WorkbenchContextType {
   setSelectedModel: (model: string) => void;
   refreshModels: () => Promise<void>;
   checkSelectedModel: () => Promise<void>;
+  selectedVisionModel: string;
+  setSelectedVisionModel: (model: string) => void;
+  checkSelectedVision: () => Promise<void>;
 
   // Document state
   documents: DocumentItem[];
@@ -51,6 +54,18 @@ interface WorkbenchContextType {
 
 const WorkbenchContext = createContext<WorkbenchContextType | undefined>(undefined);
 
+function withoutReadiness(report: CapabilityReport, kind: 'chat' | 'vision', id: string, reason: string): CapabilityReport {
+  const status = { state: 'unknown' as const, reason };
+  return kind === 'chat' ? {
+    ...report, selected_chat_model: { id, ...status },
+    capabilities: { ...report.capabilities, chat: status,
+      planning: report.capabilities.planning.state === 'available' ? status : report.capabilities.planning },
+  } : {
+    ...report, selected_vision_model: { id, ...status },
+    capabilities: { ...report.capabilities, multimodal: status },
+  };
+}
+
 function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -69,22 +84,27 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
   const defaultModel = capabilities?.models.default_chat.id ?? '';
   const availableModels = capabilities?.chat_models ?? [];
   const [modelSelection, setSelectedModel] = useState('');
+  const [visionSelection, setSelectedVisionModel] = useState('');
   const selectedModel = modelSelection || defaultModel;
-  const presentedCapabilities = capabilities && capabilities.selected_chat_model?.id !== selectedModel
-    ? { ...capabilities, capabilities: { ...capabilities.capabilities,
-        chat: { state: 'unknown' as const, reason: 'inference_not_checked' },
-        planning: { state: 'unknown' as const, reason: 'inference_not_checked' } },
-        selected_chat_model: { id: selectedModel, state: 'unknown' as const, reason: 'inference_not_checked' } }
-    : capabilities;
+  const selectedVisionModel = visionSelection || capabilities?.models.vision?.id || '';
+  let presentedCapabilities = capabilities;
+  if (presentedCapabilities && presentedCapabilities.selected_chat_model?.id !== selectedModel) {
+    presentedCapabilities = withoutReadiness(presentedCapabilities, 'chat', selectedModel, 'inference_not_checked');
+  }
+  if (presentedCapabilities && presentedCapabilities.selected_vision_model?.id !== selectedVisionModel) {
+    presentedCapabilities = withoutReadiness(presentedCapabilities, 'vision', selectedVisionModel, 'inference_not_checked');
+  }
 
   useEffect(() => {
-    const checked = capabilities?.selected_chat_model;
-    if (checked?.state !== 'available' || typeof checked.expires_at !== 'number') return;
-    const expiry = checked.expires_at;
-    const timer = setTimeout(() => setCapabilities(previous =>
-      previous?.selected_chat_model?.expires_at === expiry ? null : previous),
-      Math.max(0, expiry * 1000 - Date.now()));
-    return () => clearTimeout(timer);
+    const timers = (['chat', 'vision'] as const).flatMap(kind => {
+      const key = kind === 'chat' ? 'selected_chat_model' : 'selected_vision_model';
+      const checked = capabilities?.[key];
+      if (checked?.state !== 'available' || typeof checked.expires_at !== 'number') return [];
+      return [setTimeout(() => setCapabilities(previous => previous && previous[key] === checked
+        ? withoutReadiness(previous, kind, checked.id, 'inference_check_expired') : previous),
+        Math.max(0, Math.ceil(checked.expires_at * 1000 - Date.now())))];
+    });
+    return () => timers.forEach(timer => clearTimeout(timer));
   }, [capabilities]);
 
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
@@ -113,7 +133,7 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
     healthRequest.current = true;
     setIsCheckingHealth(true);
     try {
-      setCapabilities(await fetchCapabilities(checkOllama, selectedModel));
+      setCapabilities(await fetchCapabilities(checkOllama, selectedModel, visionSelection));
     } catch {
       setCapabilities(null);
       if (checkOllama) addToast('error', 'The Ollama check could not be completed. Retry when the backend is ready.');
@@ -121,7 +141,7 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
       healthRequest.current = false;
       setIsCheckingHealth(false);
     }
-  }, [addToast, selectedModel]);
+  }, [addToast, selectedModel, visionSelection]);
 
   const refreshHealth = useCallback(async () => {
     await refreshCapabilities();
@@ -134,29 +154,27 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
 
   const refreshModels = useCallback(() => refreshCapabilities(true), [refreshCapabilities]);
 
-  const checkSelectedModel = useCallback(async () => {
-    if (healthRequest.current || !selectedModel) return;
+  const checkSelectedInference = useCallback(async (kind: 'chat' | 'vision') => {
+    const model = kind === 'chat' ? selectedModel : selectedVisionModel;
+    if (healthRequest.current || !model) return;
     healthRequest.current = true;
     setIsCheckingHealth(true);
     // Keep the inventory and selected model visible, but revoke the old
     // eligibility while the server is checking the selected model again.
-    setCapabilities(previous => previous ? {
-      ...previous,
-      capabilities: { ...previous.capabilities,
-        chat: { state: 'unknown', reason: 'inference_check_in_progress' },
-        planning: { state: 'unknown', reason: 'inference_check_in_progress' } },
-      selected_chat_model: { id: selectedModel, state: 'unknown', reason: 'inference_check_in_progress' },
-    } : null);
+    setCapabilities(previous => previous && withoutReadiness(previous, kind, model, 'inference_check_in_progress'));
     try {
-      setCapabilities(await checkModelInference(selectedModel));
+      setCapabilities(await (kind === 'chat' ? checkModelInference(model, visionSelection)
+        : checkVisionInference(model, selectedModel)));
     } catch {
-      setCapabilities(null);
-      addToast('error', 'The model inference check could not be completed. Check inventory and retry.');
+      setCapabilities(previous => previous && withoutReadiness(previous, kind, model, 'inference_check_failed'));
+      addToast('error', `The ${kind} inference check could not be completed. Check inventory and retry.`);
     } finally {
       healthRequest.current = false;
       setIsCheckingHealth(false);
     }
-  }, [selectedModel, addToast]);
+  }, [selectedModel, selectedVisionModel, visionSelection, addToast]);
+  const checkSelectedModel = useCallback(() => checkSelectedInference('chat'), [checkSelectedInference]);
+  const checkSelectedVision = useCallback(() => checkSelectedInference('vision'), [checkSelectedInference]);
 
   const refreshDocuments = useCallback(async () => {
     const request = ++documentsRequest.current;
@@ -218,6 +236,9 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
         setSelectedModel,
         refreshModels,
         checkSelectedModel,
+        selectedVisionModel,
+        setSelectedVisionModel,
+        checkSelectedVision,
         documents,
         isDocsLoading,
         documentsError,

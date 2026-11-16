@@ -65,16 +65,121 @@ test('an installed alternate model cannot override blocked, unavailable or unkno
     report.capabilities.chat = { state, reason: 'component_not_initialized' };
     assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:7b'), true);
   }
-  report.capabilities.chat = { state: 'available', reason: 'prerequisites_observed' };
+  report.capabilities.chat = { state: 'available', reason: 'inference_verified' };
+  assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:7b'), true);
+  const future = Date.now() / 1000 + 60;
+  report.selected_chat_model = { id: 'ollama/qwen:7b', state: 'available', expires_at: future };
+  assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:7b'), true);
+  report.selected_chat_model.id = 'ollama/alternate:7b';
+  for (const expiry of [undefined, Date.now() / 1000 - 1, NaN, Infinity]) {
+    report.selected_chat_model.expires_at = expiry;
+    assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:7b'), true);
+  }
+  report.selected_chat_model.expires_at = future;
   assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:7b'), false);
-  assert.equal(helpers.chatDisabled(report, false, 'ollama/missing:7b'), true);
+  report.installed_models = [];
+  assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:7b'), true);
 });
 test('alternate inventory accepts implicit latest tags as the backend does', () => {
   const report = fixture();
   report.capabilities.ollama = { state: 'available', reason: 'inventory_observed' };
-  report.capabilities.chat = { state: 'available', reason: 'prerequisites_observed' };
   report.installed_models = ['alternate:latest', 'vendor/other'];
-  assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate'), false);
-  assert.equal(helpers.chatDisabled(report, false, 'ollama/vendor/other:latest'), false);
-  assert.equal(helpers.chatDisabled(report, false, 'ollama/alternate:other'), true);
+  assert.equal(helpers.modelInInventory(report, 'ollama/alternate'), true);
+  assert.equal(helpers.modelInInventory(report, 'ollama/vendor/other:latest'), true);
+  assert.equal(helpers.modelInInventory(report, 'ollama/alternate:other'), false);
+});
+
+test('readiness conflict preserves inventory and reason without granting chat readiness', async (t) => {
+  const client = loadTs('../src/api/client.ts');
+  const health = loadTs('../src/api/health.ts', { './client': client, './capabilities': helpers });
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  const report = fixture();
+  const model = 'ollama/qwen:7b';
+  for (const role of ['image_chat', 'vision', 'embedding']) report.models[role] = report.models.default_chat;
+  report.capabilities.ollama = { state: 'available', reason: 'inventory_observed' };
+  report.installed_models = ['qwen:7b'];
+  report.chat_models = [model];
+  report.selected_chat_model = { id: model, state: 'unknown', reason: 'inference_check_in_progress' };
+  global.fetch = async () => Response.json(report, { status: 409 });
+
+  for (const check of [() => health.checkModelInference(model), () => health.fetchCapabilities(true, model)]) {
+    const received = await check();
+    assert.deepEqual(received.chat_models, [model]);
+    assert.equal(received.selected_chat_model.reason, 'inference_check_in_progress');
+    assert.equal(helpers.chatDisabled(received, false, model), true);
+  }
+  report.capabilities.chat = { state: 'available', reason: 'inference_verified' };
+  report.selected_chat_model = { id: model, state: 'available', reason: 'inference_verified', expires_at: Date.now() / 1000 + 60 };
+  await assert.rejects(health.checkModelInference(model), { status: 409 });
+
+  global.fetch = async () => Response.json(report, { status: 401 });
+  await assert.rejects(health.checkModelInference(model), { status: 401 });
+});
+
+function visionFixture() {
+  const report = fixture();
+  report.vision_models = ['ollama/vision:7b', 'ollama/other-vision:7b'];
+  report.installed_models = ['qwen:7b', 'vision:7b', 'other-vision:7b'];
+  report.chat_models = ['ollama/qwen:7b'];
+  report.capabilities.ollama = { state: 'available', reason: 'inventory_observed' };
+  for (const role of ['image_chat', 'vision', 'embedding']) report.models[role] = report.models.default_chat;
+  report.selected_chat_model = { id: 'ollama/qwen:7b', state: 'unknown', reason: 'inference_not_checked' };
+  report.selected_vision_model = { id: 'ollama/vision:7b', state: 'unknown', reason: 'inference_not_checked' };
+  return report;
+}
+
+test('image attachment eligibility requires fresh evidence for the exact configured vision model', () => {
+  const report = visionFixture();
+  const id = report.selected_vision_model.id;
+  assert.equal(helpers.chatDisabled(report, true, id), true);
+  report.capabilities.multimodal = { state: 'available', reason: 'inference_verified' };
+  report.selected_vision_model = {
+    id, state: 'available', reason: 'inference_verified',
+    expires_at: Date.now() / 1000 + 60, identity_evidence: 'provider_digest',
+  };
+  assert.equal(helpers.chatDisabled(helpers.parseCapabilityReport(report), true, id), false);
+  assert.equal(helpers.chatDisabled(report, true, 'ollama/other-vision:7b'), true);
+  assert.equal(helpers.chatDisabled(report, true, 'ollama/qwen:7b'), true);
+  report.selected_vision_model.identity_evidence = 'unavailable';
+  assert.equal(helpers.chatDisabled(report, true, id), true);
+  report.selected_vision_model.identity_evidence = 'provider_digest';
+  report.selected_vision_model.expires_at = Date.now() / 1000 - 1;
+  assert.equal(helpers.chatDisabled(report, true, id), true);
+});
+
+test('Models exposes a separate configured vision selection and a readiness action', () => {
+  const report = visionFixture();
+  const { ModelScanner } = loadTs('../src/components/models/ModelScanner.tsx', {
+    '../../api/capabilities': helpers,
+    '../../context/WorkbenchContext': { useWorkbench: () => ({
+      capabilities: report, availableModels: report.chat_models, defaultModel: 'ollama/qwen:7b',
+      isBackendConnected: true, isCheckingHealth: false, selectedModel: 'ollama/qwen:7b',
+      selectedVisionModel: 'ollama/other-vision:7b',
+    }) },
+  });
+  const html = renderToStaticMarkup(React.createElement(ModelScanner));
+  const picker = html.match(/<select[^>]*id="vision-model"[\s\S]*?<\/select>/)?.[0];
+  assert.ok(picker);
+  assert.match(picker, /other-vision:7b" selected=""/);
+  assert.doesNotMatch(picker, /qwen/);
+  assert.match(html, /Check vision inference/);
+});
+
+test('explicit vision check sends a separate model and preserves a safe conflict reason', async (t) => {
+  const client = loadTs('../src/api/client.ts');
+  const health = loadTs('../src/api/health.ts', { './client': client, './capabilities': helpers });
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  const report = visionFixture();
+  report.selected_vision_model.reason = 'vision_model_digest_required';
+  global.fetch = async (path, options) => {
+    assert.equal(path, '/api/health/capabilities/vision-check?model=ollama%2Fqwen%3A7b');
+    assert.equal(options.method, 'POST');
+    assert.deepEqual(JSON.parse(options.body), { model: 'ollama/vision:7b' });
+    return Response.json(report, { status: 409 });
+  };
+  const result = await health.checkVisionInference('ollama/vision:7b', 'ollama/qwen:7b');
+  assert.equal(result.selected_vision_model.reason, 'vision_model_digest_required');
+  assert.equal(helpers.chatDisabled(result, true, 'ollama/vision:7b'), true);
 });

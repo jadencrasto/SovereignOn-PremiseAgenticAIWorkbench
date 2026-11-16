@@ -472,8 +472,10 @@ def _clear_readiness(app):
     app.state.startup_complete = False
     app.state.model_observation = None
     app.state.inference_observation = None
+    app.state.vision_observation = None
     app.state.model_observation_generation = getattr(app.state, 'model_observation_generation', 0) + 1
     app.state.inference_check_in_progress = None
+    app.state.inference_check_capability = None
     app.state.inference_check_token = None
     app.state.model_check_in_progress = False
     app.state.model_check_token = None
@@ -717,7 +719,7 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     app.state.brute_force_protector = brute_force_protector
     app.state.audit_logger = audit_logger
 
-    logger.info("Startup complete — listening on %s:%d", active_settings.backend_host, active_settings.backend_port)
+    logger.info("Application startup complete | configured bind=%s:%d", active_settings.backend_host, active_settings.backend_port)
 
     app.state.startup_complete = True
     yield

@@ -29,6 +29,12 @@ class Spreadsheet:
     sheets: tuple[Sheet, ...]
 
 
+def csv_rows(text: str):
+    """Read comma-delimited records with newline preservation inside quoted cells."""
+    with io.StringIO(text, newline='') as source:
+        yield from csv.reader(source, strict=True)
+
+
 def parse_spreadsheet(filename: str, data: bytes) -> Spreadsheet:
     """Read synthetic CSV/XLSX bytes; formula cells remain unevaluated strings."""
     if not isinstance(filename, str) or not filename or '/' in filename or '\\' in filename:
@@ -39,10 +45,9 @@ def parse_spreadsheet(filename: str, data: bytes) -> Spreadsheet:
         if b'\x00' in data or data.startswith((b'PK\x03\x04', b'%PDF-')):
             raise ValueError('Invalid CSV content')
         try:
-            reader = csv.reader(io.StringIO(data.decode('utf-8-sig'), newline=''), strict=True)
             rows = []
             cells = 0
-            for row in reader:
+            for row in csv_rows(data.decode('utf-8-sig')):
                 cells += len(row)
                 if cells > MAX_CELLS or len(rows) >= MAX_CELLS:
                     raise ValueError('Spreadsheet cell limit exceeded')

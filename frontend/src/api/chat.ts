@@ -88,15 +88,78 @@ export async function streamChatMultimodal(
   formData.append('message', payload.message);
   if (payload.session_id) formData.append('session_id', payload.session_id);
   if (payload.model) formData.append('model', payload.model);
+  if (payload.vision_model) formData.append('vision_model', payload.vision_model);
   formData.append('stream', 'true');
-  formData.append('tools_enabled', String(payload.tools_enabled ?? true));
+  formData.append('tools_enabled', 'false');
   formData.append('image', payload.image, payload.image.name);
 
   return streamSSEFromFormData('/api/chat/multimodal', formData, callbacks, signal);
 }
 
-export async function createSession(): Promise<{ session_id: string }> {
-  return apiRequest('/api/chat/sessions', { method: 'POST' });
+export async function createSession(signal?: AbortSignal): Promise<{ session_id: string }> {
+  return apiRequest('/api/chat/sessions', { method: 'POST', signal });
+}
+
+export interface TextFilePreview {
+  filename: string;
+  size_bytes: number;
+  line_count: number;
+  text: string;
+  truncated: boolean;
+}
+
+export interface TextFileLineRange {
+  start: number;
+  end: number;
+}
+
+export interface CsvPreview {
+  filename: string;
+  size_bytes: number;
+  headers: string[];
+  column_types: string[];
+  rows: string[][];
+  row_count: number;
+  truncated: boolean;
+}
+
+function appendTextFileRange(form: FormData, field: 'line' | 'row', range?: TextFileLineRange) {
+  if (range) {
+    form.append(`${field}_start`, String(range.start));
+    form.append(`${field}_end`, String(range.end));
+  }
+}
+
+function attachmentPreview<T>(file: File, sessionId: string | undefined, signal: AbortSignal,
+  field: 'line' | 'row', range?: TextFileLineRange): Promise<T> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  if (sessionId) form.append('session_id', sessionId);
+  appendTextFileRange(form, field, range);
+  const path = field === 'row' ? '/api/chat/csv-preview' : '/api/chat/text-preview';
+  return apiRequest(path, { method: 'POST', body: form, signal, cache: 'no-store' });
+}
+
+export function previewTextFile(file: File, sessionId: string | undefined, signal: AbortSignal, range?: TextFileLineRange) {
+  return attachmentPreview<TextFilePreview>(file, sessionId, signal, 'line', range);
+}
+
+export function previewCsvFile(file: File, sessionId: string | undefined, signal: AbortSignal, range?: TextFileLineRange) {
+  return attachmentPreview<CsvPreview>(file, sessionId, signal, 'row', range);
+}
+
+export async function streamChatTextFile(
+  file: File, sessionId: string, model: string, question: string,
+  callbacks: Parameters<typeof streamChat>[1], signal: AbortSignal, range?: TextFileLineRange,
+): Promise<void> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  form.append('session_id', sessionId);
+  form.append('model', model);
+  form.append('message', question);
+  const csvFile = file.name.toLowerCase().endsWith('.csv');
+  appendTextFileRange(form, csvFile ? 'row' : 'line', range);
+  return streamSSEFromFormData(csvFile ? '/api/chat/csv-file' : '/api/chat/text-file', form, callbacks, signal);
 }
 
 export async function fetchSessions(): Promise<{ sessions: string[]; count: number }> {
@@ -110,7 +173,18 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
 }
 
 
-export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; created_at?: string | null; updated_at?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: {id?: string | null; role: 'system' | 'user' | 'assistant'; content: string; created_at?: string | null; withheld?: boolean; response_state?: 'interrupted' | 'failed' | null; tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[]}[]}> {
+interface SessionMessage {
+  id?: string | null;
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  created_at?: string | null;
+  withheld?: boolean;
+  response_state?: 'interrupted' | 'failed' | null;
+  tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[];
+  attachments?: {attachment_id: string; filename: string; mime_type: string; size_bytes: number}[];
+}
+
+export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; created_at?: string | null; updated_at?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: SessionMessage[]}> {
   return apiRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 

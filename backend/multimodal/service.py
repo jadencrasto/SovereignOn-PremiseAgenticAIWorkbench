@@ -56,6 +56,10 @@ _VISION_SYSTEM_PROMPT = (
 )
 
 
+class VisionAnalysisUnavailable(RuntimeError):
+    """Vision inference could not complete."""
+
+
 class MultimodalService:
     """
     Orchestrates vision inference using the local LLaVA model.

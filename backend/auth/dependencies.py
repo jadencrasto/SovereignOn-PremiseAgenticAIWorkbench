@@ -65,6 +65,14 @@ def _bind_local_dispatch(active_settings):
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+def request_session_credentials(request: Request, bearer: HTTPAuthorizationCredentials | None) -> tuple[str | None, bool]:
+    """Resolve the token and whether cookie authentication applies."""
+    if bearer and bearer.credentials:
+        return bearer.credentials, False
+    token = request.cookies.get('session_token')
+    return token, bool(token)
+
+
 def _get_synthetic_dev_admin() -> User:
     """Generate synthetic admin user for development mode when auth is disabled."""
     return User(
@@ -133,18 +141,12 @@ async def get_current_user(
             detail="Insecure configuration: Authentication cannot be disabled in production.",
         )
 
+    raw_token, is_cookie_auth = request_session_credentials(request, bearer)
+
     # 1. Non-production / dev-mode resolution
     if not auth_enabled:
         session_mgr = getattr(request.app.state, "session_manager", None)
         auth_store = getattr(request.app.state, "auth_store", None)
-        raw_token = None
-        is_cookie_auth = False
-        if bearer and bearer.credentials:
-            raw_token = bearer.credentials
-        elif request.cookies.get("session_token"):
-            raw_token = request.cookies.get("session_token")
-            is_cookie_auth = True
-
         if session_mgr and auth_store and raw_token:
             # CSRF mitigation for cookie-based state-mutating requests
             if is_cookie_auth and request.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -211,19 +213,6 @@ async def get_current_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Authentication system uninitialized",
         )
-
-    raw_token = None
-    is_cookie_auth = False
-
-    # Check Bearer header
-    if bearer and bearer.credentials:
-        raw_token = bearer.credentials
-    else:
-        # Check Cookie
-        cookie_token = request.cookies.get("session_token")
-        if cookie_token:
-            raw_token = cookie_token
-            is_cookie_auth = True
 
     if not raw_token:
         raise HTTPException(

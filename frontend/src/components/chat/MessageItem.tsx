@@ -150,11 +150,14 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             <div className="mb-2 flex flex-col items-end gap-1.5 w-full">
               {message.attachments.map((att) => (
                 <div key={att.id} className="max-w-xs border border-slate-200 rounded-lg bg-white p-1.5 shadow-sm">
-                  <img
+                  {att.objectUrl ? <img
                     src={att.objectUrl}
                     alt={att.filename}
                     className="w-full max-h-48 object-cover rounded-md border border-slate-100"
-                  />
+                  /> : <p className="px-2 text-xs text-slate-500">
+                    {att.mimeType === 'text/csv' ? 'CSV · Attach again to ask about it' :
+                      att.mimeType === 'text/plain' ? 'Text file · Attach again to ask about it' : 'Image preview unavailable in history'}
+                  </p>}
                   <div className="flex items-center justify-between px-2 py-1.5 text-xs font-medium text-slate-700">
                     <span className="truncate max-w-[180px]">{att.filename}</span>
                     <span className="text-slate-500">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
@@ -206,9 +209,19 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
           <div className="space-y-3">
             <div className="flex items-center gap-2 font-semibold text-sm text-rose-600">
               <AlertTriangle className="w-4 h-4" />
-              <span>Execution Failed</span>
+              <span>Response failed</span>
             </div>
-            <p className="text-sm font-mono bg-rose-50 p-3 rounded-lg border border-rose-100">{message.content}</p>
+            <p role="status" className="text-sm font-mono bg-rose-50 p-3 rounded-lg border border-rose-100">
+              {message.errorMessage || message.content}
+            </p>
+            {hasToolEvents && <ToolActivity events={message.toolEvents!} isStreaming={false} />}
+            {message.errorMessage && message.content && (
+              <div className="font-sans text-slate-800">
+                <p className="text-xs font-medium text-slate-600">Partial response</p>
+                {message.textFileAnswer ? <p className="whitespace-pre-wrap break-words">{message.content}</p>
+                  : <MarkdownContent content={message.content} />}
+              </div>
+            )}
             {onRetry && (
               <button
                 onClick={() => onRetry(message.content)}
@@ -227,6 +240,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             </p>}
             {/* Tool Activity Timeline */}
             {hasToolEvents && <ToolActivity events={message.toolEvents!} isStreaming={message.isStreaming} />}
+            {message.imageProgress && !message.isStreaming && message.content && (
+              <p className="mb-2 text-xs text-slate-600">AI-generated image interpretation</p>
+            )}
+            {message.textFileAnswer && !message.isStreaming && !message.workflowStatus && message.content && (
+              <p className="mb-2 text-xs text-slate-600">File answer available in this view only</p>
+            )}
 
             {/* Plan Timeline */}
             {!message.withheld && message.plan && message.plan.steps && message.plan.steps.length > 0 && (
@@ -255,14 +274,19 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
             {message.content ? (
               <div className="font-sans">
-                <MarkdownContent content={message.content} />
+                {message.textFileAnswer ? <p className="whitespace-pre-wrap break-words">{message.content}</p>
+                  : <MarkdownContent content={message.content} />}
               </div>
             ) : (
               message.isStreaming && (
                 <div className="flex items-center gap-2 text-sm text-blue-600 py-2 font-medium">
                   <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
                   <span>
-                    {hasToolEvents ? 'Running tools...' : 'Thinking...'}
+                    {message.imageProgress ? {
+                      uploading: 'Uploading image…',
+                      analyzing_image: 'Analyzing image…',
+                      reasoning: 'Preparing image answer…',
+                    }[message.imageProgress] : hasToolEvents ? 'Running tools...' : 'Thinking...'}
                   </span>
                 </div>
               )

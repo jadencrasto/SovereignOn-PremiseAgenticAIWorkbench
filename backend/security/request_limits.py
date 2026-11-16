@@ -1,21 +1,30 @@
 """Bound selected multipart bodies before Starlette's multipart parser."""
 import tempfile
+from backend.multimodal.image_processor import DEFAULT_MAX_SIZE_BYTES
+from backend.multimodal.text_file import MAX_TEXT_FORM_BYTES
+
+_TEXT_FILE_PATHS = ('/api/chat/text-preview', '/api/chat/text-file', '/api/chat/csv-preview', '/api/chat/csv-file')
 
 
 class MultipartBodyLimitMiddleware:
     def __init__(self, app, max_file_bytes: int, multipart_overhead: int = 1024 * 1024):
         self.app = app
         self.limit = max_file_bytes + multipart_overhead
+        self.image_limit = min(max_file_bytes, DEFAULT_MAX_SIZE_BYTES) + multipart_overhead
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] != 'http' or scope.get('method') != 'POST' or scope.get('path') not in (
-            '/api/documents', '/api/chat/multimodal',
-        ):
+        path = scope.get('path')
+        if (scope['type'] != 'http' or scope.get('method') != 'POST'
+                or path not in ('/api/documents', '/api/chat/multimodal', *_TEXT_FILE_PATHS)):
             return await self.app(scope, receive, send)
 
         headers = dict(scope.get('headers', []))
-        if b'multipart/form-data' not in headers.get(b'content-type', b'').lower():
+        if path == '/api/documents' and b'multipart/form-data' not in headers.get(b'content-type', b'').lower():
             return await self.app(scope, receive, send)
+        if path in _TEXT_FILE_PATHS:
+            limit = MAX_TEXT_FORM_BYTES
+        else:
+            limit = self.image_limit if path == '/api/chat/multimodal' else self.limit
 
         async def reject():
             await send({'type': 'http.response.start', 'status': 413,
@@ -26,7 +35,7 @@ class MultipartBodyLimitMiddleware:
             content_length = int(headers.get(b'content-length', b'0'))
         except ValueError:
             content_length = -1
-        if content_length < 0 or content_length > self.limit:
+        if content_length < 0 or content_length > limit:
             return await reject()
 
         with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode='w+b') as body:
@@ -37,7 +46,7 @@ class MultipartBodyLimitMiddleware:
                     return
                 chunk = message.get('body', b'')
                 total += len(chunk)
-                if total > self.limit:
+                if total > limit:
                     return await reject()
                 body.write(chunk)
                 if not message.get('more_body', False):

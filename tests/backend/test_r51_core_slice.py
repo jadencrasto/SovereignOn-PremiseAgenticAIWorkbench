@@ -27,7 +27,7 @@ def test_owned_streamed_workflow_and_history(tmp_path):
             return ChatResponse(content=plan, model='fake', provider='fake')
 
         async def chat_stream(self, request):
-            if any(m.role == 'user' and m.content == 'Convert 5 kilometres to metres.' for m in request.messages):
+            if any(m.role == 'user' and m.content == 'convert 5 km to metres' for m in request.messages):
                 yield ChatChunk('<tool_call>{"name":"unit_conversion","arguments":{"value":5,"from_unit":"km","to_unit":"m"}}</tool_call>', True)
             else:
                 yield ChatChunk('I can help with questions.', False)
@@ -54,10 +54,10 @@ def test_owned_streamed_workflow_and_history(tmp_path):
             assert any('I can help' in e.get('content', '') for e in ordinary)
             assert not any(e['type'].startswith('tool_') for e in ordinary)
             assert ordinary[-1]['type'] == 'done'
-            for message, expected in [('What is 25 + 17?', 'Result: 42'),
-                                      ('Multiply that result by 3.', 'Result: 126'),
-                                      ('Add 5 to that result.', 'Result: 131'),
-                                      ('Convert 5 kilometres to metres.', 'Result: 5000.0 m')]:
+            for message, expected in [('25 + 17', 'Result: 42'),
+                                      ('multiply that by 3', 'Result: 126'),
+                                      ('add 5', 'Result: 131'),
+                                      ('convert 5 km to metres', 'Result: 5000.0 m')]:
                 stream = await turn(message)
                 assert [e['summary'] for e in stream if e['type'] == 'tool_result' and e['success']] == [expected], stream
                 assert any(e['type'] == 'task_completed' for e in stream)

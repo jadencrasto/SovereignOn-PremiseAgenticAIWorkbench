@@ -38,7 +38,7 @@ export interface ImageAttachment {
    * Used for thumbnail display — revoked when no longer needed.
    * NEVER sent to backend; never stored in the database.
    */
-  objectUrl: string;
+  objectUrl?: string;
 }
 
 export interface ChatMessage {
@@ -50,10 +50,13 @@ export interface ChatMessage {
   sources?: SourceReference[];
   toolEvents?: ToolEvent[];
   isStreaming?: boolean;
+  imageProgress?: 'uploading' | 'analyzing_image' | 'reasoning';
+  textFileAnswer?: boolean;
   error?: boolean;
+  errorMessage?: string;
   withheld?: boolean;
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
-  // Phase 5: optional image attachments on user messages
+  // Request-scoped image previews and metadata for both attachment types.
   attachments?: ImageAttachment[];
   // Phase 6: Plan and Approval states
   plan?: {
@@ -77,6 +80,7 @@ export interface MultimodalChatRequestPayload {
   session_id?: string;
   message: string;
   model?: string;
+  vision_model?: string;
   stream?: boolean;
   tools_enabled?: boolean;
   image?: File;  // actual File object to be included in FormData

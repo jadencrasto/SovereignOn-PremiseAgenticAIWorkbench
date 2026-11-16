@@ -10,7 +10,7 @@ import type { ChatMessage, ImageAttachment, SourceReference, ToolEvent } from '.
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { useWorkbench } from '../../context/WorkbenchContext';
-import { createSession, fetchSessions, streamChat, streamChatMultimodal, guardChatCallbacks } from '../../api/chat';
+import { createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, guardChatCallbacks, type TextFileLineRange } from '../../api/chat';
 import { useAuth } from '../../context/AuthContext';
 import { capabilityFor, chatDisabled, describeCapability, permitsCapability, modelInInventory } from '../../api/capabilities';
 import { approveTaskStep, rejectTaskStep } from '../../api/tasks';
@@ -33,28 +33,25 @@ export const ChatView: React.FC = () => {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const selectionVersion = useRef(0);
-  const creating = useRef(false);
+  const creating = useRef<AbortController | null>(null);
   const restorePending = useRef(false);
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [draftRevision, setDraftRevision] = useState(0);
   const [restoring, setRestoring] = useState(false);
   const attachmentUrls = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const current = new Set(messages.flatMap(message =>
-      (message.attachments || []).map(attachment => attachment.objectUrl).filter((url): url is string => !!url)));
-    for (const url of attachmentUrls.current) if (!current.has(url)) URL.revokeObjectURL(url);
-    attachmentUrls.current = current;
-  }, [messages]);
-  useEffect(() => () => {
+  const releaseAttachmentUrls = useCallback(() => {
     for (const url of attachmentUrls.current) URL.revokeObjectURL(url);
     attachmentUrls.current.clear();
   }, []);
+  useEffect(() => releaseAttachmentUrls, [releaseAttachmentUrls]);
   const { user } = useAuth();
   const selectionKey = `sovereign-active-conversation:${user?.id || ''}`;
-  const { selectedModel, addToast, capabilities, isCheckingHealth } = useWorkbench();
+  const { selectedModel, selectedVisionModel, addToast, capabilities, isCheckingHealth } = useWorkbench();
+  const modelSelection = useRef({ selectedModel, selectedVisionModel, capabilities });
   const approvalsAllowed = permitsCapability(capabilities, 'approval_resume');
   const textDisabled = chatDisabled(capabilities, false, selectedModel);
   // Image requests also use the selected text model for the reasoning stage.
-  const imageDisabled = chatDisabled(capabilities, true) || textDisabled;
+  const imageDisabled = chatDisabled(capabilities, true, selectedVisionModel) || textDisabled;
   const chatStatus = capabilityFor(capabilities, capabilities ? 'chat' : 'backend', !isCheckingHealth);
   const imageStatus = capabilityFor(capabilities, 'multimodal', !isCheckingHealth);
   const selectedModelMissing = capabilities?.capabilities?.ollama?.state === 'available' &&
@@ -68,7 +65,12 @@ export const ChatView: React.FC = () => {
   }, []);
   useEffect(() => {
     updateSessionCount();
-    return () => { abortControllerRef.current?.abort(); };
+    return () => {
+      selectionVersion.current++;
+      creating.current?.abort();
+      creating.current = null;
+      abortControllerRef.current?.abort();
+    };
   }, [updateSessionCount]);
   useEffect(() => {
     const saved = sessionStorage.getItem(selectionKey);
@@ -105,10 +107,15 @@ export const ChatView: React.FC = () => {
    * Core message sender — handles text-only, multimodal, and agent planning paths.
    */
   const handleSendMessage = useCallback(
-    async (text: string, image?: File) => {
-      if (!text.trim() || isStreaming || restoring || creating.current) return;
-      if (image ? imageDisabled : textDisabled) {
-        addToast('info', describeCapability(image ? imageStatus : chatStatus));
+    async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange) => {
+      if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current) return;
+      if (textFile && capabilities?.text_file_understanding !== true) {
+        addToast('info', 'Text-file questions require the authenticated local chat-only profile.');
+        return;
+      }
+      const textReady = !chatDisabled(capabilities, false, selectedModel);
+      if (!textReady || (image && chatDisabled(capabilities, true, selectedVisionModel))) {
+        addToast('info', describeCapability(textReady ? imageStatus : chatStatus));
         return;
       }
 
@@ -118,7 +125,7 @@ export const ChatView: React.FC = () => {
       );
       const pendingApproval = activePendingMsg?.pendingApproval;
 
-      if (pendingApproval) {
+      if (!image && !textFile && pendingApproval) {
         const cleanText = text.trim().toLowerCase().replace(/^[^\w]+|[^\w]+$/g, '');
         const isApproval = /^(yes(\s+approve)?|approve[d]?|proceed|continue|confirm)$/i.test(cleanText);
         const isRejection = /^(no|reject(ed)?|deny|denied|cancel(led)?)$/i.test(cleanText);
@@ -156,37 +163,54 @@ export const ChatView: React.FC = () => {
       let sessionId = activeSessionId;
       if (!sessionId) {
         const version = selectionVersion.current;
-        creating.current = true;
+        const creation = new AbortController();
+        creating.current = creation;
         setIsStreaming(true);
         try {
-          const created = await createSession();
-          if (selectionVersion.current !== version) return;
+          const created = await createSession(creation.signal);
+          if (creation.signal.aborted || selectionVersion.current !== version) return;
           sessionId = created.session_id;
           setActiveSessionId(sessionId);
           updateSessionCount();
+          const current = modelSelection.current;
+          if (current.selectedModel !== selectedModel ||
+              chatDisabled(current.capabilities, false, selectedModel) ||
+              (image && (current.selectedVisionModel !== selectedVisionModel ||
+                chatDisabled(current.capabilities, true, selectedVisionModel))) ||
+              (textFile && current.capabilities?.text_file_understanding !== true)) {
+            setIsStreaming(false);
+            addToast('info', image || textFile ? 'Check the selected models and attach the file again.' :
+              'Check the selected chat model and send your message again.');
+            return;
+          }
         } catch {
-          if (selectionVersion.current === version) {
+          if (!creation.signal.aborted && selectionVersion.current === version) {
             setIsStreaming(false);
             addToast('error', 'Conversation could not be created. Please try again.');
           }
           return;
         } finally {
-          creating.current = false;
+          if (creating.current === creation) creating.current = null;
         }
       }
       const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       let userAttachments: ImageAttachment[] | undefined;
       if (image) {
+        const objectUrl = URL.createObjectURL(image);
+        attachmentUrls.current.add(objectUrl);
         userAttachments = [
           {
             id: `local_${Math.random().toString(36).substring(2, 9)}`,
             filename: image.name,
             mimeType: image.type,
             sizeBytes: image.size,
-            objectUrl: URL.createObjectURL(image),
+            objectUrl,
           },
         ];
+      } else if (textFile) {
+        userAttachments = [{ id: `local_${Math.random().toString(36).slice(2)}`,
+          filename: textFile.name, mimeType: textFile.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'text/plain', sizeBytes: textFile.size }];
       }
 
       const userMsg: ChatMessage = {
@@ -207,11 +231,13 @@ export const ChatView: React.FC = () => {
         sources: [],
         toolEvents: [],
         isStreaming: true,
+        imageProgress: image ? 'uploading' : undefined,
+        textFileAnswer: Boolean(textFile),
       };
 
       // Determine smart title from first user query
       let currentTitle = sessionTitle;
-      if (sessionTitle === 'New Conversation' && messages.length === 0) {
+      if (sessionTitle === 'New Conversation' && messages.length === 0 && !textFile) {
         currentTitle = text.slice(0, 38).trim() + (text.length > 38 ? '…' : '');
         setSessionTitle(currentTitle);
       }
@@ -256,6 +282,10 @@ export const ChatView: React.FC = () => {
           if (status === 'planning' || status === 'executing') {
             setMessages(prev => prev.map(msg => msg.id === assistantId
               ? { ...msg, workflowStatus: status } : msg));
+          }
+          if (image && (status === 'analyzing_image' || status === 'reasoning')) {
+            setMessages(prev => prev.map(msg => msg.id === assistantId
+              ? { ...msg, imageProgress: status } : msg));
           }
         },
         onPlanCreated: (planData: any) => {
@@ -375,6 +405,7 @@ export const ChatView: React.FC = () => {
         onError: (errorText: string) => {
           if (errorText === 'Conversation unavailable' || errorText === 'Conversation not found') {
             selectionVersion.current++;
+            releaseAttachmentUrls();
             setActiveSessionId('');
             setSessionTitle('New Conversation');
             setMessages([]);
@@ -387,7 +418,7 @@ export const ChatView: React.FC = () => {
           setMessages((prev) => {
             const next = prev.map((msg) =>
               msg.id === assistantId
-                ? { ...msg, content: errorText, error: true, isStreaming: false,
+                ? { ...msg, errorMessage: errorText, error: true, isStreaming: false,
                     ...(msg.workflowStatus === 'planning' || msg.workflowStatus === 'executing'
                       ? { workflowStatus: 'interrupted' as const } : {}) }
                 : msg
@@ -404,12 +435,15 @@ export const ChatView: React.FC = () => {
       const guardedCallbacks = guardChatCallbacks(callbacks,
         () => abortControllerRef.current === controller && !controller.signal.aborted);
       try {
-        if (image) {
+        if (textFile) {
+          await streamChatTextFile(textFile, sessionId, selectedModel, text, guardedCallbacks, controller.signal, lineRange);
+        } else if (image) {
           await streamChatMultimodal(
             {
               session_id: sessionId,
               message: text,
               model: selectedModel,
+              vision_model: selectedVisionModel,
               stream: true,
               image,
             },
@@ -430,28 +464,13 @@ export const ChatView: React.FC = () => {
         }
       } catch (err: any) {
         if (abortControllerRef.current !== controller) return;
-        if (err.name !== 'AbortError') {
-          setMessages((prev) => {
-            const next = prev.map((msg) =>
-              msg.id === assistantId
-                ? {
-                    ...msg,
-                    content: err.message || 'Stream connection failed',
-                    error: true,
-                    isStreaming: false,
-                  }
-                : msg
-            );
-            persistSession(next, currentTitle);
-            return next;
-          });
-        }
+        if (err.name !== 'AbortError') guardedCallbacks.onError(err.message || 'Stream connection failed');
         setIsStreaming(false);
       } finally {
         if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, textDisabled, imageDisabled, chatStatus, imageStatus, restoring, selectionKey]
+    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, selectionKey, releaseAttachmentUrls]
   );
 
   /**
@@ -649,6 +668,8 @@ export const ChatView: React.FC = () => {
   const handleStopStream = () => {
     if (creating.current) {
       selectionVersion.current++;
+      creating.current.abort();
+      creating.current = null;
       setIsStreaming(false);
     }
     if (abortControllerRef.current) {
@@ -668,8 +689,10 @@ export const ChatView: React.FC = () => {
   const handleStartNewChat = () => {
     handleStopStream();
     selectionVersion.current++;
+    releaseAttachmentUrls();
     restorePending.current = false;
     setRestoring(false);
+    setDraftRevision(revision => revision + 1);
     setActiveSessionId('');
     setSessionTitle('New Conversation');
     setMessages([]);
@@ -680,6 +703,7 @@ export const ChatView: React.FC = () => {
   const handleSelectSession = (session: ChatSession) => {
     handleStopStream();
     selectionVersion.current++;
+    releaseAttachmentUrls();
     restorePending.current = false;
     setRestoring(false);
     setActiveSessionId(session.id);
@@ -688,8 +712,13 @@ export const ChatView: React.FC = () => {
     addToast('info', `Resumed session: ${session.title}`);
   };
 
+  useEffect(() => {
+    modelSelection.current = { selectedModel, selectedVisionModel, capabilities };
+  }, [selectedModel, selectedVisionModel, capabilities]);
+
   // Listen to Demo Scenario triggers
   useEffect(() => {
+    const lifetime = new AbortController();
     const handlePreloadDemo = async (e: Event) => {
       const customEvent = e as CustomEvent<{
         prompt: string;
@@ -699,26 +728,38 @@ export const ChatView: React.FC = () => {
       const { prompt, imageFile, isMultimodal } = customEvent.detail;
       if (!prompt) return;
 
-      if (isMultimodal && imageFile) {
+      if (isMultimodal) {
+        const version = selectionVersion.current;
+        const canSend = () => !lifetime.signal.aborted && selectionVersion.current === version;
         try {
-          const imgRes = await fetch(`/api/documents/view/images/${imageFile}`);
-          if (imgRes.ok) {
-            const blob = await imgRes.blob();
-            const file = new File([blob], imageFile, { type: blob.type || 'image/png' });
-            handleSendMessage(prompt, file);
-            return;
+          if (imageFile && !imageDisabled) {
+            const imgRes = await fetch(`/api/documents/view/images/${encodeURIComponent(imageFile)}`,
+                                       { signal: lifetime.signal });
+            if (imgRes.ok) {
+              const blob = await imgRes.blob();
+              if (canSend()) {
+                const file = new File([blob], imageFile, { type: blob.type });
+                void handleSendMessage(prompt, file);
+              }
+              return;
+            }
           }
-        } catch (err) {
-          console.warn('Could not auto-fetch demo image blob:', err);
+        } catch {
+          // Attachment retrieval can fail or be cancelled while leaving the prompt unsent.
         }
+        if (canSend()) addToast('info', 'The demo image is unavailable. Check image readiness and attach an image to continue.');
+        return;
       }
 
       handleSendMessage(prompt);
     };
 
     window.addEventListener('workbench:preload-demo', handlePreloadDemo);
-    return () => window.removeEventListener('workbench:preload-demo', handlePreloadDemo);
-  }, [handleSendMessage]);
+    return () => {
+      lifetime.abort();
+      window.removeEventListener('workbench:preload-demo', handlePreloadDemo);
+    };
+  }, [handleSendMessage, imageDisabled, addToast]);
 
   return (
     <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-white relative font-sans">
@@ -800,10 +841,16 @@ export const ChatView: React.FC = () => {
         </p>}
       {/* 4. Input Composer */}
       <ChatInput
-        key={activeSessionId || "new-draft"}
+        key={activeSessionId || `new-draft-${draftRevision}`}
         onSendMessage={handleSendMessage}
         sendBlocked={textDisabled || restoring}
-        imageBlocked={imageDisabled}
+        imageBlocked={imageDisabled || restoring}
+        hasEarlierImage={messages.some(message => message.attachments?.some(file => file.mimeType.startsWith('image/')))}
+        hasEarlierTextFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/plain'))}
+        hasEarlierCsvFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/csv'))}
+        onSendTextFile={capabilities?.text_file_understanding === true
+          ? (question, file, range) => handleSendMessage(question, undefined, file, range) : undefined}
+        sessionId={activeSessionId || undefined}
         sendStatus={selectedModelMissing && chatStatus.state !== 'blocked' && chatStatus.state !== 'unavailable'
           ? 'The selected model was not found in the checked inventory. Select an available model.'
           : textDisabled || chatStatus.state === 'unknown' ? describeCapability(chatStatus) : undefined}

@@ -10,6 +10,6 @@
   "prose_wrapped": "Calculation already completed. [{\"description\":\"Add\",\"tool_name\":\"calculator\",\"arguments\":{\"expression\":\"1+1\"}}]",
   "fabricated_success": "I ran the calculator and the verified result is 999.",
   "duplicate_tool_calls": "<tool_call>{\"name\":\"calculator\",\"arguments\":{\"expression\":\"1+1\"}}</tool_call><tool_call>{\"name\":\"calculator\",\"arguments\":{\"expression\":\"2+2\"}}</tool_call>",
-  "stream_interrupted": [{"done":false,"message":{"content":"partial"}}],
-  "duplicate_terminal": [{"done":true,"message":{"content":"done"}},{"done":true,"message":{"content":"second"}}]
+  "stream_interrupted": [{"model":"fake","done":false,"message":{"role":"assistant","content":"partial"}}],
+  "duplicate_terminal": [{"model":"fake","done":true,"done_reason":"stop","message":{"role":"assistant","content":"done"}},{"model":"fake","done":true,"done_reason":"stop","message":{"role":"assistant","content":"second"}}]
 }

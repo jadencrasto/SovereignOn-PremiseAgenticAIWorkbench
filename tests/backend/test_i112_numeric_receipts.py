@@ -49,6 +49,8 @@ def test_production_route_chains_verified_results_and_preserves_units(tmp_path):
                 effective_owner.reset(token)
             _, events = await turn('Convert that result from metres to kilometres.')
             assert [e['type'] for e in events] == ['error']
+            _, events = await turn('add 5')
+            assert [(e['type'], e['error_code']) for e in events] == [('error', 'RESULT_REFERENCE_UNAVAILABLE')]
             _, events = await turn('Multiply that result by 3.', session='session-a')
             assert [e['type'] for e in events] == ['error']
             response, _ = await turn('Multiply that result by 3.', owner='b')

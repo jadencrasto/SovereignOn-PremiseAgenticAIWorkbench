@@ -2,8 +2,8 @@
 import json
 import httpx
 import pytest
-from backend.api.chat import _requires_prior_numeric_receipt
-from test_a21_conversation_offline import setup_engine, make_app, immediate
+from backend.agent.numeric_receipts import requires_prior_numeric_receipt
+from test_a21_conversation_offline import setup_engine, make_app
 from test_a22_async_offline import run_offline
 
 
@@ -12,23 +12,27 @@ from test_a22_async_offline import run_offline
     'Convert that number from kilometres to metres.',
     'Use the result from before and calculate 3 times that value.',
     'Calculate the previous answer plus 2.',
+    'multiply that by 3', 'Add 5', 'Please add -2.5.',
+    'Multiply that by three',
 ])
 def test_explicit_unverified_followup_is_recognized(message):
-    assert _requires_prior_numeric_receipt(message)
+    assert requires_prior_numeric_receipt(message)
 
 
 def test_normal_questions_are_not_treated_as_result_references():
-    assert not _requires_prior_numeric_receipt('What is a pump?')
-    assert not _requires_prior_numeric_receipt('Calculate 25 + 17')
-    assert not _requires_prior_numeric_receipt('Calculate 25 + 17, then multiply that result by 3.')
-    assert not _requires_prior_numeric_receipt('Tell me more about that result')
+    assert not requires_prior_numeric_receipt('What is a pump?')
+    assert not requires_prior_numeric_receipt('Calculate 25 + 17')
+    assert not requires_prior_numeric_receipt('Calculate 25 + 17, then multiply that result by 3.')
+    assert not requires_prior_numeric_receipt('Tell me more about that result')
+    assert not requires_prior_numeric_receipt('Add 5 items to the list')
 
 
-def test_actual_chat_route_denies_reference_without_model_or_cross_owner_leak(tmp_path):
+@pytest.mark.parametrize('message', ['Multiply that result by 3.', 'multiply that by 3', 'add 5'])
+def test_actual_chat_route_denies_reference_without_model_or_cross_owner_leak(tmp_path, message):
     engine, captured = setup_engine(tmp_path); app = make_app(engine)
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
-            body={'session_id':'s','message':'Multiply that result by 3.','stream':True,'tools_enabled':True}
+            body={'session_id':'s','message':message,'stream':True,'tools_enabled':True}
             response=await client.post('/api/chat',headers={'Authorization':'Bearer a'},json=body)
             events=[json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
             assert response.status_code==200 and len(events)==1

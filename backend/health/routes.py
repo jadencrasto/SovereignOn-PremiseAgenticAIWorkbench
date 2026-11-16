@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
+import secrets
 import time
 from contextlib import aclosing
 
@@ -29,8 +32,8 @@ class InferenceCheck(BaseModel):
     model: str = Field(min_length=1, max_length=256)
 
 
-def _identity(state, model: str):
-    """Only configured Ollama chat models can acquire readiness evidence."""
+def _identity(state, model: str, capability: str = 'chat'):
+    """Only configured Ollama models with the requested capability can be checked."""
     target = _tags_url(state)
     router_obj = getattr(state, 'model_router', None)
     if not target or not router_obj or not model.startswith('ollama/'):
@@ -47,7 +50,7 @@ def _identity(state, model: str):
         key = model_key(name)
         matches = [(mid, conf) for mid, conf in router_obj._config.get('models', {}).items()
                    if mid.startswith('ollama/') and model_key(mid.removeprefix('ollama/')) == key]
-        if len(matches) != 1 or 'chat' not in matches[0][1].get('capabilities', []):
+        if len(matches) != 1 or capability not in matches[0][1].get('capabilities', []):
             return None
         # Changes to the configured model metadata invalidate evidence.
         config = json.dumps(matches[0][1], sort_keys=True, separators=(',', ':'))
@@ -71,46 +74,35 @@ def _observed_digest(observation, key):
     return dict(observation.digests).get(key) if observation else None
 
 
-def _report(state, selected_model: str | None = None) -> dict:
-    cfg = _settings(state)
-    model_router = getattr(state, "model_router", None)
-    default = model_router.default_model_id if model_router else f"ollama/{cfg.ollama_default_model}"
+def _current_inventory(state):
     recorded = getattr(state, "model_observation", None)
-    target = _tags_url(state)
-    observation = None
-    if recorded and recorded[0] == target and time.monotonic() - recorded[1] < MODEL_CHECK_TTL:
-        observation = recorded[2]
-    report = capability_report(
-        environment=cfg.app_env,
-        ready=getattr(state, "startup_complete", False),
-        planning=getattr(state, "planner", None) is not None,
-        persistence=getattr(state, "conversation_persistence_initialized", False),
-        configured_models={
-            "default_chat": default,
-            "image_chat": model_router.configured_model_id("chat") if model_router else None,
-            "vision": model_router.configured_model_id("vision") if model_router else None,
-            "embedding": f"ollama/{cfg.embedding_model}" if cfg.embedding_model else None,
-        },
-        probe_allowed=target is not None,
-        observation=observation,
-    )
-    selected = selected_model or default
-    identity = _identity(state, selected)
+    if recorded and recorded[0] == _tags_url(state) and time.monotonic() - recorded[1] < MODEL_CHECK_TTL:
+        return recorded
+    return None
+
+
+def model_readiness(state, selected: str, capability: str = 'chat') -> dict:
+    recorded = _current_inventory(state)
+    observation = recorded[2] if recorded else None
+    identity = _identity(state, selected, capability)
+    digest = _observed_digest(observation, identity[1]) if identity else None
     status = {'state': 'unknown', 'reason': 'inference_not_checked'}
     if identity is None:
-        status = {'state': 'unavailable', 'reason': 'unsupported_chat_model'}
+        status = {'state': 'unavailable', 'reason': f'unsupported_{capability}_model'}
     elif observation is None or observation.state != 'available':
         status = {'state': 'unknown', 'reason': 'model_check_required'}
     elif identity[1] not in {model_key(n) for n in observation.models}:
         status = {'state': 'unavailable', 'reason': 'configured_model_missing'}
-    elif getattr(state, 'inference_check_in_progress', None) == identity:
+    elif capability == 'vision' and not digest:
+        status = {'state': 'unknown', 'reason': 'vision_model_digest_required'}
+    elif (getattr(state, 'inference_check_in_progress', None) == identity
+          and getattr(state, 'inference_check_capability', 'chat') == capability):
         status = {'state': 'unknown', 'reason': 'inference_check_in_progress'}
     else:
-        record = getattr(state, 'inference_observation', None)
+        record = getattr(state, 'vision_observation' if capability == 'vision' else 'inference_observation', None)
         if record and record[0] == identity:
             recorded_digest = record[3] if len(record) > 3 else None
-            current_digest = _observed_digest(observation, identity[1])
-            if recorded_digest != current_digest:
+            if recorded_digest != digest:
                 status = {'state': 'unknown', 'reason': 'model_identity_changed'}
             elif time.monotonic() - record[1] >= INFERENCE_TTL:
                 status = {'state': 'unknown', 'reason': 'inference_check_expired'}
@@ -123,24 +115,68 @@ def _report(state, selected_model: str | None = None) -> dict:
                     status['expires_at'] = time.time() + max(0, remaining)
     if not getattr(state, 'startup_complete', False):
         status = {'state': 'unavailable', 'reason': 'component_not_initialized'}
-    report['selected_chat_model'] = {'id': selected, **status}
-    report['selected_chat_model']['identity_evidence'] = ('provider_digest' if identity and _observed_digest(observation, identity[1]) else 'unavailable')
-    report['chat_models'] = [f'ollama/{name}' for name in (observation.models if observation and observation.state == 'available' else ())
-                             if _identity(state, f'ollama/{name}') is not None]
+    return {'id': selected, **status, 'identity_evidence': 'provider_digest' if digest else 'unavailable'}
+
+
+def _report(state, selected_model: str | None = None, vision_model: str | None = None) -> dict:
+    from backend.multimodal.text_file import text_understanding_enabled
+
+    cfg = _settings(state)
+    model_router = getattr(state, "model_router", None)
+    default = model_router.default_model_id if model_router else f"ollama/{cfg.ollama_default_model}"
+    default_vision = model_router.configured_model_id("vision") if model_router else None
+    recorded = _current_inventory(state)
+    observation = recorded[2] if recorded else None
+    report = capability_report(
+        environment=cfg.app_env,
+        ready=getattr(state, "startup_complete", False),
+        planning=getattr(state, "planner", None) is not None,
+        persistence=getattr(state, "conversation_persistence_initialized", False),
+        configured_models={
+            "default_chat": default,
+            "image_chat": model_router.configured_model_id("chat") if model_router else None,
+            "vision": default_vision,
+            "embedding": f"ollama/{cfg.embedding_model}" if cfg.embedding_model else None,
+        },
+        probe_allowed=_tags_url(state) is not None,
+        observation=observation,
+    )
+    chat = model_readiness(state, selected_model or default)
+    vision = model_readiness(state, vision_model or default_vision or '', 'vision')
+    report['selected_chat_model'] = chat
+    report['text_file_understanding'] = text_understanding_enabled(cfg)
+    report['selected_vision_model'] = vision
+    installed = observation.models if observation and observation.state == 'available' else ()
+    for capability in ('chat', 'vision'):
+        report[f'{capability}_models'] = [f'ollama/{name}' for name in installed
+                                         if _identity(state, f'ollama/{name}', capability) is not None]
+    status = {key: chat[key] for key in ('state', 'reason', 'expires_at') if key in chat}
     report['capabilities']['chat'] = status.copy()
     report['capabilities']['planning'] = status.copy() if getattr(state, 'planner', None) else {
         'state': 'unavailable', 'reason': 'component_not_initialized'}
+    report['capabilities']['multimodal'] = {'state': vision['state'], 'reason': vision['reason']}
     return report
 
 
-async def probe_inference(target: str, model: str) -> bool:
+async def probe_inference(target: str, model: str, *, vision: bool = False) -> bool:
     """Bounded synthetic inference; never follows redirects or environment proxies."""
+    prompt = {'role': 'user', 'content': 'Reply with OK.'}
+    expected_color = None
+    if vision:
+        from PIL import Image
+
+        expected_color = secrets.choice(('red', 'green', 'blue'))
+        # This image is generated locally. The expected color is never in the prompt.
+        with io.BytesIO() as buffer, Image.new('RGB', (224, 224), expected_color) as sample:
+            sample.save(buffer, format='PNG')
+            prompt = {'role': 'user', 'content': 'What color is this image? Reply with one English color word.',
+                      'images': [base64.b64encode(buffer.getvalue()).decode('ascii')]}
     try:
         async with asyncio.timeout(INFERENCE_TIMEOUT):
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
                 async with client.stream('POST', target.removesuffix('/api/tags') + '/api/chat',
                     headers={'Accept-Encoding': 'identity'}, json={'model': model, 'stream': False,
-                    'messages': [{'role': 'user', 'content': 'Reply with OK.'}],
+                    'messages': [prompt],
                     'options': {'num_predict': 8}, 'keep_alive': 0}) as reply:
                     reply.raise_for_status()
                     if reply.headers.get('Content-Encoding', 'identity').lower() != 'identity':
@@ -160,7 +196,8 @@ async def probe_inference(target: str, model: str) -> bool:
                     return (isinstance(returned, str) and model_key(returned) == model_key(model)
                             and isinstance(message, dict) and message.get('role') == 'assistant'
                             and isinstance(message.get('content'), str) and bool(message['content'].strip())
-                            and not message.get('tool_calls'))
+                            and not message.get('tool_calls')
+                            and (expected_color is None or message['content'].strip().rstrip('.').lower() == expected_color))
     except (httpx.HTTPError, TimeoutError, ValueError, TypeError, RecursionError):
         return False
 
@@ -194,45 +231,60 @@ async def liveness():
 
 
 @router.get("/capabilities", summary="Passive development capability status")
-async def capabilities(request: Request, response: Response, model: str | None = None):
+async def capabilities(request: Request, response: Response, model: str | None = None, vision_model: str | None = None):
     response.headers["Cache-Control"] = "no-store"
-    return _report(request.app.state, model)
+    return _report(request.app.state, model, vision_model)
 
 
 @router.post('/capabilities/inference-check', summary='Explicit local chat inference check')
 async def check_inference(body: InferenceCheck, request: Request, response: Response,
-                          _user=Depends(require_permission(Permission.VIEW_DATA))):
-    state = request.app.state
+                          _user=Depends(require_permission(Permission.VIEW_DATA)), vision_model: str | None = None):
+    await _check_model(request.app.state, response, body.model, 'chat')
+    return _report(request.app.state, body.model, vision_model)
+
+
+@router.post('/capabilities/vision-check', summary='Explicit local vision inference check')
+async def check_vision(body: InferenceCheck, request: Request, response: Response,
+                       _user=Depends(require_permission(Permission.VIEW_DATA)), model: str | None = None):
+    await _check_model(request.app.state, response, body.model, 'vision')
+    return _report(request.app.state, model, body.model)
+
+
+async def _check_model(state, response: Response, model: str, capability: str) -> None:
     response.headers['Cache-Control'] = 'no-store'
-    identity = _identity(state, body.model)
-    report = _report(state, body.model)
-    if identity is None or report['selected_chat_model']['reason'] in (
-            'model_check_required', 'configured_model_missing', 'component_not_initialized'):
+    identity = _identity(state, model, capability)
+    status = model_readiness(state, model, capability)
+    if identity is None or status['reason'] in (
+            'model_check_required', 'configured_model_missing', 'component_not_initialized',
+            'vision_model_digest_required'):
         response.status_code = 409
-        return report
-    if getattr(state, 'inference_check_in_progress', None) is not None:
+        return
+    if getattr(state, 'inference_check_in_progress', None) is not None or getattr(state, 'model_check_in_progress', False):
         response.status_code = 409
-        return report
-    state.inference_observation = None
+        return
+    observation_attr = 'vision_observation' if capability == 'vision' else 'inference_observation'
+    setattr(state, observation_attr, None)
     state.inference_check_in_progress = identity
+    state.inference_check_capability = capability
     token = object()
     state.inference_check_token = token
     generation = getattr(state, 'model_observation_generation', 0)
     inventory = getattr(state, 'model_observation', None)
     digest = _observed_digest(inventory[2] if inventory else None, identity[1])
     try:
-        success = await probe_inference(identity[0], identity[1])
+        success = (await probe_inference(identity[0], identity[1], vision=True) if capability == 'vision'
+                   else await probe_inference(identity[0], identity[1]))
         # Configuration, inventory and lifespan must still match after the await.
         if (getattr(state, 'inference_check_token', None) is token
-                and _identity(state, body.model) == identity and getattr(state, 'startup_complete', False)
+                and _identity(state, model, capability) == identity and getattr(state, 'startup_complete', False)
                 and generation == getattr(state, 'model_observation_generation', 0)
                 and inventory == getattr(state, 'model_observation', None)):
-            state.inference_observation = (identity, time.monotonic(), success, digest)
+            setattr(state, observation_attr, (identity, time.monotonic(), success, digest))
     finally:
         if getattr(state, 'inference_check_token', None) is token:
             state.inference_check_in_progress = None
+            state.inference_check_capability = None
             state.inference_check_token = None
-    return _report(state, body.model)
 
 
 @router.post("/capabilities/ollama-check", summary="Explicit local Ollama inventory check")
@@ -241,6 +293,7 @@ async def check_ollama(
     response: Response,
     model: str | None = None,
     _user=Depends(require_permission(Permission.VIEW_DATA)),
+    vision_model: str | None = None,
 ):
     state = request.app.state
     response.headers["Cache-Control"] = "no-store"
@@ -253,6 +306,7 @@ async def check_ollama(
             token = object()
             state.model_check_token = token
             state.inference_observation = None
+            state.vision_observation = None
             state.model_observation_generation = getattr(state, 'model_observation_generation', 0) + 1
             generation = state.model_observation_generation
             try:
@@ -263,12 +317,13 @@ async def check_ollama(
                         and state.model_observation_generation == generation):
                     state.model_observation = (target, time.monotonic(), observation)
                     state.inference_observation = None
+                    state.vision_observation = None
                     state.model_observation_generation += 1
             finally:
                 if getattr(state, 'model_check_token', None) is token:
                     state.model_check_in_progress = False
                     state.model_check_token = None
-    return _report(state, model)
+    return _report(state, model, vision_model)
 
 
 @router.get("/ready", summary="Backend lifecycle readiness")

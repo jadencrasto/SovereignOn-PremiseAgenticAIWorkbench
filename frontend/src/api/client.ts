@@ -53,6 +53,17 @@ export async function apiRequest<T>(
   return response.json();
 }
 
+async function streamErrorMessage(response: Response): Promise<string> {
+  try {
+    const error = await response.json();
+    if (typeof error?.detail === 'string' && error.detail.trim()) return error.detail;
+  } catch {
+    // A proxy failure can return a non-JSON body.
+  }
+  if (response.status === 413) return 'The upload is too large.';
+  return response.status === 422 ? 'The chat request is invalid.' : `Server error ${response.status}`;
+}
+
 export async function streamSSE(
   url: string,
   payload: any,
@@ -86,12 +97,7 @@ export async function streamSSE(
   });
 
   if (!response.ok) {
-    let errorMsg = `Server error ${response.status}`;
-    try {
-      const err = await response.json();
-      if (err?.detail) errorMsg = err.detail;
-    } catch {}
-    callbacks.onError(errorMsg);
+    callbacks.onError(await streamErrorMessage(response));
     return;
   }
 
@@ -242,12 +248,7 @@ export async function streamSSEFromFormData(
   });
 
   if (!response.ok) {
-    let errorMsg = `Server error ${response.status}`;
-    try {
-      const err = await response.json();
-      if (err?.detail) errorMsg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
-    } catch {}
-    callbacks.onError(errorMsg);
+    callbacks.onError(await streamErrorMessage(response));
     return;
   }
 

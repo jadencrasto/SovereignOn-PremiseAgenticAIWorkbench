@@ -27,6 +27,7 @@ from typing import AsyncIterator, List, Optional
 
 import httpx
 
+from backend.health.capabilities import model_key
 from backend.models.base import (
     BaseModelProvider,
     ChatChunk,
@@ -68,11 +69,15 @@ class OllamaProvider(BaseModelProvider):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _decode_response(data: object) -> tuple[str, bool]:
+    def _decode_response(data: object, expected_model: str) -> tuple[str, bool]:
         if not isinstance(data, dict) or not isinstance(data.get("done"), bool):
             raise RuntimeError("Invalid model response")
+        returned_model = data.get("model")
+        if not isinstance(returned_model, str) or not returned_model or model_key(returned_model) != model_key(expected_model):
+            raise RuntimeError("Invalid model response")
         message = data.get("message")
-        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        if (not isinstance(message, dict) or message.get("role") != "assistant"
+                or not isinstance(message.get("content"), str)):
             raise RuntimeError("Invalid model response")
         if data.get("error") or message.get("tool_calls"):
             raise RuntimeError("Invalid model response")
@@ -96,7 +101,7 @@ class OllamaProvider(BaseModelProvider):
                 resp = await self._client.post("/api/chat", json=self._build_payload(request, stream=False))
                 resp.raise_for_status()
                 try:
-                    content, done = self._decode_response(resp.json())
+                    content, done = self._decode_response(resp.json(), request.model)
                 except (ValueError, TypeError) as exc:
                     raise RuntimeError("Invalid model response") from exc
                 if not done or not content.strip():
@@ -118,7 +123,7 @@ class OllamaProvider(BaseModelProvider):
                                 data = json.loads(line)
                             except (ValueError, TypeError) as exc:
                                 raise RuntimeError("Invalid model response") from exc
-                            delta, done = self._decode_response(data)
+                            delta, done = self._decode_response(data, request.model)
                             yield ChatChunk(delta=delta, done=done)
                             if done:
                                 return

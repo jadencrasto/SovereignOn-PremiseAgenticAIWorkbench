@@ -472,7 +472,8 @@ class TestOllamaProviderVision:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "message": {"content": "Paris"},
+            "model": "qwen2.5:7b",
+            "message": {"role": "assistant", "content": "Paris"},
             "done": True,
         }
         mock_response.raise_for_status = MagicMock()

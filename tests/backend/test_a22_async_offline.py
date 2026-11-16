@@ -3,6 +3,7 @@ import asyncio
 import selectors
 import socket
 import time
+from threading import get_ident
 from unittest.mock import patch
 import pytest
 from backend.models.base import ChatRequest, Message
@@ -23,6 +24,16 @@ class TimerLoop(asyncio.SelectorEventLoop):
     def _make_self_pipe(self): pass
     def _close_self_pipe(self): pass
     def _write_to_self(self): raise AssertionError('cross-thread wakeup forbidden')
+
+    def _asyncgen_finalizer_hook(self, generator):
+        # CPython's default hook wakes the self-pipe even for finalization on
+        # the loop thread. Close these generators without socket I/O.
+        if self._thread_id == get_ident():
+            self._asyncgens.discard(generator)
+            if not self.is_closed():
+                self.call_soon(self.create_task, generator.aclose())
+        else:
+            super()._asyncgen_finalizer_hook(generator)
 
 def run_offline(coro):
     with patch.object(socket, 'socket', side_effect=AssertionError('socket creation forbidden')):
@@ -58,7 +69,7 @@ def test_stream_cancellation_exits_provider_context():
         async def __aexit__(self, *args): self.closed = True
         def raise_for_status(self): pass
         async def aiter_lines(self):
-            yield '{"done":false,"message":{"content":"partial"}}'
+            yield '{"model":"fake","done":false,"message":{"role":"assistant","content":"partial"}}'
             await asyncio.sleep(1)
     class Client:
         def __init__(self): self.response = Response()
@@ -80,7 +91,7 @@ def test_stream_real_deadline_and_cleanup():
         async def __aexit__(self, *args): self.closed = True
         def raise_for_status(self): pass
         async def aiter_lines(self):
-            yield '{"done":false,"message":{"content":"partial"}}'
+            yield '{"model":"fake","done":false,"message":{"role":"assistant","content":"partial"}}'
             await asyncio.sleep(1)
     class Client:
         def __init__(self): self.response = Response()
@@ -115,6 +126,7 @@ def test_asgi_simulated_disconnect_closes_provider(tmp_path):
     scope={'type':'http','asgi':{'version':'3.0','spec_version':'2.4'},'http_version':'1.1','method':'POST','scheme':'http','path':'/api/chat','raw_path':b'/api/chat','query_string':b'', 'root_path':'','headers':[(b'authorization',b'Bearer a'),(b'content-type',b'application/json')], 'client':('test',1),'server':('test',80)}
     async def exercise():
         received=False
+        attempted = []
         async def receive():
             nonlocal received
             if not received:
@@ -123,12 +135,18 @@ def test_asgi_simulated_disconnect_closes_provider(tmp_path):
             return {'type':'http.disconnect'}
         async def send(message):
             if message['type']=='http.response.body' and message.get('body'):
+                attempted.append(json.loads(message['body'][6:]))
                 raise OSError('simulated disconnect')
         try: await app(scope,receive,send)
         except ClientDisconnect: pass
         await asyncio.sleep(.01)
         assert closed == [True]
         token=effective_owner.set('a')
-        try: assert all(m.role!='assistant' for m in engine._memory.get_history('s'))
+        try:
+            replies = [m for m in engine._memory.get_history('s') if m.role == 'assistant']
+            assert [event['type'] for event in attempted] == ['delta']
+            assert len(replies) == 1
+            assert replies[0].extra_fields['response_state_v1'] == 'interrupted'
+            assert replies[0].content == attempted[0]['content']
         finally: effective_owner.reset(token)
     run_offline(exercise())

@@ -19,3 +19,14 @@ test('interrupted in-flight tool is shown as uncertain and unknown results are n
  const html=renderToStaticMarkup(React.createElement(m.exports.MessageItem,{message}));
  assert.match(html,/Outcome unknown/);assert.doesNotMatch(html,/>Results received</);
 });
+
+test('failed stream renders partial text and an error without offering retry', () => {
+ const message = { id: 'x', role: 'assistant', timestamp: '', content: 'Partial answer',
+   error: true, errorMessage: 'Model provider unavailable', toolEvents: [{ type: 'tool_start', tool: 'calculator' }] };
+ const html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /Response failed/);
+ assert.match(html, /Model provider unavailable/);
+ assert.match(html, /Partial answer/);
+ assert.match(html, /Outcome uncertain/);
+ assert.doesNotMatch(html, />Retry</);
+});

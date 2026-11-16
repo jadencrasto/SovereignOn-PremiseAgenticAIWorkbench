@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from backend.auth.request_context import effective_owner, request_tools_enabled
 from backend.agent.task import TaskStatus
-from backend.agent.engine import AgentEngine
+from backend.agent.engine import AgentEngine, InvalidModelToolRequest
 from backend.models.base import ChatChunk, ChatResponse
 from test_a21_conversation_offline import immediate
 from test_a31_planning_offline import setup_workflow, collect
@@ -69,8 +69,9 @@ def test_duplicate_tagged_tool_calls_never_execute(tmp_path):
     owner=effective_owner.set('a'); tools=request_tools_enabled.set(True)
     try:
         engine._memory.prepare_new_chat('s','a','Be helpful.')
-        events=tool_stream(engine,'Calculate an answer')
-        assert not calls and any(isinstance(e,str) and 'invalid tool request' in e for e in events)
+        with pytest.raises(InvalidModelToolRequest):
+            tool_stream(engine,'Calculate an answer')
+        assert not calls
     finally: request_tools_enabled.reset(tools); effective_owner.reset(owner)
 
 

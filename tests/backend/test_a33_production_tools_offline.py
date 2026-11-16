@@ -1,7 +1,9 @@
 """Production unit conversion and alternate tool path, using fake providers."""
 import json
 from unittest.mock import AsyncMock
+import httpx
 import pytest
+from backend.agent.engine import InvalidModelToolRequest
 from backend.auth.request_context import effective_owner, request_tools_enabled
 from backend.agent.task import TaskStatus
 from backend.models.base import ChatChunk
@@ -85,10 +87,49 @@ def test_tool_loop_rejects_malformed_call_without_fabricated_result(tmp_path):
     engine._router.get_provider_for_model=lambda _: (Provider(),'fake')
     owner=effective_owner.set('a');tools=request_tools_enabled.set(True)
     try:
-        engine._memory.prepare_new_chat('s','a','Be helpful.');events=tool_stream(engine,'Convert 2 km to metres')
-        assert any(isinstance(e,str) and 'invalid tool request' in e for e in events)
-        assert not any(isinstance(e,dict) and e.get('type')=='tool_result' for e in events)
+        engine._memory.prepare_new_chat('s','a','Be helpful.')
+        with pytest.raises(InvalidModelToolRequest):
+            tool_stream(engine,'Convert 2 km to metres')
     finally:request_tools_enabled.reset(tools);effective_owner.reset(owner)
+
+
+@pytest.mark.parametrize('tracked', [True, False])
+def test_malformed_tool_call_is_terminal_on_chat_route(tmp_path, tracked):
+    engine = setup_conversion(tmp_path, [])
+    engine._max_tool_iterations = 3
+    if not tracked:
+        engine._task_manager = None
+    execute = AsyncMock()
+    engine._tool_registry.get('unit_conversion').execute_fn = execute
+
+    class Provider:
+        provider_name = 'synthetic'
+
+        async def chat_stream(self, request):
+            yield ChatChunk('<tool_call>{malformed private fragment}</tool_call>', True)
+
+    engine._router.get_provider_for_model = lambda _: (Provider(), 'fake')
+    app = make_app(engine)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                                     headers={'Authorization': 'Bearer a'}) as client:
+            response = await client.post('/api/chat', json={
+                'session_id': 's', 'message': 'Convert 2 km to metres.', 'stream': True,
+                'tools_enabled': True, 'planning_enabled': False,
+            })
+            assert response.status_code == 200
+            events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+            assert [event['type'] for event in events] == ['error']
+            assert events[0]['error_code'] == 'INVALID_TOOL_REQUEST'
+            assert 'invalid tool request' in events[0]['content']
+            assert 'malformed private fragment' not in response.text
+            history = await client.get('/api/chat/sessions/s')
+            assert history.status_code == 200
+            assert [message['role'] for message in history.json()['messages']] == ['user']
+        execute.assert_not_awaited()
+
+    run_offline(run())
 
 
 def test_tool_loop_stops_on_failure_and_does_not_ask_model_to_fabricate(tmp_path):

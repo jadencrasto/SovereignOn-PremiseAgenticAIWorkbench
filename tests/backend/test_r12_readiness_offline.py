@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import json
 import time
 from types import SimpleNamespace
@@ -119,12 +121,51 @@ def test_probe_timeout_and_http_failure_close_resources(monkeypatch):
     assert run_offline(routes.probe_inference('http://127.0.0.1:11434/api/tags', 'a')) is False
 
 
-def test_chat_only_lifespan_avoids_vector_initialization(tmp_path, monkeypatch):
+@pytest.mark.parametrize('answer, model, done, expected', [
+    ('blue.', 'vision:latest', True, True),
+    ('OK', 'vision:latest', True, False),
+    ('blue', 'other:latest', True, False),
+    ('blue', 'vision:latest', False, False),
+])
+def test_vision_probe_sends_synthetic_image_and_checks_response(monkeypatch, answer, model, done, expected):
+    from PIL import Image
+
+    client_type = httpx.AsyncClient
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield json.dumps({'model': model, 'done': done,
+                              'message': {'role': 'assistant', 'content': answer}}).encode()
+
+    def handle(request):
+        assert str(request.url) == 'http://127.0.0.1:11434/api/chat'
+        payload = json.loads(request.content)
+        assert payload['model'] == 'vision:latest' and payload['stream'] is False
+        prompt, = payload['messages']
+        assert prompt['role'] == 'user' and 'blue' not in prompt['content']
+        encoded, = prompt['images']
+        with Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))) as image:
+            assert image.format == 'PNG' and image.getpixel((0, 0)) == (0, 0, 255)
+        return httpx.Response(200, stream=Body())
+
+    def client(**kwargs):
+        assert kwargs == {'trust_env': False, 'follow_redirects': False}
+        return client_type(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(routes.secrets, 'choice', lambda _: 'blue')
+    monkeypatch.setattr(routes.httpx, 'AsyncClient', client)
+    assert run_offline(routes.probe_inference('http://127.0.0.1:11434/api/tags', 'vision:latest', vision=True)) is expected
+
+def test_chat_only_lifespan_avoids_vector_initialization(tmp_path, monkeypatch, caplog):
     import backend.main as main
+    from backend.auth.models import User
+    from backend.auth.security import hash_password
     from backend.config import Settings
     from backend.rag.retriever import RetrievalBlocked
     cfg = Settings(_env_file=None, app_env='development', auth_enabled=True, auth_dev_override=False,
         local_chat_only=True, backend_host='127.0.0.1', ollama_base_url='http://127.0.0.1:11434',
+        backend_port=8001, cors_origins='http://127.0.0.1:5174', auth_cookie_secure=False,
+        auth_cookie_samesite='lax', auth_cookie_domain=None,
         upload_dir=tmp_path/'uploads', log_dir=tmp_path/'logs', sandbox_dir=tmp_path/'sandbox',
         chroma_persist_dir=tmp_path/'chroma', tasks_dir=tmp_path/'tasks',
         tasks_db_path=tmp_path/'tasks'/'tasks.db', conversation_memory_path=tmp_path/'memory.json')
@@ -142,8 +183,43 @@ def test_chat_only_lifespan_avoids_vector_initialization(tmp_path, monkeypatch):
                 await app.state.doc_service.ingest_document('x.txt', b'content')
             with pytest.raises(RetrievalBlocked):
                 await app.state.doc_service.retrieve('secret')
+            app.state.auth_store.create_user(User(id='operator-fixture', username='r85-operator',
+                password_hash=hash_password('synthetic-password'), role='operator', clearance='L2',
+                created_at='2026-11-16T00:00:00+00:00'))
+            model = app.state.model_router.default_model_id
+            name = model.removeprefix('ollama/')
+            monkeypatch.setattr(routes, 'observe_ollama', AsyncMock(return_value=ModelObservation(
+                'available', 'inventory_observed', (name,))))
+            monkeypatch.setattr(routes, 'probe_inference', AsyncMock(return_value=True))
+            capability = '/api/health/capabilities'
+            browser_headers = {'Origin': 'http://127.0.0.1:5174', 'X-Requested-With': 'XMLHttpRequest'}
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url='http://127.0.0.1:5174') as browser:
+                assert (await browser.get('/api/health/ready')).json()['ready'] is True
+                assert (await browser.post(f'{capability}/inference-check', json={'model': model},
+                                           headers=browser_headers)).status_code == 401
+                login = await browser.post('/api/auth/login', headers=browser_headers,
+                                           json={'username': 'r85-operator', 'password': 'synthetic-password'})
+                assert login.status_code == 200 and 'HttpOnly' in login.headers['Set-Cookie']
+                assert login.headers['Access-Control-Allow-Origin'] == browser_headers['Origin']
+                assert login.headers['Access-Control-Allow-Credentials'] == 'true'
+                assert (await browser.post(f'{capability}/ollama-check')).status_code == 403
+                inventory = await browser.post(f'{capability}/ollama-check', headers=browser_headers,
+                                               params={'model': model})
+                assert inventory.status_code == 200
+                assert inventory.json()['selected_chat_model']['state'] == 'unknown'
+                checked = await browser.post(f'{capability}/inference-check', json={'model': model},
+                                             headers=browser_headers)
+                assert checked.status_code == 200
+                report = checked.json()
+                assert report['selected_chat_model']['state'] == 'available'
+                for key in ('document_rag', 'artifact_access', 'code_execution'):
+                    assert report['capabilities'][key]['state'] == 'blocked'
+                assert (await browser.post('/api/auth/logout', headers=browser_headers)).status_code == 200
+                assert (await browser.get('/api/auth/me')).status_code == 401
         assert app.state.startup_complete is False
     run_offline(exercise())
+    assert 'Application startup complete | configured bind=127.0.0.1:8001' in caplog.messages
 
 
 @pytest.mark.parametrize('overrides', [

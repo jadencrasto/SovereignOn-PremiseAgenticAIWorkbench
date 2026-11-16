@@ -242,8 +242,8 @@ class ImageProcessor:
         mime_type = expected_mime
 
         logger.info(
-            "image_processed | id=%s filename=%s mime=%s size=%d bytes dims=%sx%s",
-            attachment_id, safe_name, mime_type, size_bytes,
+            "image_processed | id=%s mime=%s size=%d bytes dims=%sx%s",
+            attachment_id, mime_type, size_bytes,
             width or "?", height or "?",
         )
 

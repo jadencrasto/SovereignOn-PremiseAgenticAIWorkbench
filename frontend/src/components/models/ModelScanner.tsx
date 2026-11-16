@@ -5,8 +5,11 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 
 export const ModelScanner: React.FC = () => {
   const { capabilities, availableModels, defaultModel, isBackendConnected, isCheckingHealth,
-    refreshModels, selectedModel, setSelectedModel, checkSelectedModel } = useWorkbench();
+    refreshModels, selectedModel, setSelectedModel, checkSelectedModel,
+    selectedVisionModel, setSelectedVisionModel, checkSelectedVision } = useWorkbench();
   const ollama = capabilityFor(capabilities, 'ollama');
+  const visionModels = capabilities?.vision_models ?? [];
+  const visionStatus = capabilityFor(capabilities, 'multimodal');
   const modelKey = (id: string) => {
     const name = id.startsWith('ollama/') ? id.slice('ollama/'.length) : id;
     return name.lastIndexOf(':') > name.lastIndexOf('/') ? name : `${name}:latest`;
@@ -28,6 +31,22 @@ export const ModelScanner: React.FC = () => {
           Check Ollama
         </button>
       </div>
+      <section className="rounded-xl border bg-white p-5 space-y-3">
+        <label htmlFor="vision-model" className="block font-semibold">Image understanding model</label>
+        <p className="text-sm text-slate-600">{describeCapability(visionStatus)}</p>
+        <div className="flex flex-wrap gap-2">
+          <select id="vision-model" className="border rounded px-2 py-1 text-sm"
+            value={visionModels.includes(selectedVisionModel) ? selectedVisionModel : ''}
+            disabled={!visionModels.length || isCheckingHealth}
+            onChange={event => setSelectedVisionModel(event.target.value)}>
+            <option value="" disabled>Choose an installed vision model</option>
+            {visionModels.map(model => <option key={model} value={model}>{model}</option>)}
+          </select>
+          <button className="border rounded px-2 py-1 text-sm disabled:opacity-50"
+            disabled={isCheckingHealth || !visionModels.includes(selectedVisionModel)}
+            onClick={() => void checkSelectedVision()}>Check vision inference</button>
+        </div>
+      </section>
       {ollama.state === 'available' && <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {availableModels.length === 0 && <p className="text-sm text-slate-600">No installed model is configured for chat.</p>}
         {availableModels.map(model => <div className="p-4 rounded-xl border bg-white space-y-2" key={model}>

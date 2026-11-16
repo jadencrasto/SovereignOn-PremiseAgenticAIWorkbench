@@ -14,6 +14,7 @@ export const capabilityLabels = {
 export type CapabilityName = keyof typeof capabilityLabels;
 export type CapabilityState = 'available' | 'unavailable' | 'blocked' | 'unknown';
 export type Capability = { state: CapabilityState; reason: string };
+type ModelReadiness = Capability & { id: string; expires_at?: number; identity_evidence?: 'provider_digest' | 'unavailable' };
 
 export interface CapabilityReport {
   schema_version: 1;
@@ -22,8 +23,11 @@ export interface CapabilityReport {
   capabilities: Record<CapabilityName, Capability>;
   models: Record<string, Capability & { id: string | null }>;
   installed_models: string[];
-  selected_chat_model?: Capability & { id: string; expires_at?: number; identity_evidence?: 'provider_digest' | 'unavailable' };
+  selected_chat_model?: ModelReadiness;
   chat_models?: string[];
+  selected_vision_model?: ModelReadiness;
+  vision_models?: string[];
+  text_file_understanding?: boolean;
 }
 
 const reasons: Record<string, string> = {
@@ -47,8 +51,10 @@ const reasons: Record<string, string> = {
   inference_check_expired: 'The inference check expired. Check the model again.',
   inference_check_failed: 'The model inference check failed or timed out.',
   model_identity_changed: 'The model identity changed. Check inference again.',
-  inference_verified: 'A recent synthetic inference check completed. Live operation remains unverified.',
+  inference_verified: 'The backend completed a recent inference check for this model.',
   unsupported_chat_model: 'This model is not configured for chat.',
+  unsupported_vision_model: 'Choose an installed model configured for vision in Models.',
+  vision_model_digest_required: 'Ollama did not report an identity digest for this vision model. Check Ollama again.',
   persistence_initialized_unverified: 'The store initialized. Durable writes and recovery were not checked.',
   protected_document_storage_unverified: 'Protected document storage and index integrity are unverified.',
   task_revalidation_unavailable: 'Task authorization cannot be safely revalidated.',
@@ -85,18 +91,23 @@ export function chatDisabled(report: CapabilityReport | null, image = false, sel
   const capability = capabilityFor(report, image ? 'multimodal' : 'chat');
   // A model inventory cannot override a blocked or unavailable chat capability.
   if (capability.state !== 'available') return true;
-  if (!image) {
-    const checked = report?.selected_chat_model;
-    if (!selectedModel || !checked || checked.id !== selectedModel || checked.state !== 'available' ||
-        typeof checked.expires_at !== 'number' || checked.expires_at * 1000 <= Date.now()) return true;
-  }
-  return false;
+  if (!selectedModel || !report || !modelInInventory(report, selectedModel)) return true;
+  const checked = image ? report.selected_vision_model : report.selected_chat_model;
+  return !checked || checked.id !== selectedModel || checked.state !== 'available' ||
+    (image && (!report.vision_models?.includes(selectedModel) || checked.identity_evidence !== 'provider_digest')) ||
+    typeof checked.expires_at !== 'number' || !Number.isFinite(checked.expires_at) ||
+    checked.expires_at <= Date.now() / 1000;
 }
 
 function isCapability(value: unknown): value is Capability {
   if (!value || typeof value !== 'object') return false;
   const { state, reason } = value as Partial<Capability>;
   return typeof reason === 'string' && ['available', 'unavailable', 'blocked', 'unknown'].includes(state ?? '');
+}
+
+function isModelReadiness(value: ModelReadiness | undefined): boolean {
+  return !!value && isCapability(value) && typeof value.id === 'string' &&
+    (value.state !== 'available' || (typeof value.expires_at === 'number' && Number.isFinite(value.expires_at)));
 }
 
 export function parseCapabilityReport(value: unknown): CapabilityReport {
@@ -112,10 +123,11 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
       }) ||
       !Array.isArray(report.installed_models) || !report.installed_models.every(name => typeof name === 'string') ||
       !Array.isArray(report.chat_models) || !report.chat_models.every(name => typeof name === 'string') ||
-      !report.selected_chat_model || !isCapability(report.selected_chat_model) ||
-      typeof report.selected_chat_model.id !== 'string' ||
-      (report.selected_chat_model.state === 'available' &&
-        (typeof report.selected_chat_model.expires_at !== 'number' || !Number.isFinite(report.selected_chat_model.expires_at)))) {
+      !isModelReadiness(report.selected_chat_model) ||
+      (report.vision_models !== undefined &&
+        (!Array.isArray(report.vision_models) || !report.vision_models.every(name => typeof name === 'string'))) ||
+      (report.selected_vision_model !== undefined && !isModelReadiness(report.selected_vision_model)) ||
+      (report.text_file_understanding !== undefined && typeof report.text_file_understanding !== 'boolean')) {
     throw new Error('Invalid capability response');
   }
   return report as CapabilityReport;

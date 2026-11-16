@@ -23,7 +23,7 @@ export const RolePortalView: React.FC = () => {
   const { user, isLoading } = useAuth();
   const { capabilities, isCheckingHealth } = useWorkbench();
   const [loaded, setReport] = useState<{ userId: string; value: PermissionReport } | null>(null);
-  const report = loaded?.userId === user?.id ? loaded.value : null;
+  const report = loaded && user && loaded.userId === user.id ? loaded.value : null;
   const [error, setError] = useState(false);
   useEffect(() => {
     let active = true;

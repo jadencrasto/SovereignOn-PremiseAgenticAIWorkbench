@@ -40,6 +40,10 @@ export async function loadSession(id: string): Promise<ChatSession> {
     timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
     toolEvents: m.tool_events || [], withheld: m.withheld === true,
     workflowStatus: m.response_state || undefined,
+    attachments: m.attachments?.map(attachment => ({
+      id: attachment.attachment_id, filename: attachment.filename,
+      mimeType: attachment.mime_type, sizeBytes: attachment.size_bytes,
+    })),
   }));
   for (const task of record.tasks || []) {
     const taskStatus = task.status.replace(/[^a-zA-Z0-9_-]/g, '');
@@ -82,28 +86,33 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const [loading, setLoading] = useState(false);
   const [canExportLegacy, setCanExportLegacy] = useState(false);
   const generation = useRef(0);
+  const listGeneration = useRef(0);
   const currentSessionRef = useRef(currentSessionId);
   currentSessionRef.current = currentSessionId;
 
+  // A background list refresh should not cancel an explicit conversation selection.
+  useEffect(() => () => { generation.current++; }, [isOpen]);
   useEffect(() => {
     if (!isOpen) return;
-    const current = ++generation.current;
+    const current = ++listGeneration.current;
+    const action = generation.current;
+    const isCurrent = () => listGeneration.current === current && generation.current === action;
     setError('');
     setLoading(true);
     void legacyExportAllowed().then(policy => {
-      if (generation.current === current) setCanExportLegacy(policy.allowed);
-    }).catch(() => { if (generation.current === current) setCanExportLegacy(false); });
+      if (isCurrent()) setCanExportLegacy(policy.allowed);
+    }).catch(() => { if (isCurrent()) setCanExportLegacy(false); });
     (async () => {
       try {
-        const records = await loadOwnedHistory(fetchSessions, loadSession, () => generation.current === current);
+        const records = await loadOwnedHistory(fetchSessions, loadSession, isCurrent);
         if (records) setSessions(records);
       } catch {
-        if (generation.current === current) setError('Unable to load conversation history. Please sign in or try again.');
+        if (isCurrent()) setError('Unable to load conversation history. Please sign in or try again.');
       } finally {
-        if (generation.current === current) setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     })();
-    return () => { generation.current++; };
+    return () => { listGeneration.current++; };
   }, [isOpen, refreshKey]);
 
   const filteredSessions = useMemo(() => {
@@ -114,6 +123,17 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     });
   }, [sessions, searchQuery]);
 
+  const invalidateList = () => {
+    listGeneration.current++;
+    setLoading(false);
+  };
+
+  const forgetSession = (id: string) => {
+    invalidateList();
+    setSessions(prev => prev.filter(session => session.id !== id));
+    if (id === currentSessionRef.current) onNewChat();
+  };
+
   const removeSession = async (id: string) => {
     const current = ++generation.current;
     setLoading(false);
@@ -121,13 +141,11 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     setError('');
     try {
       if (!await deleteOwnedHistory(id, clearSession, () => generation.current === current)) return;
-      setSessions(prev => prev.filter(s => s.id !== id));
-      if (id === currentSessionRef.current) onNewChat();
+      forgetSession(id);
       onDeleted?.();
     } catch (err) {
       if (generation.current === current && err instanceof ApiError && err.status === 404) {
-        setSessions(prev => prev.filter(s => s.id !== id));
-        if (id === currentSessionRef.current) onNewChat();
+        forgetSession(id);
         onDeleted?.();
         setError('Conversation is no longer available.');
       } else if (generation.current === current) {
@@ -157,6 +175,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
       try {
         const result = await renameSession(id, editTitle.trim());
         if (generation.current === current) {
+          invalidateList();
           setSessions(prev => prev.map(s => s.id === id ? { ...s, title: result.title } : s));
           onRenamed?.(id, result.title);
         }
@@ -176,8 +195,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     } catch (err) {
       if (generation.current === current) {
         if (err instanceof ApiError && err.status === 404) {
-          setSessions(prev => prev.filter(item => item.id !== session.id));
-          if (session.id === currentSessionId) onNewChat();
+          forgetSession(session.id);
           onDeleted?.();
           setError('Conversation is no longer available.');
         } else setError('Unable to revalidate conversation access for export.');
@@ -313,8 +331,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                     } catch (err) {
                       if (generation.current !== current) return;
                       if (err instanceof ApiError && err.status === 404) {
-                        setSessions(prev => prev.filter(item => item.id !== s.id));
-                        if (s.id === currentSessionId) onNewChat();
+                        forgetSession(s.id);
                         onDeleted?.();
                         setError('Conversation is no longer available.');
                       } else setError('Unable to revalidate conversation access.');
@@ -441,8 +458,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                 try {
                   await clearSession(session.id);
                   if (generation.current !== current) break;
-                  setSessions(prev => prev.filter(item => item.id !== session.id));
-                  if (session.id === currentSessionId) onNewChat();
+                  forgetSession(session.id);
                 } catch { failed = true; }
               }
               if (failed) setError('Some conversations could not be deleted. They remain in the list.');

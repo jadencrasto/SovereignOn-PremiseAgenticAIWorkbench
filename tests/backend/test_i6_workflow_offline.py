@@ -48,7 +48,8 @@ def test_closing_image_stream_closes_inner_generator(tmp_path):
     try:
         engine._memory.prepare_new_chat('s','a','Be helpful.')
         async def run():
-            stream=_stream_sse_multimodal(engine,'s','Describe','encoded',None,'fake',False,None,user_role='admin',user_id='a')
+            stream=_stream_sse_multimodal(engine,'s','Describe','encoded','fake','vision',None,
+                                          user_role='admin',user_id='a',check_readiness=lambda stage: None)
             first=await stream.__anext__()
             assert 'partial synthetic response' in first
             await stream.aclose()

@@ -255,8 +255,8 @@ class VisualGroundingVerifier:
 
         # Build safe, provenance-preserving fallback response
         logger.warning(
-            "VISUAL_GROUNDING_GUARD | Violations detected: %s. Applying safe fallback.",
-            violations,
+            "VISUAL_GROUNDING_GUARD | Flagged %d claims. Applying fallback.",
+            len(violations),
         )
         guarded_text = self._build_safe_provenance_response(
             original_response=response_text,

@@ -21,9 +21,10 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
-from backend.auth.dependencies import get_current_user, require_role
+from backend.auth.dependencies import bearer_scheme, get_current_user, request_session_credentials, require_role
 from backend.auth.models import (
     AuthStore,
     ClearanceLevel,
@@ -200,32 +201,30 @@ async def logout(
     request: Request,
     response: Response,
     current_user: User = Depends(get_current_user),
+    bearer: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ):
     """Revoke current session token."""
     session_mgr: SessionManager = getattr(request.app.state, "session_manager", None)
-    raw_token = request.cookies.get("session_token")
-    if not raw_token:
-        # Check bearer header
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            raw_token = auth_header.split(" ", 1)[1]
+    raw_token, _ = request_session_credentials(request, bearer)
 
     if session_mgr and raw_token:
         session_mgr.revoke_session(raw_token)
 
-    active_settings = getattr(request.app.state, "settings", settings)
-    cookie_secure = active_settings.auth_cookie_secure
-    if active_settings.app_env.lower() == "production" and request.url.scheme == "https":
-        cookie_secure = True
+    cookie_token = request.cookies.get("session_token")
+    if not cookie_token or cookie_token == raw_token:
+        active_settings = getattr(request.app.state, "settings", settings)
+        cookie_secure = active_settings.auth_cookie_secure
+        if active_settings.app_env.lower() == "production" and request.url.scheme == "https":
+            cookie_secure = True
 
-    response.delete_cookie(
-        key="session_token",
-        path="/",
-        domain=active_settings.auth_cookie_domain,
-        httponly=True,
-        samesite=active_settings.auth_cookie_samesite.lower(),
-        secure=cookie_secure,
-    )
+        response.delete_cookie(
+            key="session_token",
+            path="/",
+            domain=active_settings.auth_cookie_domain,
+            httponly=True,
+            samesite=active_settings.auth_cookie_samesite.lower(),
+            secure=cookie_secure,
+        )
     _log_auth_event(request, "auth.logout", current_user.id, current_user.username, current_user.role, True)
     return {"message": "Successfully logged out"}
 
