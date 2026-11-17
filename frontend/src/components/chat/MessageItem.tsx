@@ -123,6 +123,39 @@ const ToolActivity: React.FC<{ events: ToolEvent[]; isStreaming?: boolean }> = (
   );
 };
 
+function FileAnswer({ message }: { message: ChatMessage }) {
+  const deterministic = !message.error && !message.isStreaming && message.model_used === 'Deterministic file analysis';
+  const filename = message.fileName;
+  // The backend emits one final literal text block headed by the actual upload name.
+  // Preserve its body as text, without inferring column or citation metadata from prose.
+  const block = deterministic && filename && !/[\\/\r\n]/.test(filename)
+    ? /\n\n(`{3,})text\n([\s\S]+)\n\1$/.exec(message.content) : null;
+  const fileHeader = 'File: ' + filename;
+  const evidence = block && (block[2] === fileHeader || block[2].startsWith(fileHeader + '\n'))
+    ? block[2].slice(fileHeader.length).replace(/^\n/, '') : null;
+  const result = evidence !== null && block ? message.content.slice(0, block.index) : message.content;
+  const emphasis = deterministic && evidence !== null ? /^\*\*([^*\n]+)\*\*/.exec(result) : null;
+  return (
+    <div className="min-w-0 space-y-3">
+      {!deterministic && !message.error && !message.isStreaming && message.model_used && (
+        <p className="text-xs text-slate-600">Model response without verified file citations.</p>
+      )}
+      <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">
+        {emphasis ? <><strong>{emphasis[1]}</strong>{result.slice(emphasis[0].length)}</> : result}
+      </p>
+      {evidence && (
+        <section aria-label="Verified source evidence" className="min-w-0 rounded-lg border border-slate-200 bg-slate-50">
+          <h3 className="border-b border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Verified source evidence</h3>
+          <pre tabIndex={0} aria-label="Source columns, rows or lines"
+            className="max-h-72 max-w-full overflow-auto whitespace-pre-wrap p-3 text-xs leading-relaxed [overflow-wrap:anywhere]">
+            {evidence}
+          </pre>
+        </section>
+      )}
+    </div>
+  );
+}
+
 export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onApprove, onReject }) => {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === 'user';
@@ -159,7 +192,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                       att.mimeType === 'text/plain' ? 'Text file · Attach again to ask about it' : 'Image preview unavailable in history'}
                   </p>}
                   <div className="flex items-center justify-between px-2 py-1.5 text-xs font-medium text-slate-700">
-                    <span className="truncate max-w-[180px]">{att.filename}</span>
+                    <span className="max-w-[180px] break-all">{att.filename}</span>
                     <span className="text-slate-500">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
                   </div>
                 </div>
@@ -177,6 +210,10 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
   // Assistant Message (White & Light Blue Terminal Output)
   const hasToolEvents = !message.withheld && message.toolEvents && message.toolEvents.length > 0;
+  const plan = !message.withheld && message.plan && message.plan.steps.length > 0 ? (
+    <PlanTimeline taskId={message.plan.taskId} objective={message.plan.objective} steps={message.plan.steps}
+      fileAnalysis={message.textFileAnswer} ended={!message.isStreaming} />
+  ) : null;
 
   return (
     <div className="flex flex-col gap-2 max-w-5xl mx-auto px-2 py-3 font-sans">
@@ -203,26 +240,33 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             : 'border-slate-200 text-slate-800'
         }`}
       >
+        {message.textFileAnswer && !message.withheld && (
+          <div className="mb-3 text-xs text-slate-600">
+            {message.fileName && <p className="mb-1 font-semibold text-slate-800 [overflow-wrap:anywhere]">{message.fileName}</p>}
+            <p>File results are available in this view only.</p>
+          </div>
+        )}
         {message.withheld ? (
           <p role="status" className="text-sm text-slate-600">This response is withheld because its source access cannot be verified.</p>
         ) : message.error ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2 font-semibold text-sm text-rose-600">
               <AlertTriangle className="w-4 h-4" />
-              <span>Response failed</span>
+              <span>{message.textFileAnswer && message.plan ? 'File workflow incomplete' : 'Response failed'}</span>
             </div>
-            <p role="status" className="text-sm font-mono bg-rose-50 p-3 rounded-lg border border-rose-100">
+            <p role="alert" className="text-sm bg-rose-50 p-3 rounded-lg border border-rose-100 [overflow-wrap:anywhere]">
               {message.errorMessage || message.content}
             </p>
             {hasToolEvents && <ToolActivity events={message.toolEvents!} isStreaming={false} />}
+            {message.textFileAnswer && plan}
             {message.errorMessage && message.content && (
               <div className="font-sans text-slate-800">
                 <p className="text-xs font-medium text-slate-600">Partial response</p>
-                {message.textFileAnswer ? <p className="whitespace-pre-wrap break-words">{message.content}</p>
+                {message.textFileAnswer ? <FileAnswer message={message} />
                   : <MarkdownContent content={message.content} />}
               </div>
             )}
-            {onRetry && (
+            {onRetry && !message.textFileAnswer && (
               <button
                 onClick={() => onRetry(message.content)}
                 className="mt-3 px-4 py-2 rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-medium text-sm transition-colors shadow-sm"
@@ -243,18 +287,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             {message.imageProgress && !message.isStreaming && message.content && (
               <p className="mb-2 text-xs text-slate-600">AI-generated image interpretation</p>
             )}
-            {message.textFileAnswer && !message.isStreaming && !message.workflowStatus && message.content && (
-              <p className="mb-2 text-xs text-slate-600">File answer available in this view only</p>
-            )}
-
-            {/* Plan Timeline */}
-            {!message.withheld && message.plan && message.plan.steps && message.plan.steps.length > 0 && (
-              <PlanTimeline
-                taskId={message.plan.taskId}
-                objective={message.plan.objective}
-                steps={message.plan.steps}
-              />
-            )}
+            {plan}
 
             {/* Approval Card */}
             {!message.withheld && message.pendingApproval && onApprove && onReject && (
@@ -274,7 +307,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
             {message.content ? (
               <div className="font-sans">
-                {message.textFileAnswer ? <p className="whitespace-pre-wrap break-words">{message.content}</p>
+                {message.textFileAnswer ? <FileAnswer message={message} />
                   : <MarkdownContent content={message.content} />}
               </div>
             ) : (
@@ -299,7 +332,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
         )}
 
         {/* Sources Grid */}
-        {!message.withheld && message.sources && message.sources.length > 0 && (
+        {!message.withheld && !message.textFileAnswer && message.sources && message.sources.length > 0 && (
           <div className="mt-6 pt-5 border-t border-slate-100">
             <div className="text-xs font-semibold text-slate-500 tracking-wide mb-3">
               Sources & Evidence

@@ -1,6 +1,6 @@
 // Deterministic hook harness exercising production ChatView handlers, not React DOM.
 const {test}=require('node:test'), assert=require('node:assert/strict'), fs=require('fs'), path=require('path'), Module=require('module'), ts=require('typescript');
-let slots, cursor, requests, effects, textBlocked=false, textModel='fake';
+let slots, cursor, requests, effects, textBlocked=false, textModel='fake', authRefreshes=0;
 const React={createElement:(type,props,...children)=>({type,props:{...props,children}}),useState(initial){let i=cursor++;if(!(i in slots))slots[i]=typeof initial==='function'?initial():initial;return [slots[i],v=>{slots[i]=typeof v==='function'?v(slots[i]):v}]},useRef(initial){let i=cursor++;return slots[i]??=( {current:initial} )},useCallback(f){cursor++;return f},useEffect(effect){cursor++;effects.push(effect)}};
 function MessageList(){} function ChatInput(){} function ChatHistorySidebar(){}
 let createImpl=async()=>({session_id:'created-server-id'});
@@ -13,7 +13,7 @@ const chatFile=path.resolve(__dirname,'../src/api/chat.ts');
 const chatOut=ts.transpileModule(fs.readFileSync(chatFile,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
 const chatMod=new Module(chatFile,module);chatMod.filename=chatFile;chatMod.paths=Module._nodeModulePaths(path.dirname(chatFile));const chatRequire=chatMod.require.bind(chatMod);chatMod.require=n=>n==='./client'?{}:chatRequire(n);chatMod._compile(chatOut,chatFile);
 api.guardChatCallbacks=chatMod.exports.guardChatCallbacks;
-const mocks={react:React,'./MessageList':{MessageList},'./ChatInput':{ChatInput},'./ChatHistorySidebar':{ChatHistorySidebar,loadSession:async()=>({id:'server-session',title:'Conversation',messages:[]})},'../../context/AuthContext':{useAuth:()=>({user:{id:'a'}})},'../../api/chat':api,'../../context/WorkbenchContext':{useWorkbench:()=>({selectedModel:textModel,selectedVisionModel:visionModel,addToast(){},capabilities:{text_file_understanding:true},isCheckingHealth:false})},'../../api/capabilities':{capabilityFor:()=>({state:'available'}),chatDisabled:(_report,image)=>image?false:textBlocked,describeCapability:()=>'',permitsCapability:()=>false},'../../api/tasks':{},'lucide-react':{Clock:()=>null,Plus:()=>null}};
+const mocks={react:React,'./MessageList':{MessageList},'./ChatInput':{ChatInput},'./ChatHistorySidebar':{ChatHistorySidebar,loadSession:async()=>({id:'server-session',title:'Conversation',messages:[]})},'../../context/AuthContext':{useAuth:()=>({user:{id:'a'},refreshUser:async()=>{authRefreshes++;}})},'../../api/chat':api,'../../context/WorkbenchContext':{useWorkbench:()=>({selectedModel:textModel,selectedVisionModel:visionModel,addToast(){},capabilities:{text_file_understanding:true},isCheckingHealth:false})},'../../api/capabilities':{capabilityFor:()=>({state:'available'}),chatDisabled:(_report,image)=>image?false:textBlocked,describeCapability:()=>'',permitsCapability:()=>false},'../../api/tasks':{},'lucide-react':{Clock:()=>null,Plus:()=>null}};
 const file=path.resolve(__dirname,'../src/components/chat/ChatView.tsx');const out=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;const mod=new Module(file,module);mod.filename=file;mod.paths=Module._nodeModulePaths(path.dirname(file));let orig=mod.require.bind(mod);mod.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);mod._compile(out,file);
 function render(){cursor=0;effects=[];return mod.exports.ChatView()} function find(n,t){if(!n||typeof n!=='object')return;if(n.type===t)return n;for(let c of n.props?.children||[]){let x=find(c,t);if(x)return x}} function parts(){let tree=render();return {tree,input:find(tree,ChatInput).props,list:find(tree,MessageList).props,sidebar:find(tree,ChatHistorySidebar)?.props}} function setup(){slots=[];requests=[];parts();slots[3]='server-session';return parts()}
 test('a second submission from the same render cannot replace the active stream', async () => {
@@ -91,6 +91,9 @@ test('a text-file turn honors model readiness and same-render duplicate protecti
   try {
     await input.onSendTextFile('What color?', file, range);
     assert.deepEqual(requests, []);
+    assert.equal(parts().input.textFileSupported, true);
+    assert.equal(parts().input.imageBlocked, true);
+    assert.match(parts().input.sendStatus, /Verify the selected text model/);
   } finally {
     textBlocked = false;
   }
@@ -120,6 +123,138 @@ test('conversation switches abort a text-file question and suppress its late ans
   request.resolve();
   await pending;
   assert.deepEqual(parts().list.messages, []);
+});
+
+const csv = { name: 'readings.csv', type: 'text/csv', size: 54 };
+const rowRange = { start: 2, end: 5 };
+const localFilePlan = {
+  plan: { objective: 'Analyze the selected CSV rows', steps: [
+    { id: 'file_step_1', description: 'Filter selected rows', status: 'pending', requires_approval: false },
+    { id: 'file_step_2', description: 'Calculate percentage of valid readings', status: 'pending', requires_approval: false },
+  ] },
+};
+
+test('file plan retains previous verified steps on a terminal failure', async () => {
+  const { input } = setup();
+  const pending = input.onSendTextFile('Filter and calculate a percentage', csv, rowRange);
+  const { callbacks, resolve } = requests[0];
+  callbacks.onPlanCreated(localFilePlan);
+  callbacks.onPlanStep({ step_id: 'file_step_1', status: 'completed', summary: 'Filter matched 2 selected rows.' });
+  callbacks.onPlanStep({ step_id: 'file_step_2', status: 'failed' });
+  callbacks.onError('Step 2 did not complete. Last verified step: Filter matched 2 selected rows.', { code: 'TEXT_WORKFLOW_STEP_FAILED' });
+  resolve();
+  await pending;
+  const result = parts().list.messages[1];
+  assert.equal(result.fileName, csv.name);
+  assert.equal(result.plan.taskId, undefined);
+  assert.equal(result.plan.steps[0].summary, 'Filter matched 2 selected rows.');
+  assert.equal(result.plan.steps[1].status, 'failed');
+  assert.equal(result.workflowStatus, 'failed');
+  assert.equal(result.error, true);
+  assert.match(result.errorMessage, /Last verified step/);
+});
+
+test('completion notification alone does not mark file analysis complete', async () => {
+  const { input } = setup();
+  const pending = input.onSendTextFile('Filter the rows', csv, rowRange);
+  const { callbacks, resolve } = requests[0];
+  callbacks.onPlanCreated(localFilePlan);
+  callbacks.onTaskStatus('task_completed', '');
+  assert.equal(parts().list.messages[1].workflowStatus, 'executing');
+  assert.equal(parts().list.messages[1].model_used, undefined);
+  callbacks.onDelta('Verified result');
+  callbacks.onDone('server-session', 'Deterministic file analysis');
+  resolve();
+  await pending;
+  assert.equal(parts().list.messages[1].workflowStatus, 'completed');
+  assert.equal(parts().list.messages[1].model_used, 'Deterministic file analysis');
+});
+
+test('a rejected file follow-up asks for reattachment and context without sending old bytes', async () => {
+  const { input } = setup();
+  const pending = input.onSendMessage('Now show only those above 80.');
+  const request = requests[0];
+  assert.equal(request.payload.file, undefined);
+  request.callbacks.onError('Old file unavailable', { code: 'TEXT_FILE_REATTACH_REQUIRED', status: 409 });
+  request.resolve();
+  await pending;
+  assert.match(parts().list.messages[1].errorMessage, /Reattach.*restate any previous filters/);
+});
+
+test('revocation clears active file messages, aborts the stream, and resets the composer', async (t) => {
+  const previous = global.sessionStorage;
+  global.sessionStorage = { removeItem() {} };
+  t.after(() => { global.sessionStorage = previous; });
+  authRefreshes = 0;
+  const { input } = setup();
+  const pending = input.onSendTextFile('Analyze the file', csv, rowRange);
+  const request = requests[0];
+  request.callbacks.onError('Sign in again to ask about a text file.', { code: 'TEXT_FILE_AUTH_CHANGED' });
+  request.callbacks.onDelta('late secret');
+  request.resolve();
+  await pending;
+  assert.equal(request.signal.aborted, true);
+  assert.equal(authRefreshes, 1);
+  assert.notEqual(parts().input.key, input.key);
+  assert.deepEqual(parts().list.messages, []);
+});
+
+test('reselecting the same conversation remounts the attachment composer', () => {
+  const initial = setup();
+  initial.tree.props.children[0].props.children[0].props.children[0].props.onClick();
+  parts().sidebar.onSelectSession({ id: 'server-session', title: 'Same conversation', messages: [] });
+  assert.notEqual(parts().input.key, initial.input.key);
+  assert.equal(requests.length, 0);
+});
+
+test('a file request to an unavailable conversation drops the file turn without refreshing authentication', async (t) => {
+  const previous = global.sessionStorage;
+  global.sessionStorage = { removeItem() {} };
+  t.after(() => { global.sessionStorage = previous; });
+  authRefreshes = 0;
+  const { input } = setup();
+  const pending = input.onSendTextFile('Analyze the file', csv, rowRange);
+  const request = requests[0];
+  request.callbacks.onError('Conversation not found.', { status: 404 });
+  request.callbacks.onDelta('late secret');
+  request.resolve();
+  await pending;
+  assert.equal(request.signal.aborted, true);
+  assert.equal(authRefreshes, 0);
+  assert.deepEqual(parts().list.messages, []);
+});
+
+test('completing file analysis persists only the conversation selection in the browser', async (t) => {
+  const saved = { session: global.sessionStorage, local: global.localStorage };
+  const writes = [];
+  global.sessionStorage = { setItem: (...args) => writes.push(args), removeItem() {} };
+  global.localStorage = { setItem: (...args) => writes.push(args) };
+  t.after(() => { global.sessionStorage = saved.session; global.localStorage = saved.local; });
+  const { input } = setup();
+  const pending = input.onSendTextFile('Analyze private measurements', csv, rowRange);
+  const { callbacks, resolve } = requests[0];
+  callbacks.onPlanCreated(localFilePlan);
+  callbacks.onPlanStep({ step_id: 'file_step_1', status: 'completed', summary: 'Private intermediate' });
+  callbacks.onTaskStatus('task_completed', '');
+  callbacks.onDelta('Private file-derived answer');
+  callbacks.onDone('server-session', 'Deterministic file analysis');
+  resolve();
+  await pending;
+  parts();
+  effects[3]();
+  assert.deepEqual(writes, [['sovereign-active-conversation:a', 'server-session']]);
+});
+
+test('file network errors show retry guidance without raw diagnostics', async () => {
+  const { input } = setup();
+  const pending = input.onSendTextFile('Filter rows', csv, rowRange);
+  const { callbacks, resolve } = requests[0];
+  callbacks.onError('Unexpected transport failure at private-path', { code: 'STREAM_CONNECTION_LOST' });
+  resolve();
+  await pending;
+  const reply = parts().list.messages[1];
+  assert.match(reply.errorMessage, /connection was interrupted.*Reattach/);
+  assert.doesNotMatch(reply.errorMessage, /private-path/);
 });
 
 test('CSV uses the existing submission lock and drops a late answer on logout', async () => {

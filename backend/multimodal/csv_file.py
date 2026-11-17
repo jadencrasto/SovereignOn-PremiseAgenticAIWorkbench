@@ -13,6 +13,10 @@ MAX_CSV_CONTEXT_BYTES = 4096
 _NUMBER = re.compile(r'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?')
 
 
+def is_csv_number(value: str) -> bool:
+    return _NUMBER.fullmatch(value) is not None
+
+
 def parse_csv_file(data: bytes, media_type: str) -> tuple[list[str], list[list[str]]]:
     kind, separator, params = media_type.partition(';')
     if kind.strip().lower() not in ('text/csv', 'text/plain', 'application/octet-stream', 'application/vnd.ms-excel'):
@@ -62,7 +66,7 @@ def csv_column_types(rows: list[list[str]]) -> list[str]:
         values = [value.strip() for value in column if value.strip()]
         if not values:
             types.append('Empty')
-        elif all(_NUMBER.fullmatch(value) for value in values):
+        elif all(is_csv_number(value) for value in values):
             types.append('Number')
         elif all(value.lower() in ('true', 'false') for value in values):
             types.append('Boolean')

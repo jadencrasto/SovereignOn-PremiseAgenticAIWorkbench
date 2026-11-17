@@ -73,32 +73,12 @@ export const MessageList: React.FC<MessageListProps> = ({
         {/* 3 Dispatch Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5 font-mono">
           {/* Card 01 */}
-          <div
-            onClick={() =>
-              onSelectPrompt?.(
-                "Read the lab dataset 'mrpl_lab_composition_test.csv' and cross-check the chemical composition values against our internal refinery quality specifications. Identify all deviations exceeding maximum allowable thresholds, calculate the percentage variance for each, and generate a styled compliance report 'mrpl_chemical_compliance_report.xlsx' with pass/fail conditional formatting. Finally, verify the generated report."
-              )
-            }
-            className="border border-slate-200 rounded-xl bg-white p-6 cursor-pointer hover:border-blue-300 hover:shadow-md transition-all shadow-sm flex flex-col justify-between space-y-4"
-          >
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xl font-bold font-display text-blue-500">Data QA</span>
-                <span className="text-[10px] font-semibold px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
-                  CSV to XLSX
-                </span>
-              </div>
-              <h3 className="font-display font-semibold text-base text-slate-800">
-                Data Quality Assurance
-              </h3>
-              <p className="font-sans text-sm text-slate-600 leading-normal">
-                Cross-reference data against standards. Compute tolerances and build verified Excel artifacts.
-              </p>
-            </div>
-            <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-blue-600 group">
-              <span>Run Example</span>
-              <ArrowUpRight className="w-4 h-4 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" />
-            </div>
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h3 className="font-display text-base font-semibold text-slate-800">Analyze an attachment</h3>
+            <p className="font-sans text-sm leading-normal text-slate-600">
+              When the TXT / CSV control is available, attach one file. Ask for a calculation on selected CSV rows
+              or find a passage in TXT.
+            </p>
           </div>
 
           {/* Card 02 */}

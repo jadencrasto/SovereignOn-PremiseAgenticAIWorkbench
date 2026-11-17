@@ -52,6 +52,7 @@ export interface ChatMessage {
   isStreaming?: boolean;
   imageProgress?: 'uploading' | 'analyzing_image' | 'reasoning';
   textFileAnswer?: boolean;
+  fileName?: string;
   error?: boolean;
   errorMessage?: string;
   withheld?: boolean;
@@ -60,7 +61,7 @@ export interface ChatMessage {
   attachments?: ImageAttachment[];
   // Phase 6: Plan and Approval states
   plan?: {
-    taskId: string;
+    taskId?: string;
     objective: string;
     steps: PlanStep[];
   };
@@ -101,6 +102,7 @@ export interface StreamChunkPayload {
     | 'plan_created' | 'plan_step' | 'approval_required' | 'approval_granted'
     | 'approval_rejected' | 'task_started' | 'task_completed' | 'task_failed' | 'task_cancelled';
   content: string;
+  error_code?: string;
   session_id?: string;
   model_used?: string;
   sources?: SourceReference[];
@@ -131,6 +133,8 @@ export interface StreamChunkPayload {
     }>;
   };
   step_id?: string;
+  status?: string;
+  description?: string;
   approval_id?: string;
   risk_level?: string;
   reason?: string;
@@ -264,7 +268,13 @@ export interface PlanStep {
   requires_approval: boolean;
   status: string; // 'pending' | 'awaiting_approval' | 'approved' | 'running' | 'completed' | 'failed' | 'skipped' (skipped = not required/N/A)
   result?: string | null;
+  summary?: string;
   error?: string | null;
+}
+
+export interface StreamErrorInfo {
+  status?: number;
+  code?: string;
 }
 
 export interface AgentPlan {

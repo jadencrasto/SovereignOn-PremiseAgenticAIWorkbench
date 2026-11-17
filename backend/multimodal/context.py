@@ -40,7 +40,9 @@ _EARLIER_TEXT_FILE_REFERENCE = re.compile(
 )
 _NAMED_TXT_REFERENCE = re.compile(r'\b(?:this|that|the|my|attached|uploaded)\s+(?:text file|\.txt(?: file)?)\b', re.IGNORECASE)
 _IMMEDIATE_TEXT_FILE_FOLLOWUP = re.compile(
-    r"^(?:and\s+)?(?:(?:summarize|summarise|quote|read) it|what (?:does|did) it say)\b",
+    r"^(?:and\s+)?(?:(?:summarize|summarise|quote|read) it|what (?:does|did) it say"
+    r"|show me (?:the|which) source (?:lines|values|passages)(?: you used)?"
+    r"|explain why that result matters)\b",
     re.IGNORECASE,
 )
 _CSV_REFERENCE = re.compile(
@@ -51,7 +53,15 @@ _CSV_REFERENCE = re.compile(
 _EARLIER_CSV_REFERENCE = re.compile(r'\b(?:previous|earlier|last|original|old)\s+(?:csv|table|spreadsheet)\b', re.IGNORECASE)
 _NAMED_CSV_REFERENCE = re.compile(r'\b(?:this|that|the|my|attached|uploaded)\s+\.?csv\b', re.IGNORECASE)
 _IMMEDIATE_CSV_FOLLOWUP = re.compile(
-    r'^(?:and\s+)?(?:how many (?:data )?rows\b|(?:what are|list) (?:the )?(?:column names|columns|headers)\b)',
+    r'^(?:(?:and|now)\s+)?(?:how many (?:data )?rows'
+    r'|(?:what are|list) (?:the )?(?:column names|columns|headers)'
+    r'|what about the (?:first|second|third|last|next)'
+    r'|compare (?:it|them|those|these)'
+    r'|(?:show|list) (?:only )?(?:those|these)'
+    r'|which of (?:those|these)'
+    r'|(?:find|calculate|show) their (?:average|sum|minimum|maximum|total)'
+    r'|compare (?:the )?first and second results'
+    r'|(?:calculate|find) (?:the )?(?:average|sum|total) of (?:these|those) (?:values|readings))\b',
     re.IGNORECASE,
 )
 
@@ -102,6 +112,8 @@ def requires_text_reattachment(history: list[Message], prompt: str, *, current_a
         return any(_is_file_turn(message) for message in history)
     if _CSV_REFERENCE.search(prompt) and any(_is_file_turn(message, 'text/csv') for message in history):
         return True
+    if re.search(r'\bamong (?:the )?filtered rows\b', prompt, re.I):
+        return any(_is_file_turn(message, 'text/csv') for message in history)
     if _IMMEDIATE_TEXT_FILE_FOLLOWUP.match(prompt.strip()):
         last_user = next((message for message in reversed(history) if message.role == "user"), None)
         return last_user is not None and _is_file_turn(last_user)

@@ -16,12 +16,15 @@ interface PlanStepData {
   tool_name?: string | null;
   requires_approval: boolean;
   status: string;
+  summary?: string;
 }
 
 interface PlanTimelineProps {
   objective: string;
   steps: PlanStepData[];
-  taskId: string;
+  taskId?: string;
+  fileAnalysis?: boolean;
+  ended?: boolean;
 }
 
 const statusConfig: Record<string, {
@@ -43,6 +46,8 @@ export const PlanTimeline: React.FC<PlanTimelineProps> = ({
   objective,
   steps,
   taskId,
+  fileAnalysis,
+  ended,
 }) => {
   return (
     <div className="my-3 rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm font-sans">
@@ -51,16 +56,18 @@ export const PlanTimeline: React.FC<PlanTimelineProps> = ({
         <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
           <Brain className="w-4 h-4 text-blue-500" />
           <span className="uppercase tracking-wider text-[10px] text-blue-600 font-mono">
-            Execution Plan
+            {fileAnalysis ? 'File analysis steps' : 'Execution Plan'}
           </span>
         </div>
-        <p className="text-xs text-slate-500 mt-1.5 line-clamp-2">{objective}</p>
+        {!fileAnalysis && <p className="text-xs text-slate-500 mt-1.5 line-clamp-2">{objective}</p>}
       </div>
 
       {/* Steps */}
       <div className="px-4 py-2 space-y-0">
         {steps.map((step, idx) => {
-          const config = statusConfig[step.status] || statusConfig.pending;
+          const interrupted = fileAnalysis && ended && step.status === 'running';
+          const notRun = fileAnalysis && ended && step.status === 'pending';
+          const config = interrupted ? statusConfig.failed : statusConfig[step.status] || statusConfig.pending;
           const Icon = config.icon;
 
           return (
@@ -78,26 +85,29 @@ export const PlanTimeline: React.FC<PlanTimelineProps> = ({
               {/* Step content */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-700 font-medium truncate">
+                  <span className="text-xs text-slate-700 font-medium break-words">
                     {step.description}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 mt-1">
-                  {step.tool_name && (
+                  {!fileAnalysis && step.tool_name && (
                     <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
                       <Wrench className="w-2.5 h-2.5" />
                       {step.tool_name}
                     </span>
                   )}
-                  {step.requires_approval && (
+                  {!fileAnalysis && step.requires_approval && (
                     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-200">
                       Approval Required
                     </span>
                   )}
                   <span className={`text-[10px] font-mono ${config.color}`}>
-                    {config.label}
+                    {interrupted ? 'Interrupted' : notRun ? 'Not run' : config.label}
                   </span>
                 </div>
+                {fileAnalysis && step.status === 'completed' && step.summary && (
+                  <p className="mt-1 break-words text-xs text-slate-700">{step.summary}</p>
+                )}
               </div>
             </div>
           );
@@ -105,11 +115,11 @@ export const PlanTimeline: React.FC<PlanTimelineProps> = ({
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-slate-100 bg-slate-50/50">
+      {taskId && !fileAnalysis && <div className="px-4 py-2 border-t border-slate-100 bg-slate-50/50">
         <span className="text-[10px] font-mono text-slate-400">
           Task {taskId} · {steps.length} steps
         </span>
-      </div>
+      </div>}
     </div>
   );
 };

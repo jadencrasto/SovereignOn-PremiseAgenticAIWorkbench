@@ -3,7 +3,7 @@ let slots,cursor,sent,revoked,effects,preview,previewCsv;
 const R={createElement:(type,props,...children)=>({type,props:{...props,children}}),useState(v){let i=cursor++;if(!(i in slots))slots[i]=v;return [slots[i],x=>slots[i]=x]},useRef(v){let i=cursor++;return slots[i]??={current:v}},useCallback:f=>f,useEffect(fn){effects.push(fn)}};
 const f=path.resolve(__dirname,'../src/components/chat/ChatInput.tsx'),m=new Module(f,module);m.filename=f;m.paths=Module._nodeModulePaths(path.dirname(f));let orig=m.require.bind(m);m.require=n=>n==='react'?R:n==='lucide-react'?new Proxy({},{get:(_,p)=>p}):n==='../../types'?{ALLOWED_IMAGE_TYPES:['image/png','image/jpeg','image/webp'],MAX_IMAGE_SIZE_BYTES:10*1024*1024}:n==='../../api/chat'?{previewTextFile:(...args)=>preview(...args),previewCsvFile:(...args)=>previewCsv(...args)}:orig(n);m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText,f);
 URL.createObjectURL=()=> 'blob:synthetic';URL.revokeObjectURL=x=>revoked.push(x);
-function render(p={}){cursor=0;effects=[];return m.exports.ChatInput({onSendMessage:(...a)=>sent.push(a),onStopStream:()=>{},onClearSession:()=>{},isStreaming:false,sendBlocked:false,imageBlocked:false,...p})}
+function render(p={}){cursor=0;effects=[];return m.exports.ChatInput({onSendMessage:(...a)=>sent.push(a),onStopStream:()=>{},onClearSession:()=>{},isStreaming:false,sendBlocked:false,imageBlocked:false,textFileSupported:true,...p})}
 function find(n,fn){if(!n||typeof n!=='object')return null;if(fn(n))return n;for(const c of (Array.isArray(n)?n:n.props?.children||[])){const found=find(c,fn);if(found)return found}return null}
 function setup(){slots=[];sent=[];revoked=[];preview=previewCsv=async()=>{throw Error('Unexpected preview')};return render()}
 test('image selection and submission preserve the selected file',()=>{let t=setup(),f={name:'synthetic.png',type:'image/png',size:5};find(t,n=>n.props?.id==='image-file-input').props.onChange({target:{files:[f],value:'x'}});t=render();assert.equal(find(t,n=>n.type==='img').props.src,'blob:synthetic');find(t,n=>n.type==='textarea').props.onChange({target:{value:'Describe',style:{},scrollHeight:5}});t=render();find(t,n=>n.props?.id==='send-message-btn').props.onClick();assert.deepEqual(sent,[['Describe',f]]);assert.deepEqual(revoked,['blob:synthetic'])});
@@ -43,6 +43,56 @@ const send = tree => find(tree, n => n.props?.id === 'send-message-btn');
 const question = tree => find(tree, n => n.type === 'textarea')
   .props.onChange({ target: { value: 'What color?', style: {}, scrollHeight: 1 } });
 const visiblePreview = tree => find(tree, n => n.type === 'pre' && n.props['aria-label'] === 'Text file preview');
+
+test('file capability gating is independent of text readiness and the picker accepts one file', () => {
+  setup();
+  const button = tree => find(tree, n => n.props?.['aria-label'] === 'Attach text or CSV file');
+  const unavailable = render({ textFileSupported: false });
+  assert.equal(button(unavailable).props.disabled, true);
+  assert.match(String(find(unavailable, n => n.props?.id === 'chat-file-support').props.children), /authenticated local chat mode/);
+  assert.equal(selectText(unavailable), undefined);
+  const pendingModel = render({ sendBlocked: true });
+  assert.equal(button(pendingModel).props.disabled, false);
+  assert.equal(find(pendingModel, n => n.props?.id === 'text-file-input').props.multiple, undefined);
+});
+
+test('gated formats and oversize selections have accurate public errors', () => {
+  setup();
+  const error = tree => find(tree, n => n.props?.role === 'alert');
+  selectText(render(), { name: 'report.pdf', type: 'application/pdf', size: 12 });
+  assert.ok(find(error(render()), n => String(n.props?.children).includes('PDF, DOCX and XLSX chat attachments are unavailable')));
+  selectText(render(), { ...textFile, size: 2049 });
+  assert.ok(find(error(render()), n => String(n.props?.children).includes('exceeds 2 KiB')));
+});
+
+test('removal invalidates a captured submit handler and preserves the original long filename', async () => {
+  setup();
+  const file = { ...textFile, name: 'measurement-'.repeat(8) + '.txt' };
+  const options = { onSendTextFile: (...args) => sent.push(args) };
+  preview = async () => ({ filename: file.name, size_bytes: file.size, text: 'sample', line_count: 1, truncated: false });
+  await selectText(render(options), file);
+  let current = render(options);
+  assert.ok(find(current, n => n.type === 'p' && n.props.children.includes(file.name)));
+  question(current);
+  current = render(options);
+  const staleSubmit = send(current).props.onClick;
+  find(current, n => n.type === 'button' && n.props.children.includes('Remove text file')).props.onClick();
+  staleSubmit();
+  assert.deepEqual(sent, []);
+  assert.equal(visiblePreview(render(options)), null);
+});
+
+test('preview revocation clears the file and forwards only a public session message', async () => {
+  setup();
+  let expired = 0;
+  preview = async () => { throw { status: 401, message: 'private stack and path' }; };
+  await selectText(render({ onSessionExpired: () => { expired++; } }));
+  assert.equal(expired, 1);
+  assert.equal(visiblePreview(render()), null);
+  const alert = find(render(), n => n.props?.role === 'alert');
+  assert.ok(find(alert, n => String(n.props?.children).includes('session has expired')));
+  assert.equal(find(alert, n => String(n.props?.children).includes('private stack')), null);
+});
 
 test('text preview is inert, size-labelled and independent of inference readiness', async () => {
   setup();

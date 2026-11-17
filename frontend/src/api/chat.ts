@@ -4,6 +4,7 @@ import type {
   ChatResponsePayload,
   MultimodalChatRequestPayload,
   SourceReference,
+  StreamErrorInfo,
   ToolEvent,
 } from '../types';
 
@@ -22,7 +23,7 @@ export async function streamChat(
     onDelta: (delta: string) => void;
     onSources: (sources: SourceReference[]) => void;
     onDone: (sessionId: string, modelUsed: string) => void;
-    onError: (error: string) => void;
+    onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
     onPlanCreated?: (planData: any) => void;
@@ -56,7 +57,7 @@ export async function streamChatMultimodal(
     onDelta: (delta: string) => void;
     onSources: (sources: SourceReference[]) => void;
     onDone: (sessionId: string, modelUsed: string) => void;
-    onError: (error: string) => void;
+    onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
     onPlanCreated?: (planData: any) => void;

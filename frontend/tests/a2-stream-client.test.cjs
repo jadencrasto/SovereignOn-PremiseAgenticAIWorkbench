@@ -142,6 +142,56 @@ test('CSV preview and analysis use CSV endpoints and send one inclusive row pair
  assert.deepEqual(paths, ['/api/chat/csv-preview', '/api/chat/csv-file']);
  assert.deepEqual(events, [['error', 'Selected model is unavailable']]);
 });
+
+test('multipart file analysis keeps step summaries and the existing terminal error code', async t => {
+ const originalFetch = global.fetch;
+ t.after(() => { global.fetch = originalFetch; });
+ const data = 'Name,Value\nPump A,12\n';
+ const file = new File([data], 'original.csv', { type: 'text/csv' });
+ const wire = [
+  {type:'plan_created',content:'',plan:{objective:'Analyze the selected CSV rows',steps:[
+   {id:'file_step_1',description:'Filter selected rows',status:'pending',requires_approval:false},
+  ]}},
+  {type:'plan_step',content:'',step_id:'file_step_1',status:'completed',summary:'Filter matched 1 selected row.'},
+  {type:'error',content:'Step 2 did not complete.',error_code:'TEXT_WORKFLOW_STEP_FAILED'},
+  {type:'done',content:'',session_id:'s',model_used:'Deterministic file analysis'},
+ ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('');
+ global.fetch = async (url, options) => {
+  assert.equal(url, '/api/chat/csv-file');
+  assert.equal(options.body.get('file').name, 'original.csv');
+  assert.equal(await options.body.get('file').text(), data);
+  return response([wire.slice(0, 47), wire.slice(47)]);
+ };
+ const seen = [];
+ await chatModule.exports.streamChatTextFile(file, 's', 'ollama/text', 'Filter and count', {
+  ...callbacks(seen),
+  onPlanCreated: plan => seen.push(['plan', plan.task_id, plan.plan.steps[0].id]),
+  onPlanStep: step => seen.push(['step', step.summary]),
+  onError: (message, info) => seen.push(['error', message, info.code]),
+ }, new AbortController().signal, {start:1,end:1});
+ assert.deepEqual(seen, [
+  ['plan', undefined, 'file_step_1'],
+  ['step', 'Filter matched 1 selected row.'],
+  ['error', 'Step 2 did not complete.', 'TEXT_WORKFLOW_STEP_FAILED'],
+ ]);
+});
+
+test('file preview and stream forward existing HTTP response status and error codes', async t => {
+ const originalFetch = global.fetch;
+ t.after(() => { global.fetch = originalFetch; });
+ const file = new File(['notes'], 'original.txt', { type: 'text/plain' });
+ const signal = new AbortController().signal;
+ global.fetch = async () => Response.json({detail:'Sign in again.'}, {
+  status:401, headers:{'X-Error-Code':'TEXT_FILE_AUTH_CHANGED'},
+ });
+ await assert.rejects(chatModule.exports.previewTextFile(file, 's', signal),
+  { status:401, code:'TEXT_FILE_AUTH_CHANGED' });
+ const seen = [];
+ await chatModule.exports.streamChatTextFile(file, 's', 'ollama/text', 'Find a passage', {
+  ...callbacks(seen), onError: (_message, info) => seen.push(info),
+ }, signal);
+ assert.deepEqual(seen, [{status:401,code:'TEXT_FILE_AUTH_CHANGED'}]);
+});
 test('malformed done after provider error remains a terminal error', async () => {
  const events = [];
  global.fetch = async () => response(['data: {"type":"error","content":"Selected model is unavailable"}\n\ndata: {"type":"done"}\n\n']);

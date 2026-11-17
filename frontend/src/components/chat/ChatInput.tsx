@@ -23,9 +23,32 @@ interface ChatInputProps {
   hasEarlierCsvFile?: boolean;
   sessionId?: string;
   onSendTextFile?: (question: string, file: File, range?: TextFileLineRange) => void;
+  textFileSupported: boolean;
+  onSessionExpired?: () => void;
   sendStatus?: string;
   imageStatus?: string;
   onClearSession: () => void;
+}
+
+interface FileDraft {
+  file: File;
+  state: 'loading' | 'ready' | 'failed';
+  preview?: TextFilePreview | CsvPreview;
+  range?: TextFileLineRange;
+}
+
+function previewError(csv: boolean, range: TextFileLineRange | undefined, status?: number, code?: string) {
+  if (status === 413) return 'The file exceeds the 2 KiB or decoded text limit.';
+  if (status === 403) return 'File preview is unavailable for this account.';
+  if (status === 404) return 'This conversation is no longer available. Open another conversation and attach the file again.';
+  if (status === 415) return 'Choose a supported UTF-8 TXT or CSV file.';
+  if (code === 'CSV_RANGE_INVALID' || code === 'TEXT_FILE_RANGE_INVALID' || (range && status === 422)) {
+    return csv ? 'Choose an inclusive range of up to 12 data rows.' : 'Choose a line range containing text.';
+  }
+  if (status === 422) return csv
+    ? 'CSV preview failed. Use valid UTF-8 comma-delimited rows with unique headers and up to 32 data rows.'
+    : 'Choose a valid UTF-8 text file.';
+  return 'The file preview could not be loaded. Select the file again to retry.';
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -39,6 +62,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   hasEarlierCsvFile,
   sessionId,
   onSendTextFile,
+  textFileSupported,
+  onSessionExpired,
   sendStatus,
   imageStatus,
   onClearSession,
@@ -48,16 +73,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
   const textUpload = useRef<AbortController | null>(null);
+  const confirmedText = useRef<FileDraft | null>(null);
 
   const [attachedImage, setAttachedImage] = useState<File | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
-  const [textFile, setTextFile] = useState<{
-    file: File;
-    state: 'loading' | 'ready' | 'failed';
-    preview?: TextFilePreview | CsvPreview;
-    range?: TextFileLineRange;
-  } | null>(null);
+  const [textFile, setTextFile] = useState<FileDraft | null>(null);
   const [firstLine, setFirstLine] = useState('');
   const [lastLine, setLastLine] = useState('');
   const csvFile = textFile?.file.name.toLowerCase().endsWith('.csv') ?? false;
@@ -73,16 +94,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     ? validRange && previewedRange?.start === Number(firstLine) && previewedRange.end === Number(lastLine)
     : !csvFile && !previewedRange;
   const questionTooLong = Boolean(textFile && new TextEncoder().encode(value.trim()).length > 1024);
-  const textFileBlocked = Boolean(textFile && (!onSendTextFile || textFile.state !== 'ready' || !rangeMatches || questionTooLong));
+  const textFileBlocked = Boolean(textFile &&
+    (!textFileSupported || !onSendTextFile || textFile.state !== 'ready' || !rangeMatches || questionTooLong));
 
   useEffect(() => () => {
     textUpload.current?.abort();
     textUpload.current = null;
+    confirmedText.current = null;
   }, []);
 
   const removeTextFile = useCallback(() => {
     textUpload.current?.abort();
     textUpload.current = null;
+    confirmedText.current = null;
     setTextFile(null);
     setFirstLine('');
     setLastLine('');
@@ -99,7 +123,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     if (!value.trim() || isStreaming || textUpload.current || textFileBlocked ||
         (attachedImage ? imageBlocked : sendBlocked)) return;
     if (textFile) {
-      if (!onSendTextFile) return;
+      if (!onSendTextFile || confirmedText.current !== textFile) return;
       if (textFile.range) onSendTextFile(value.trim(), textFile.file, textFile.range);
       else onSendTextFile(value.trim(), textFile.file);
       removeTextFile();
@@ -175,25 +199,32 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setImageError(null);
   };
 
-  const loadTextPreview = async (file: File, range?: TextFileLineRange, previous?: NonNullable<typeof textFile>) => {
+  const loadTextPreview = async (file: File, range?: TextFileLineRange, previous?: FileDraft) => {
     const upload = new AbortController();
     textUpload.current = upload;
+    confirmedText.current = null;
     setImageError(null);
     setTextFile({ ...previous, file, state: 'loading' });
     try {
       const readPreview = file.name.toLowerCase().endsWith('.csv') ? previewCsvFile : previewTextFile;
       const preview = await readPreview(file, sessionId, upload.signal, range);
-      if (textUpload.current === upload) setTextFile({ file, state: 'ready', preview, range });
+      if (textUpload.current === upload) {
+        const ready: FileDraft = { file, state: 'ready', preview, range };
+        confirmedText.current = ready;
+        setTextFile(ready);
+      }
     } catch (error) {
       if (textUpload.current !== upload) return;
-      setTextFile({ ...previous, file, state: 'failed' });
-      const status = typeof error === 'object' && error && 'status' in error ? error.status : undefined;
-      setImageError(file.name.toLowerCase().endsWith('.csv')
-        ? 'CSV preview failed. Use a UTF-8 comma-delimited file with unique headers, up to 2 KiB and 32 rows.'
-        : status === 413 ? 'The text file exceeds the preview limit.' :
-        status === 422 && range ? 'Choose a line range containing text, or reselect the file.' :
-          status === 422 ? 'The file must contain valid UTF-8 text without unsafe control characters.' :
-          'Text preview is unavailable. Remove the file or try selecting it again.');
+      const { status, code } = (error ?? {}) as { status?: number; code?: string };
+      if (status === 401) {
+        removeTextFile();
+        setImageError('Your session has expired. Sign in again to preview a file.');
+        onSessionExpired?.();
+      } else {
+        if (status === 404) removeTextFile();
+        else setTextFile({ ...previous, file, state: 'failed' });
+        setImageError(previewError(file.name.toLowerCase().endsWith('.csv'), range, status, code));
+      }
     } finally {
       if (textUpload.current === upload) textUpload.current = null;
     }
@@ -201,7 +232,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   const handleTextFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file || isStreaming) return;
+    if (!file || isStreaming || !textFileSupported) return;
     event.target.value = '';
     removeTextFile();
     handleRemoveImage();
@@ -209,7 +240,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     const media = ['', 'text/plain', 'application/octet-stream'];
     if (name.endsWith('.csv')) media.push('text/csv', 'application/vnd.ms-excel');
     if ((!name.endsWith('.txt') && !name.endsWith('.csv')) || !media.includes(file.type)) {
-      setImageError('Choose a UTF-8 .txt or .csv file.');
+      setImageError('Choose a UTF-8 TXT or CSV file. PDF, DOCX and XLSX chat attachments are unavailable.');
       return;
     }
     if (!file.size || file.size > 2048) {
@@ -228,10 +259,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         <p className="text-xs text-slate-600 mb-2">Reattach the image to ask another question about it.</p>
       )}
       {hasEarlierTextFile && !attachedImage && !textFile && !isStreaming && (
-        <p className="text-xs text-slate-600 mb-2">Attach the .txt file again to ask another question about it.</p>
+        <p className="text-xs text-slate-600 mb-2">Reattach the TXT file and include any lines or passage you want to use.</p>
       )}
       {hasEarlierCsvFile && !attachedImage && !textFile && !isStreaming && (
-        <p className="text-xs text-slate-600 mb-2">Attach the .csv file again to ask another question about it.</p>
+        <p className="text-xs text-slate-600 mb-2">Reattach the CSV and restate any filters or row selections in your question.</p>
       )}
       {imageError && (
         <div role="alert" className="mb-2.5 flex items-center justify-between p-2.5 bg-[#ffe4e6] text-[#be123c] font-bold text-xs border-2 border-[#f43f5e]">
@@ -269,7 +300,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-slate-800">{textFile.preview?.filename ?? textFile.file.name}</p>
+              <p className="break-all text-sm font-semibold text-slate-800">{textFile.preview?.filename ?? textFile.file.name}</p>
               <p className="text-xs text-slate-600">{textFile.preview?.size_bytes ?? textFile.file.size} bytes · {csvFile ? 'CSV' : 'Text file'}</p>
             </div>
             <button type="button" onClick={removeTextFile} className="text-sm font-medium text-rose-600">
@@ -315,7 +346,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               )}
               {textFile.state === 'ready' && (
                 <>
-                  {csvPreview ? <div className="mt-2 max-h-48 overflow-auto rounded border bg-white">
+                  {csvPreview ? <div tabIndex={0} role="region" aria-label="Scrollable CSV preview"
+                    className="mt-2 max-h-48 max-w-full overflow-auto rounded border bg-white">
                     <table aria-label="CSV preview" className="min-w-full border-collapse text-left text-xs">
                       <thead><tr><th scope="col" className="border-b px-2 py-1">Row</th>{csvPreview.headers.map((header, index) => (
                         <th key={header} scope="col" className="border-b px-2 py-1">
@@ -341,7 +373,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                       csvPreview ? `${csvPreview.rows.length} of ${csvPreview.row_count} data rows. ` : 'Whole file. '}
                     {textFile.preview.truncated ? 'Preview shortened. ' : 'Preview ready. '}
                     {csvPreview && 'Column types describe the displayed rows. '}
-                    {onSendTextFile ? 'Questions use this scope for this turn only.' :
+                    {onSendTextFile ? (rangeMatches ? 'This selection applies to the next question only.' : '') :
                       'Questions about this file require the authenticated local chat-only profile.'}
                   </p>
                 </>
@@ -382,14 +414,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         >
           <Paperclip className="w-5 h-5" />
         </button>
-        <button type="button" disabled={isStreaming} onClick={() => textInputRef.current?.click()}
-          aria-label="Attach text or CSV file" title="Preview a .txt or .csv file"
+        <button type="button" disabled={isStreaming || !textFileSupported} onClick={() => textInputRef.current?.click()}
+          aria-label="Attach text or CSV file" aria-describedby="chat-file-support"
           className="h-11 shrink-0 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-600 hover:bg-blue-50 disabled:opacity-50">
           TXT / CSV
         </button>
 
         {/* Text Area */}
-        <div className="flex-1 relative">
+        <div className="relative min-w-0 flex-1">
           <textarea
             ref={textareaRef}
             id="chat-input-textarea"
@@ -453,7 +485,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
         <span>Enter to send, Shift + Enter for new line</span>
-        <span className="text-blue-500 font-medium">Memory Active</span>
+        <span id="chat-file-support" className="text-slate-600">
+          {textFileSupported ? 'One UTF-8 TXT or CSV per request, up to 2 KiB.' :
+            'TXT and CSV require authenticated local chat mode.'}
+        </span>
       </div>
     </div>
   );

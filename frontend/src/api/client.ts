@@ -1,14 +1,16 @@
-import type { StreamChunkPayload, ToolEvent } from '../types';
+import type { StreamChunkPayload, StreamErrorInfo, ToolEvent } from '../types';
 
 export class ApiError extends Error {
   status: number;
   data: any;
+  code?: string;
 
-  constructor(message: string, status: number, data?: any) {
+  constructor(message: string, status: number, data?: any, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    this.code = code;
   }
 }
 
@@ -47,7 +49,7 @@ export async function apiRequest<T>(
     } catch {
       // Non-JSON error
     }
-    throw new ApiError(errorDetail, response.status, errorData);
+    throw new ApiError(errorDetail, response.status, errorData, response.headers?.get('X-Error-Code') ?? undefined);
   }
 
   return response.json();
@@ -71,7 +73,7 @@ export async function streamSSE(
     onDelta: (delta: string) => void;
     onSources: (sources: any[]) => void;
     onDone: (sessionId: string, modelUsed: string) => void;
-    onError: (error: string) => void;
+    onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     // Phase 5: vision status events
     onAgentStatus?: (status: string) => void;
@@ -97,7 +99,9 @@ export async function streamSSE(
   });
 
   if (!response.ok) {
-    callbacks.onError(await streamErrorMessage(response));
+    callbacks.onError(await streamErrorMessage(response), {
+      status: response.status, code: response.headers?.get('X-Error-Code') ?? undefined,
+    });
     return;
   }
 
@@ -144,7 +148,7 @@ export async function streamSSE(
           } else if (chunk.type === 'error') {
             if (terminal) continue;
             terminal = true;
-            callbacks.onError(chunk.content || 'An error occurred during generation');
+            callbacks.onError(chunk.content || 'An error occurred during generation', { code: chunk.error_code });
           } else if (chunk.type === 'tool_start' || chunk.type === 'tool_result') {
             // Phase 4: Tool events
             if (callbacks.onToolEvent) {
@@ -225,7 +229,7 @@ export async function streamSSEFromFormData(
     onDelta: (delta: string) => void;
     onSources: (sources: any[]) => void;
     onDone: (sessionId: string, modelUsed: string) => void;
-    onError: (error: string) => void;
+    onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
     onPlanCreated?: (planData: any) => void;
@@ -248,7 +252,9 @@ export async function streamSSEFromFormData(
   });
 
   if (!response.ok) {
-    callbacks.onError(await streamErrorMessage(response));
+    callbacks.onError(await streamErrorMessage(response), {
+      status: response.status, code: response.headers?.get('X-Error-Code') ?? undefined,
+    });
     return;
   }
 
@@ -288,7 +294,7 @@ export async function streamSSEFromFormData(
           } else if (chunk.type === 'error') {
             if (terminal) continue;
             terminal = true;
-            callbacks.onError(chunk.content || 'An error occurred during generation');
+            callbacks.onError(chunk.content || 'An error occurred during generation', { code: chunk.error_code });
           } else if (chunk.type === 'tool_start' || chunk.type === 'tool_result') {
             if (callbacks.onToolEvent) {
               callbacks.onToolEvent({
@@ -323,12 +329,12 @@ export async function streamSSEFromFormData(
         break;
       }
     }
-    if (!terminal && !signal?.aborted) callbacks.onError('Response interrupted before completion');
+    if (!terminal && !signal?.aborted) callbacks.onError('Response interrupted before completion', { code: 'STREAM_CONNECTION_LOST' });
   } catch (err: any) {
     if (err.name === 'AbortError') {
       console.log('Multimodal stream aborted');
     } else {
-      callbacks.onError(err.message || 'Stream connection lost');
+      callbacks.onError(err.message || 'Stream connection lost', { code: 'STREAM_CONNECTION_LOST' });
     }
   } finally {
     reader.releaseLock();
