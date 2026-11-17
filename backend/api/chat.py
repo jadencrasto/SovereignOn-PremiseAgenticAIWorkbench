@@ -53,7 +53,7 @@ from backend.schemas.chat import (
 from backend.auth.dependencies import get_current_user, require_permission
 from backend.auth.models import Permission, User, resolve_user_clearance
 from backend.agent.engine import InvalidModelToolRequest
-from backend.agent.numeric_receipts import requires_prior_numeric_receipt, resolve_numeric_followup
+from backend.agent.numeric_receipts import numeric_request_steps, requires_prior_numeric_receipt, resolve_numeric_followup
 from backend.multimodal.context import (
     IMAGE_REATTACH_MESSAGE, TEXT_REATTACH_MESSAGE, requires_reattachment, requires_text_reattachment,
 )
@@ -335,7 +335,8 @@ async def chat(
 
         # 1. Arithmetic auto-detection
         expression = _arithmetic_expression(body.message) if body.tools_enabled else None
-        if expression is not None and has_tm and body.planning_enabled is not False:
+        if (has_tm and body.tools_enabled and body.planning_enabled is not False
+                and (expression is not None or numeric_request_steps(body.message) is not None)):
             return guarded_response(
                 _stream_sse_with_planning(
                     engine, session_id, body.message, model_used, model_used,

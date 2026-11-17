@@ -990,15 +990,17 @@ class AgentEngine:
         """
         from backend.agent.task import TaskManager, TaskStatus, TaskStateError
         from backend.agent.planner import AgentPlan, PlanStep, AgentPlanner, PlanStatus, StepStatus
-        from backend.agent.numeric_receipts import NumericReceipt, resolve_numeric_followup
+        from backend.agent.numeric_receipts import NumericReceipt, numeric_request_steps, resolve_numeric_followup, terminal_scale_reference
         from backend.agent.plan_validator import PlanValidator
         from backend.agent.approval import ApprovalManager, compute_arguments_hash
 
         t0 = time.monotonic()
+        numeric_steps = (numeric_request_steps(user_message)
+                         if numeric_expression is None and prior_numeric_receipt is None else None)
 
         # Verify Phase 6 components are wired
         if not hasattr(self, '_task_manager') or self._task_manager is None:
-            if numeric_expression is not None or prior_numeric_receipt is not None:
+            if numeric_expression is not None or prior_numeric_receipt is not None or numeric_steps is not None:
                 yield {"type": "error"}
                 return
             logger.warning("Phase 6 not initialised — falling back to tool loop")
@@ -1036,6 +1038,8 @@ class AgentEngine:
                 plan = AgentPlan(task_id=task.task_id, objective=user_message, steps=[
                     PlanStep(description="Compute verified numeric result", tool_name=tool, arguments=arguments)
                 ])
+            elif numeric_steps is not None:
+                plan = AgentPlan(task_id=task.task_id, objective=user_message, steps=numeric_steps)
             else:
                 provider, model_name = self._router.get_provider_for_model(model_id)
                 plan = await self._planner.create_plan(
@@ -1064,8 +1068,8 @@ class AgentEngine:
                 self._task_manager.update_status(
                     task.task_id, TaskStatus.FAILED, error=error_msg
                 )
+                yield "The plan could not be validated. Check that the requested tools and inputs are available."
                 yield {"type": "task_failed", "task_id": task.task_id, "error": "Plan validation failed"}
-                yield "I couldn't create a valid execution plan. Please revise your request."
                 yield []  # sources sentinel
                 return
 
@@ -1126,13 +1130,14 @@ class AgentEngine:
                 )
             except TaskStateError:
                 pass
-            yield {"type": "task_failed", "task_id": task.task_id, "error": "Planning unavailable"}
             yield "Planning is temporarily unavailable."
+            yield {"type": "task_failed", "task_id": task.task_id, "error": "Planning unavailable"}
             yield []  # sources sentinel
             return
 
         # ---- 4. Execute steps ----
-        if numeric_expression is not None or prior_numeric_receipt is not None or self._is_standalone_non_rag_task(user_message):
+        if (numeric_steps is not None or numeric_expression is not None or prior_numeric_receipt is not None
+                or self._is_standalone_non_rag_task(user_message)):
             sources = []
         else:
             sources = await self._retrieve_context(user_message, user_clearance=user_role or "viewer")
@@ -1141,6 +1146,7 @@ class AgentEngine:
         executed_step_results: List[Dict[str, Any]] = []
 
         for step_idx, step in enumerate(plan.steps):
+            result_unit = None
             # Reload task from persistence to get fresh state
             task = self._task_manager.get_task(task.task_id)
             if task is None or task.status == TaskStatus.CANCELLED:
@@ -1156,6 +1162,7 @@ class AgentEngine:
                     if not target or not target.enabled or not target.read_only or target.requires_approval:
                         raise ValueError('Dependency unavailable')
                     resolved = dict(step.arguments)
+                    bound_unit = None
                     states = {item.id: item.status for item in task.plan.steps} if task.plan else {}
                     for argument, binding in step.bindings.items():
                         prior = next((item for item in executed_step_results if item.get('step_id') == binding.step_id), None)
@@ -1166,12 +1173,19 @@ class AgentEngine:
                         if not isinstance(output, dict) or binding.field not in output:
                             raise ValueError('Dependency unavailable')
                         value = output[binding.field]
+                        if (step.tool_name == 'unit_conversion' and argument == 'value'
+                                and prior.get('tool') == 'unit_conversion' and binding.field == 'result'):
+                            bound_unit = output.get('to_unit')
+                            if not bound_unit:
+                                raise ValueError('Dependency unit unavailable')
                         if (type(value) not in (str, int, float, bool) or (isinstance(value, str) and len(value) > 4096)
                                 or (type(value) is int and value.bit_length() > 850)):
                             raise ValueError('Dependency unavailable')
                         if isinstance(value, float) and not math.isfinite(value):
                             raise ValueError('Dependency unavailable')
                         resolved[argument] = value
+                    if bound_unit is not None and resolved.get('from_unit') != bound_unit:
+                        raise ValueError('Dependency unit mismatch')
                     target.input_schema.model_validate(resolved)
                     step.arguments = resolved
                 except Exception:
@@ -1179,8 +1193,8 @@ class AgentEngine:
                     self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error='Dependency unavailable')
                     self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error='Dependency unavailable')
                     yield {'type': 'plan_step', 'task_id': task.task_id, 'step_id': step.id, 'status': 'failed'}
+                    yield self._planned_step_failure(step_idx, executed_step_results, 'A required verified result was unavailable or invalid.')
                     yield {'type': 'task_failed', 'task_id': task.task_id, 'error': 'Dependency unavailable'}
-                    yield 'A required verified result was unavailable or invalid.'
                     yield sources
                     return
 
@@ -1680,19 +1694,28 @@ class AgentEngine:
                     yield sources
                     return
 
-            # Calculator dependencies are resolved only from successfully verified
-            # earlier calculator outputs in this execution, never from model text.
+            # Resolve numeric references only from verified outputs of this run.
             if step.tool_name == 'calculator' and isinstance(step.arguments.get('expression'), str):
                 expression = step.arguments['expression']
+                scale_from = terminal_scale_reference(expression) if step_idx == len(plan.steps) - 1 else None
+
                 def resolve_calculator_reference(match):
+                    nonlocal result_unit
                     prior = next((item for item in executed_step_results
                                   if item.get('step_id') == match.group(1)
-                                  and item.get('tool') == 'calculator' and item.get('success') is True
+                                  and item.get('success') is True
                                   and item.get('evidence_verified') is True), None)
                     if not prior or not isinstance(prior.get('result'), dict):
                         raise ValueError('Calculator dependency unavailable')
+                    if prior['tool'] == 'unit_conversion' and match.group(1) == scale_from:
+                        result_unit = prior['result'].get('to_unit')
+                        if result_unit not in {'mm', 'cm', 'm', 'km', 'g', 'kg', 's', 'min', 'h'}:
+                            raise ValueError('Calculator dependency unavailable')
+                    elif prior['tool'] != 'calculator':
+                        raise ValueError('Calculator dependency unavailable')
                     value = prior['result'].get('result')
-                    if type(value) not in (int, float):
+                    if (type(value) not in (int, float) or (type(value) is int and value.bit_length() > 850)
+                            or (type(value) is float and not math.isfinite(value))):
                         raise ValueError('Calculator dependency unavailable')
                     return '(' + str(value) + ')'
                 try:
@@ -1705,8 +1728,8 @@ class AgentEngine:
                     self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error='Calculator dependency unavailable')
                     self._task_manager.update_status(task.task_id, TaskStatus.FAILED, error='Calculator dependency unavailable')
                     yield {'type': 'plan_step', 'task_id': task.task_id, 'step_id': step.id, 'status': 'failed'}
+                    yield self._planned_step_failure(step_idx, executed_step_results, 'A required verified result was unavailable or invalid.')
                     yield {'type': 'task_failed', 'task_id': task.task_id, 'error': 'Calculator dependency unavailable'}
-                    yield 'Calculation stopped because a required result was unavailable.'
                     yield sources
                     return
 
@@ -1792,6 +1815,9 @@ class AgentEngine:
                 from backend.tools.registry import ToolResult
                 result = ToolResult(tool=step.tool_name, success=False, error='Tool registration changed during execution; outcome cannot be verified.')
             result, evidence_verified = self._verify_registered_tool_result(step.tool_name, step.arguments, result)
+            if result.success and (numeric_steps is not None or result_unit is not None) and not evidence_verified:
+                from backend.tools.registry import ToolResult
+                result = ToolResult(tool=step.tool_name, success=False, error='Tool result verification failed')
             invocation_id = str(uuid.uuid4())
             if len(history_tool_events) < 32:
                 history_tool_events.append({'tool': step.tool_name, 'success': bool(result.success),
@@ -1802,6 +1828,8 @@ class AgentEngine:
                 yield sources
                 return
             result_summary = self._format_tool_result_summary(result)
+            if result.success and result_unit and result_summary.startswith('Result: '):
+                result_summary += f' {result_unit}'
             yield {
                 "type": "tool_result",
                 "tool": step.tool_name,
@@ -1881,17 +1909,14 @@ class AgentEngine:
                     "step_id": step.id,
                     "status": "failed",
                 }
-                yield {
-                    "type": "task_failed",
-                    "task_id": task.task_id,
-                    "error": fail_reason,
-                }
                 public_reason = result.error if result.error in {
                     'Document retrieval is unavailable.', 'Workspace document content unavailable.',
                     'Calculator result verification failed', 'Tool result verification failed',
                     'Verified artifact generation is unavailable.', 'Verified artifact execution is unavailable.',
-                } else 'A required tool operation did not complete.'
-                yield f"\n\n**Task failed:** {public_reason}"
+                    'Tool execution timed out.', 'Authorization is no longer available for this operation.',
+                } else 'A required tool operation did not complete. Check the inputs and tool availability.'
+                yield self._planned_step_failure(step_idx, executed_step_results, public_reason)
+                yield {"type": "task_failed", "task_id": task.task_id, "error": fail_reason}
                 yield sources
                 return
 
@@ -1990,12 +2015,20 @@ class AgentEngine:
                 raise
             assistant_turn = None
             if full_final:
-                assistant_turn = self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
+                if (synthesized_completion == full_final and not sources
+                        and (numeric_steps is not None or numeric_expression is not None or prior_numeric_receipt is not None)
+                        and executed_step_results
+                        and all(self._verified_numeric_result(item) is not None for item in executed_step_results)):
+                    assistant_turn = self._memory.record_plain_response(
+                        session_id, origin_identity, full_final, producer='verified-numeric-plan', calculation=True,
+                    )
+                else:
+                    assistant_turn = self._memory.add_assistant_message(session_id, full_final, tool_events=history_tool_events)
             if synthesized_completion:
                 yield synthesized_completion
             if (assistant_turn and assistant_turn.id and user_turn.id and user_id
                     and origin_identity[0] == user_id and origin_identity[1]
-                    and (numeric_expression is not None or prior_numeric_receipt is not None)
+                    and (numeric_expression is not None or prior_numeric_receipt is not None or numeric_steps is not None)
                     and not sources and len(plan.steps) == len(executed_step_results) == 1):
                 evidence = executed_step_results[0]
                 from backend.tools.calculator import verify_calculator_output
@@ -5065,6 +5098,26 @@ class AgentEngine:
                 tags.append(t)
         return list(set(tags))
 
+    @staticmethod
+    def _verified_numeric_result(item):
+        from backend.security.artifact_presentation import public_tool_summary
+
+        tool = item.get('tool')
+        if (tool not in {'calculator', 'unit_conversion'} or item.get('success') is not True
+                or item.get('evidence_verified') is not True):
+            return None
+        summary = public_tool_summary(tool, item.get('summary'), True)
+        return summary.removeprefix('Result: ') if summary.startswith('Result: ') else None
+
+    @classmethod
+    def _planned_step_failure(cls, step_index, previous, reason):
+        message = f'Step {step_index + 1} did not complete. {reason}'
+        for item in reversed(previous):
+            value = cls._verified_numeric_result(item)
+            if value is not None:
+                return f'{message} Last verified result: **{value}**.'
+        return message
+
     @classmethod
     def _synthesize_task_completion_response(
         cls,
@@ -5075,6 +5128,21 @@ class AgentEngine:
         Synthesize a clean, deterministic completion response when an agent task finishes.
         Summarizes the generated artifacts, verification status, and completed steps.
         """
+        numeric_values = [cls._verified_numeric_result(item) for item in executed_step_results]
+        if numeric_values and all(numeric_values):
+            answer = f'**Result: {numeric_values[-1]}**'
+            if len(numeric_values) > 1:
+                from backend.security.artifact_presentation import public_tool_arguments
+
+                steps = []
+                for number, (item, value) in enumerate(zip(executed_step_results, numeric_values), 1):
+                    expression = public_tool_arguments(item['tool'], item['arguments']).get('expression')
+                    action = f'Calculate `{expression}`' if expression else (
+                        'Convert the value' if item['tool'] == 'unit_conversion' else 'Calculate the value')
+                    steps.append(f'{number}. {action}: {value}')
+                answer += '\n\n' + '\n'.join(steps)
+            return answer
+
         artifact_info = []
         verified_info = []
         other_steps = []

@@ -26,6 +26,7 @@ from typing import List, Optional
 from pydantic import ValidationError
 
 from backend.agent.planner import AgentPlan, PlanStep, StepStatus, PlanStatus
+from backend.agent.numeric_receipts import terminal_scale_reference
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,6 @@ class PlanValidator:
 
         # --- Per-step validation ---
         tool_call_signatures = []
-        previous_calculations = set()
         previous_steps = {}
         for step in plan.steps:
             step_errors = self._validate_step(step)
@@ -121,14 +121,21 @@ class PlanValidator:
                         or not callable(getattr(source_tool, 'result_verifier', None))
                         or binding.field not in output.model_fields):
                     errors.append(PlanValidationError(step.id, 'Invalid or unavailable step binding'))
-            previous_steps[step.id] = step
             if step.tool_name == 'calculator':
                 expression = step.arguments.get('expression')
                 if isinstance(expression, str):
                     references = re.findall(r'@([A-Za-z0-9_]+)\.result', expression)
-                    if any(ref not in previous_calculations for ref in references) or '@' in re.sub(r'@[A-Za-z0-9_]+\.result', '', expression):
+                    for ref in references:
+                        source = previous_steps.get(ref)
+                        if source and source.tool_name == 'calculator':
+                            continue
+                        if (source and source.tool_name == 'unit_conversion' and step is plan.steps[-1]
+                                and terminal_scale_reference(expression) == ref):
+                            continue
                         errors.append(PlanValidationError(step.id, 'Invalid calculator dependency'))
-                previous_calculations.add(step.id)
+                    if '@' in re.sub(r'@[A-Za-z0-9_]+\.result', '', expression):
+                        errors.append(PlanValidationError(step.id, 'Invalid calculator dependency'))
+            previous_steps[step.id] = step
             errors.extend(step_errors)
 
             # Check for recursive patterns (same tool + same args repeated)

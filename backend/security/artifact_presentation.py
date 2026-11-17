@@ -85,7 +85,7 @@ def public_tool_summary(tool, summary, success):
             and len(summary) <= 100 and re.fullmatch(r'Result: [0-9+.,eE\-]+ (?:mm|cm|m|km|g|kg|s|min|h)', summary)):
         return summary
     if (tool == 'calculator' and success and isinstance(summary, str)
-            and len(summary) <= 100 and re.fullmatch(r'Result: [0-9+.,eE\-]+', summary)):
+            and len(summary) <= 100 and re.fullmatch(r'Result: [0-9+.,eE\-]+(?: (?:mm|cm|m|km|g|kg|s|min|h))?', summary)):
         return summary
     return 'Tool completed' if success else 'Tool failed'
 

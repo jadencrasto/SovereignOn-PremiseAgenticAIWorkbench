@@ -192,7 +192,8 @@ def is_general_knowledge_query(query: str) -> bool:
     # 4. Check for general knowledge phrasing
     if re.fullmatch(r"(?:hello|hi|hey|howdy)(?:[,\s]+(?:what can you (?:help me with|do)|how are you))?[.!?]*", q):
         return True
-    if re.fullmatch(r"(?:summari[sz]e|recap)\s+(?:what we discussed|(?:our|this) (?:conversation|discussion))[.!?]*", q):
+    if re.fullmatch(r"(?:summari[sz]e|recap)\s+(?:what we discussed|(?:our|this) (?:conversation|discussion)"
+                    r"|the results of the (?:operations|calculations) we performed)[.!?]*", q):
         return True
     general_question_starters = [
         r"^what\s+(is|are|was|were)\b",
@@ -478,8 +479,8 @@ RULES:
    - file_list: Lists files available in the local workspace (data/uploads/ directory). Use this when the user asks what files are available, or when working with an uploaded or local workspace file.
    - file_read: Reads an existing document or file from the workspace (supports .pdf, .docx, .txt, .md, .csv). Use file_read whenever the user refers to an uploaded file or workspace document. When following file_list, the exact filename returned by file_list must be used. NEVER invent, fabricate, guess, or normalize placeholder filenames (such as 'document_0.txt', 'Pump_Instability_Document.txt', 'pump_maintenance.pdf', etc.). If the exact filename is not yet known prior to file_list execution, leave relative_path empty so it is dynamically resolved from the file_list result.
    - unit_conversion: Converts values between compatible length, mass or time units. Use a binding when the numeric value comes from a prior verified step.
-   - calculator: Performs arithmetic or tolerance calculations on numbers (e.g. "4 + 3 * 2"). To use an earlier calculator step result in a later calculator expression, use @step_1.result (or the earlier step number), e.g. "@step_1.result * 3". Never invent a previous result.
-   - code_execution: Executes Python code inside the local sandbox (e.g. for computation, data analysis, or script execution). Captures stdout/stderr. For standalone code or calculation tasks, write the Python program in the 'code' argument. ALWAYS follow code_execution with a reasoning step (tool_name = null) to inspect sandbox stdout and present the exact computed results. NEVER call document_search, file_list, or file_read for standalone code/calculation tasks.
+   - calculator: Use for arithmetic. Reference a previous calculator result as @step_1.result in an expression. For a verified unit conversion, a final calculator step may scale the quantity with "@step_1.result * 3" (use the actual prior step ID). Never invent a previous value.
+   - code_execution: Use only when enabled and the user explicitly requests code execution. Follow it with a reasoning step to inspect the actual output. Use calculator or unit_conversion for ordinary numeric requests.
    - docx_create: Generates a genuine Microsoft Word (.docx) document in the sandbox with title, paragraphs, and tables. Always set requires_approval to true.
    - xlsx_report: Generates a styled Excel compliance or diligence report (.xlsx) with title, headers, data rows, and compliance status columns. Headers and rows will be dynamically populated from prior step observations at runtime. If the user specifies particular column headers or relationship tables (e.g. 'Problem', 'Recommended Improvement', or 'Equipment ID', 'Maintenance Findings', 'Operating Observations', 'Recommended Actions'), preserve those exact semantic columns. Do NOT use generic column names like 'Topic', 'Description', 'Page Number', or 'Content'. Always set requires_approval to true.
    - file_write: Creates a text output file or incident log in the sandbox. Always set requires_approval to true.
@@ -492,9 +493,10 @@ RULES:
 
 5. Artifact generation vs Informational / Summary / Code Execution requests:
    - CRITICAL RULE: NEVER include artifact creation steps (docx_create, xlsx_report, file_write) or artifact_verifier UNLESS the user explicitly asks to create, generate, export, or save a document, file, spreadsheet, or report.
-   - For standalone Python code or calculation tasks (e.g. 'write and run a Python program that...'):
+   - For explicit standalone Python execution requests (e.g. 'write and run a Python program that...') when code_execution is available:
      Step 1: code_execution (with the complete Python code in the 'code' argument), Step 2: reasoning step (tool_name = null) to verify the sandbox execution output and report the computed numbers.
      NEVER include file_list, file_read, document_search, or artifact creation steps for standalone code tasks.
+   - For ordinary numeric workflows, use calculator and unit_conversion as appropriate. End with the verified result-producing step so the application can report exact values and units directly.
    - For security or system diagnostics (e.g. 'run a security diagnostics check', 'check hardware status', 'scan models'):
      Use ONLY security_diagnostics, model_scan, or hardware_status followed by a reasoning step (tool_name = null) to report the actual diagnostic values. NEVER call document_search, file_list, or file_read.
    - For informational questions, summaries, status checks, or analysis (e.g. "summarize compressor K-101 inspection", "what are the findings"):

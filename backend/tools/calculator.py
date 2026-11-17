@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Maximum allowed exponent to prevent computational abuse
 _MAX_EXPONENT = 1000
+_MAX_POWER_BITS = 4096
 # Maximum expression length
 _MAX_EXPR_LEN = 500
 
@@ -95,6 +96,8 @@ def _safe_eval_node(node: ast.AST) -> Union[int, float]:
                 raise ValueError(
                     f"Exponent too large: {right}. Maximum allowed: {_MAX_EXPONENT}"
                 )
+            if type(left) is int and type(right) is int and right > 0 and left.bit_length() * right > _MAX_POWER_BITS:
+                raise ValueError("Integer power exceeds the supported size.")
 
         # Division by zero check
         if op_type in (ast.Div, ast.FloorDiv, ast.Mod) and right == 0:

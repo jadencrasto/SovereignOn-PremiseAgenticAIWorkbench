@@ -14,10 +14,12 @@ Design:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from typing import Any, Callable, Awaitable, Dict, List, Optional, Type
 
 from pydantic import BaseModel, ValidationError
@@ -466,14 +468,22 @@ class ToolRegistry:
             if has_var_kwargs or "session_id" in sig.parameters:
                 call_kwargs["session_id"] = session_id
 
-            if inspect.iscoroutinefunction(tool.execute_fn):
-                result = await tool.execute_fn(validated, **call_kwargs)
-            else:
-                res = tool.execute_fn(validated, **call_kwargs)
-                if inspect.iscoroutine(res):
-                    result = await res
+            budget = nullcontext()
+            if name in ('calculator', 'unit_conversion') and tool.read_only and not tool.requires_approval:
+                from backend.config import settings
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    # A synchronously driven coroutine cannot suspend on scheduled I/O.
+                    pass
                 else:
-                    result = res
+                    budget = asyncio.timeout(settings.tool_timeout_seconds)
+            async with budget:
+                if inspect.iscoroutinefunction(tool.execute_fn):
+                    result = await tool.execute_fn(validated, **call_kwargs)
+                else:
+                    res = tool.execute_fn(validated, **call_kwargs)
+                    result = await res if inspect.iscoroutine(res) else res
             duration = (time.monotonic() - t0) * 1000
 
             # Step 16: Record artifact ownership if artifact-producing tool succeeded
@@ -524,7 +534,7 @@ class ToolRegistry:
 
         except Exception as exc:
             duration = (time.monotonic() - t0) * 1000
-            error_msg = str(exc)
+            error_msg = 'Tool execution timed out.' if isinstance(exc, TimeoutError) else str(exc)
             if name in ('file_write', 'docx_create', 'xlsx_report') and error_msg != 'Artifact registration failed':
                 error_msg = 'Artifact operation failed'
 
