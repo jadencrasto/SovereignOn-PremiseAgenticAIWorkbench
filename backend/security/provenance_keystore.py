@@ -41,6 +41,7 @@ class KeyStoreCode(StrEnum):
     UNSEAL_FAILED = "provenance_unseal_failed"
     KEY_INVALID = "provenance_key_invalid"
     ROTATION_INVALID = "provenance_rotation_invalid"
+    ROTATION_CONFLICT = "provenance_rotation_conflict"
     SEAL_FAILED = "provenance_seal_failed"
     STAGE_FAILED = "provenance_stage_failed"
     PUBLICATION_UNCERTAIN = "provenance_publication_uncertain"
@@ -204,6 +205,12 @@ def _local_path(path: PureWindowsPath) -> bool:
                     for part in path.parts[1:]))
 
 
+def valid_service_sid(sid: str) -> bool:
+    return (_matches(sid, _SERVICE_SID) and all(
+        str(int(part)) == part and int(part) <= 0xFFFFFFFF for part in sid.split("-")[4:]
+    ))
+
+
 @dataclass(frozen=True)
 class KeyStorePolicy:
     expected_sid: str
@@ -215,23 +222,30 @@ class KeyStorePolicy:
 
     def require(self, evidence: EffectiveKeyStoreEvidence) -> None:
         if (type(evidence) is not EffectiveKeyStoreEvidence or evidence.service_identity != SERVICE_IDENTITY
-                or not _matches(self.expected_sid, _SERVICE_SID)
-                or any(str(int(part)) != part or int(part) > 0xFFFFFFFF
-                       for part in self.expected_sid.split("-")[4:])
+                or not valid_service_sid(self.expected_sid)
                 or evidence.token_sid != self.expected_sid):
             raise KeyStoreError(KeyStoreCode.IDENTITY)
         if evidence.profile_loaded_non_roaming is not True:
             raise KeyStoreError(KeyStoreCode.PROFILE)
-        disallowed = (self.repository, self.conversation_storage, self.sandbox_storage, *self.cloud_sync_roots)
-        if (not _local_path(self.root) or len(self.root.parts) == 1
-                or not _local_path(evidence.root) or evidence.root != self.root
+        self.require_location()
+        if (not _local_path(evidence.root) or evidence.root != self.root
                 or evidence.effective_ntfs_acl_verified is not True
                 or evidence.no_broad_inherited_write is not True
-                or evidence.no_unsafe_aliases_or_reparse_points is not True
+                or evidence.no_unsafe_aliases_or_reparse_points is not True):
+            raise KeyStoreError(KeyStoreCode.STORAGE)
+
+    def require_location(self) -> None:
+        disallowed = (self.repository, self.conversation_storage, self.sandbox_storage, *self.cloud_sync_roots)
+        if (not _local_path(self.root) or len(self.root.parts) == 1
                 or any(not _local_path(path) or self.root.is_relative_to(path)
                        or path.is_relative_to(self.root) for path in disallowed)
                 or any(part.casefold().startswith("onedrive") for part in self.root.parts[1:])):
             raise KeyStoreError(KeyStoreCode.STORAGE)
+
+    def record_path(self, key_id: str) -> PureWindowsPath:
+        if not _matches(key_id, _KEY_ID):
+            raise KeyStoreError(KeyStoreCode.RECORD_INVALID)
+        return self.root / "keys" / f"{key_id}.sealed"
 
 
 class ProtectedKeyFiles(Protocol):
@@ -304,11 +318,19 @@ class ProtectedProvenanceKeyStore:
             raise KeyStoreError(KeyStoreCode.BLOCKED)
         try:
             evidence = self._files.attest()
+        except KeyStoreError as exc:
+            if exc.code in (KeyStoreCode.IDENTITY, KeyStoreCode.PROFILE, KeyStoreCode.STORAGE):
+                raise KeyStoreError(exc.code) from None
+            raise KeyStoreError(KeyStoreCode.STORAGE) from None
         except Exception:
             raise KeyStoreError(KeyStoreCode.STORAGE) from None
         self._policy.require(evidence)
         try:
             snapshot = self._anchor.read()
+        except KeyStoreError as exc:
+            if exc.code in (KeyStoreCode.ANCHOR_INVALID, KeyStoreCode.ANCHOR_EPOCH):
+                raise KeyStoreError(exc.code) from None
+            raise KeyStoreError(KeyStoreCode.ANCHOR_UNAVAILABLE) from None
         except Exception:
             raise KeyStoreError(KeyStoreCode.ANCHOR_UNAVAILABLE) from None
         if snapshot is None:
@@ -317,14 +339,14 @@ class ProtectedProvenanceKeyStore:
             raise KeyStoreError(KeyStoreCode.ANCHOR_INVALID)
         return snapshot, snapshot.validate()
 
-    def _path(self, key_id: str) -> PureWindowsPath:
-        if not _matches(key_id, _KEY_ID):
-            raise KeyStoreError(KeyStoreCode.RECORD_INVALID)
-        return self._policy.root / "keys" / f"{key_id}.sealed"
-
     def _load_key(self, reference: KeyReference) -> bytes:
         try:
-            raw = self._files.read(self._path(reference.key_id), MAX_RECORD_BYTES)
+            raw = self._files.read(self._policy.record_path(reference.key_id), MAX_RECORD_BYTES)
+        except KeyStoreError as exc:
+            if exc.code in (KeyStoreCode.RECORD_INVALID, KeyStoreCode.IDENTITY, KeyStoreCode.PROFILE,
+                            KeyStoreCode.STORAGE):
+                raise KeyStoreError(exc.code) from None
+            raise KeyStoreError(KeyStoreCode.RECORD_UNAVAILABLE) from None
         except Exception:
             raise KeyStoreError(KeyStoreCode.RECORD_UNAVAILABLE) from None
         if type(raw) is not bytes or not 0 < len(raw) <= MAX_RECORD_BYTES:
@@ -336,6 +358,10 @@ class ProtectedProvenanceKeyStore:
             raise KeyStoreError(KeyStoreCode.RECORD_INVALID)
         try:
             key = self._protector.unseal(ciphertext)
+        except KeyStoreError as exc:
+            if exc.code in (KeyStoreCode.IDENTITY, KeyStoreCode.PROFILE):
+                raise KeyStoreError(exc.code) from None
+            raise KeyStoreError(KeyStoreCode.UNSEAL_FAILED) from None
         except Exception:
             raise KeyStoreError(KeyStoreCode.UNSEAL_FAILED) from None
         if type(key) is not bytes or len(key) != KEY_BYTES:
@@ -380,7 +406,7 @@ class ProtectedProvenanceKeyStore:
         epoch = anchor.active_epoch + 1
         raw = SealedKey(1, key_id, epoch, created_at, "HMAC-SHA256",
                         base64.b64encode(ciphertext).decode("ascii")).serialize()
-        path = self._path(key_id)
+        path = self._policy.record_path(key_id)
         try:
             self._publisher.stage(path, raw)
             staged = self._files.read(path, MAX_RECORD_BYTES)
@@ -394,6 +420,10 @@ class ProtectedProvenanceKeyStore:
         )
         try:
             self._publisher.publish(previous, candidate)
+        except KeyStoreError as exc:
+            if exc.code in (KeyStoreCode.ANCHOR_EPOCH, KeyStoreCode.ROTATION_CONFLICT):
+                raise KeyStoreError(exc.code) from None
+            raise KeyStoreError(KeyStoreCode.PUBLICATION_UNCERTAIN) from None
         except Exception:
             raise KeyStoreError(KeyStoreCode.PUBLICATION_UNCERTAIN) from None
         try:
