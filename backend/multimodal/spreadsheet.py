@@ -60,26 +60,38 @@ def parse_spreadsheet(filename: str, data: bytes) -> Spreadsheet:
         raise ValueError('Unsupported spreadsheet format')
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = archive.namelist(); entries = archive.infolist()
+            names = archive.namelist()
+            entries = archive.infolist()
+            normalized = {name.casefold() for name in names}
             if (len(entries) > 10000 or sum(x.file_size for x in entries) > MAX_EXPANDED_BYTES
                 or '[Content_Types].xml' not in names or 'xl/workbook.xml' not in names
-                or any(n.lower().endswith('vbaproject.bin') or n.startswith('xl/externalLinks/') for n in names)):
+                or len(normalized) != len(names)
+                or any(name.endswith('vbaproject.bin')
+                       or name.startswith(('xl/externallinks/', 'xl/macrosheets/', 'xl/intlmacrosheets/'))
+                       for name in normalized)):
                 raise ValueError('Unsupported or oversized workbook')
         from openpyxl import load_workbook
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
         try:
             if not 1 <= len(workbook.worksheets) <= MAX_SHEETS:
                 raise ValueError('Workbook sheet limit exceeded')
-            sheets=[]; count=0
+            sheets = []
+            count = 0
             for ws in workbook.worksheets:
-                if ws.max_row * ws.max_column + count > MAX_CELLS:
+                if ws.max_row is not None and ws.max_column is not None and ws.max_row * ws.max_column + count > MAX_CELLS:
                     raise ValueError('Spreadsheet cell limit exceeded')
-                rows=[]
+                # Worksheet dimensions can be absent or understate the actual data.
+                # Read observed cells and enforce the budget before rectangular padding.
+                ws.reset_dimensions()
+                rows = []
+                width = 0
                 for cells in ws.iter_rows():
-                    count += len(cells)
-                    if count > MAX_CELLS: raise ValueError('Spreadsheet cell limit exceeded')
+                    width = max(width, len(cells))
+                    if count + (len(rows) + 1) * max(1, width) > MAX_CELLS:
+                        raise ValueError('Spreadsheet cell limit exceeded')
                     rows.append(tuple(cell.value for cell in cells))
-                sheets.append(Sheet(ws.title, tuple(rows)))
+                count += len(rows) * max(1, width)
+                sheets.append(Sheet(ws.title, tuple(row + (None,) * (width - len(row)) for row in rows)))
             return Spreadsheet(filename, tuple(sheets))
         finally:
             workbook.close()

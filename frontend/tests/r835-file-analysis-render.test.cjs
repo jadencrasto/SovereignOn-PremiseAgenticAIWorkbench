@@ -63,6 +63,25 @@ test('grouped averages and percentages preserve verified numeric display includi
   assert.match(share, /Valid denominator: 5/);
 });
 
+test('verified cross-file results show separate roles and preserve literal line and row evidence', () => {
+  const html = render(message('**Verified threshold comparison.**\n1 of 3 valid readings violate the limit.' +
+    block('Source 1 (TXT limits): limits.txt\nLine 2: Maximum vibration: 5 mm/s\n' +
+      'Source 2 (CSV measurements): verified-readings.csv\nColumn B: Vibration (mm/s)\n' +
+      'Data row 2 ("<img src=untrusted>"): 7.1 mm/s - violates by 2.1 mm/s'), {
+    fileSources: [
+      { role: 'limits', attachment_id: 'source-1', filename: 'limits.txt', mime_type: 'text/plain', size_bytes: 42 },
+      { role: 'measurements', attachment_id: 'source-2', filename: csvName, mime_type: 'text/csv', size_bytes: 63 },
+    ],
+  }));
+  assert.match(html, /Compared file sources/);
+  assert.match(html, /Limits.*Source 1.*limits\.txt/);
+  assert.match(html, /Measurements.*Source 2.*verified-readings\.csv/);
+  assert.match(html, /Verified source evidence/);
+  assert.match(html, /Line 2: Maximum vibration: 5 mm\/s/);
+  assert.match(html, /Data row 2 .*7\.1 mm\/s - violates by 2\.1 mm\/s/);
+  assert.doesNotMatch(html, /<img\b/);
+});
+
 test('TXT matching lines and adaptive literal fences remain inert', () => {
   const fileName = 'inspection.txt';
   const html = render(message('Matching lines in the selected text.' +
@@ -143,7 +162,29 @@ test('long filenames and wide verified evidence have bounded readable regions', 
 
 test('welcome guidance points to actual file analysis and makes no spreadsheet publication claim', () => {
   const html = renderToStaticMarkup(React.createElement(MessageList, { messages: [] }));
-  assert.match(html, /When the TXT \/ CSV control is available/);
-  assert.match(html, /selected CSV rows/);
+  assert.match(html, /When the TXT \/ CSV \/ JSON control is available/);
+  assert.match(html, /selected CSV rows or JSON records/);
   assert.doesNotMatch(html, /CSV to XLSX|build verified Excel artifacts/);
+});
+
+test('TXT/JSON evidence preserves distinct source roles, line numbers and escaped field paths', () => {
+  const filename = 'equipment.json';
+  const html = render(message('**Verified threshold comparison.**\nMaximum deviation: 2.1 mm/s.' + block(
+    'Source 2 (TXT limits): limits.txt\nLine 2: Maximum vibration: 5 mm/s\n' +
+    'Source 1 (JSON measurements): equipment.json\nField "vibration_mm_s" (vibration (mm/s))\n' +
+    'JSON record index 1 at /pump~1rack/1 (/pump~1rack/1/id = "Pump B"): ' +
+    '/pump~1rack/1/vibration_mm_s = 7.1e0 - 7.1 mm/s - violates by 2.1 mm/s', filename
+  ), {
+    fileName: filename, fileSources: [
+      { role: 'limits', attachment_id: 'source-2', filename: 'limits.txt', mime_type: 'text/plain', size_bytes: 30 },
+      { role: 'measurements', attachment_id: 'source-1', filename, mime_type: 'application/json', size_bytes: 65 },
+    ],
+  }));
+  assert.match(html, /Limits · Source 2 · limits\.txt/);
+  assert.match(html, /Measurements · Source 1 · equipment\.json/);
+  assert.match(html, /Source record indices and field paths/);
+  assert.match(html, /Line 2: Maximum vibration: 5 mm\/s/);
+  assert.match(html, /\/pump~1rack\/1\/vibration_mm_s = 7\.1e0/);
+  assert.match(html, /violates by 2\.1 mm\/s/);
+  assert.doesNotMatch(html, /Data row|tool_call/);
 });

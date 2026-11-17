@@ -27,6 +27,7 @@ export interface ImageAttachment {
   filename: string;
   /** MIME type, e.g. 'image/png' */
   mimeType: string;
+  sourceNumber?: number;
   /** File size in bytes */
   sizeBytes: number;
   /** Width in pixels (from backend, if available) */
@@ -53,6 +54,8 @@ export interface ChatMessage {
   imageProgress?: 'uploading' | 'analyzing_image' | 'reasoning';
   textFileAnswer?: boolean;
   fileName?: string;
+  fileSource?: number;
+  fileSources?: readonly FileComparisonSource[];
   error?: boolean;
   errorMessage?: string;
   withheld?: boolean;
@@ -67,6 +70,12 @@ export interface ChatMessage {
   };
   pendingApproval?: ApprovalRequest;
 }
+
+export type FileComparisonSource = {
+  attachment_id: string;
+  filename: string;
+  size_bytes: number;
+} & ({ role: 'limits'; mime_type: 'text/plain' } | { role: 'measurements'; mime_type: 'text/csv' | 'application/json' });
 
 export interface ChatRequestPayload {
   session_id?: string;
@@ -120,6 +129,7 @@ export interface StreamChunkPayload {
     width?: number | null;
     height?: number | null;
   };
+  file_sources?: readonly FileComparisonSource[];
   // Phase 6: planning/approval event data
   task_id?: string;
   plan?: {

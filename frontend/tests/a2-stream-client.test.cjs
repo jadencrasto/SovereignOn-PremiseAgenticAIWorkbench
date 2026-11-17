@@ -75,6 +75,57 @@ const chatOutput = ts.transpileModule(fs.readFileSync(chatFilename, 'utf8'), {co
 const chatModule = new Module(chatFilename, module); chatModule.filename = chatFilename; chatModule.paths = Module._nodeModulePaths(path.dirname(chatFilename));
 chatModule.require = name => name === './client' ? mod.exports : require(name);
 chatModule._compile(chatOutput, chatFilename);
+
+test('the batch wire contract preserves ordered duplicate names, data and selected source metadata', async t => {
+ const previous = global.fetch;
+ t.after(() => { global.fetch = previous; });
+ const files = [
+  new File(['Name,V\nOne,1\n'], 'data.csv', { type: 'text/csv' }),
+  new File(['Name,V\nTwo,2\n'], 'data.csv', { type: 'text/csv' }),
+  new File(['note'], 'note.txt', { type: 'text/plain' }),
+ ];
+ const selected = {
+  attachment_id: 'source-2', filename: 'data.csv', mime_type: 'text/csv', size_bytes: files[1].size,
+ };
+ global.fetch = async (url, options) => {
+  assert.equal(url, '/api/chat/text-attachments');
+  const actual = options.body.getAll('file');
+  assert.deepEqual(actual.map(file => file.name), ['data.csv', 'data.csv', 'note.txt']);
+  assert.deepEqual(await Promise.all(actual.map(file => file.text())), ['Name,V\nOne,1\n', 'Name,V\nTwo,2\n', 'note']);
+  assert.equal(options.body.get('source'), '2');
+  assert.equal(options.body.get('row_start'), '1');
+  assert.equal(options.body.has('line_start'), false);
+  return response(['data: ' + JSON.stringify({ type: 'done', session_id: 's', attachment: selected }) + '\n\n']);
+ };
+ const seen = [];
+ await chatModule.exports.streamChatTextFiles({ files, source: 2 }, 's', 'ollama/text', 'Find maximum V', {
+  ...callbacks(seen), onDone: (_session, _model, source) => seen.push(source),
+ }, new AbortController().signal, { start: 1, end: 1 });
+ assert.deepEqual(seen, [selected]);
+});
+test('the existing done event carries both source identities for a cross-file comparison', async t => {
+ const previous = global.fetch;
+ t.after(() => { global.fetch = previous; });
+ const files = [new File(['Maximum pressure: 12 bar'], 'limits.txt', { type: 'text/plain' }),
+  new File(['Pressure (bar)\n13\n'], 'readings.csv', { type: 'text/csv' })];
+ const selected = { attachment_id: 'source-2', filename: files[1].name, mime_type: 'text/csv', size_bytes: files[1].size };
+ const paired = [{ role: 'limits', attachment_id: 'source-1', filename: files[0].name,
+  mime_type: 'text/plain', size_bytes: files[0].size }, { role: 'measurements', ...selected }];
+ global.fetch = async (url, options) => {
+  assert.equal(url, '/api/chat/text-attachments');
+  assert.equal(options.body.get('message'), 'Compare readings.csv against limits.txt.');
+  assert.equal(options.body.get('source'), '2');
+  const done = { type: 'done', session_id: 's', model_used: 'Deterministic file analysis',
+   attachment: selected, file_sources: paired };
+  return response(['data: ' + JSON.stringify(done) + '\n\ndata: ' + JSON.stringify(done) + '\n\n']);
+ };
+ const seen = [];
+ await chatModule.exports.streamChatTextFiles({ files, source: 2 }, 's', 'ollama/text', 'Compare readings.csv against limits.txt.', {
+  ...callbacks(seen), onDone: (...args) => seen.push(args),
+ }, new AbortController().signal, { start: 1, end: 1 });
+ assert.deepEqual(seen, [['s', 'Deterministic file analysis', selected, paired]]);
+});
+
 test('text preview and questions use separate multipart requests with only allowed fields', async t => {
  const originalFetch = global.fetch;
  t.after(() => { global.fetch = originalFetch; });

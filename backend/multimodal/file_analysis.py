@@ -11,6 +11,7 @@ from fractions import Fraction
 from io import StringIO
 
 from backend.multimodal.csv_file import MAX_CSV_CELL_CHARS, MAX_CSV_SELECTION, is_csv_number
+from backend.multimodal.json_file import JsonEvidence
 
 _HEADER_UNIT = re.compile(r'^(.+?)\s*(?:\(([^()]+)\)|\[([^\[\]]+)\])$')
 _THRESHOLD = re.compile(
@@ -119,7 +120,15 @@ def _cells(rows, first_row, metric, label_column):
         yield _Cell(number, raw, _number(raw), label)
 
 
-def _source_lines(filename: str, column: _Column, cells: list[_Cell], *, show_labels: bool) -> list[str]:
+def _source_lines(filename: str, column: _Column, cells: list[_Cell], *, show_labels: bool,
+                  evidence: JsonEvidence | None = None) -> list[str]:
+    if evidence is not None:
+        table = evidence.table
+        lines = [f'File: {filename}', f'Source {evidence.source_number} (JSON)', table.field(column.index)]
+        for cell in cells:
+            label = f' ({json.dumps(cell.label, ensure_ascii=False)})' if cell.label and show_labels else ''
+            lines.append(f'{table.record(cell.row)}{label}: {table.evidence(cell.row, column.index)}')
+        return lines
     lines = [f'File: {filename}', f'Column {chr(65 + column.index)}: {column.header}']
     for cell in cells:
         reading = cell.raw if cell.value is not None else ('missing' if not cell.raw else 'nonnumeric')
@@ -147,13 +156,14 @@ def _threshold_value(question: str, column: _Column) -> tuple[str, Decimal] | No
 
 def analyze_csv_selection(
     question: str, filename: str, headers: list[str], rows: list[list[str]], first_row: int,
+    *, evidence: JsonEvidence | None = None,
 ) -> str | None:
     """Use parsed cells and actual selection offsets. No model or agent tool is called."""
     prompt = question.rstrip('?.!').strip()
     columns = [_Column.from_header(index, header) for index, header in enumerate(headers)]
     with localcontext() as context:
         context.prec = 2 * MAX_CSV_CELL_CHARS + 8
-        composed = _composed_answer(prompt, filename, columns, rows, first_row)
+        composed = _composed_answer(prompt, filename, columns, rows, first_row, evidence=evidence)
     if composed is not None:
         return composed
     words = _words(prompt)
@@ -171,6 +181,11 @@ def analyze_csv_selection(
         return 'Set the CSV row selection first and ask for one supported calculation in the column’s uploaded units.'
 
     if operations == {'Count'} and not threshold_requested and not compare:
+        if evidence is not None and (_ROW_COUNT.fullmatch(words) or
+                                     re.fullmatch(r'(?:count|how many)(?: the)? (?:records|equipment)', words)):
+            return f'**Record count: {len(rows)}**\n\n' + literal_file_block([
+                f'File: {filename}', *evidence.lines(first_row, len(rows)),
+            ])
         if _ROW_COUNT.fullmatch(words):
             return f'**Row count: {len(rows)}**\n\n' + literal_file_block([
                 f'File: {filename}', f'Selected data rows: {first_row}–{first_row + len(rows) - 1}',
@@ -186,6 +201,11 @@ def analyze_csv_selection(
     if len(selected) > 1 and subject and subject[1] in _ROW_IDENTIFIERS:
         # "Which equipment has the highest temperature?" names the row label and metric.
         selected = [column for column in selected if _words(column.label) != subject[1]]
+    if evidence is not None and threshold_requested:
+        selected = [column for column in selected if _words(column.label) not in _ROW_IDENTIFIERS]
+        if not selected:
+            selected = [column for column in columns if _threshold_value(prompt, column) is not None
+                        and any(_number(row[column.index]) is not None for row in rows)]
     if not selected and threshold_requested and re.search(r'\b(?:readings|values|rows)\b', words):
         selected = [
             column for column in columns
@@ -217,6 +237,10 @@ def analyze_csv_selection(
     elif matching or re.search(r'\b(?:for|from)\b', operation_words):
         return 'Select the exact CSV rows you want to analyze, then ask for the operation on that selection.'
     if lookup:
+        if evidence is not None:
+            return 'Value extracted from the selected JSON record.\n\n' + literal_file_block(
+                _source_lines(filename, column, source, show_labels=True, evidence=evidence),
+            )
         original = rows[source[0].row - first_row][column.index]
         value = source[0].raw if source[0].value is not None else (
             f'{json.dumps(original, ensure_ascii=False)} (text)' if source[0].raw else '(missing)'
@@ -232,28 +256,32 @@ def analyze_csv_selection(
     if threshold_requested and threshold is None:
         return 'Specify a numeric threshold in the selected column’s uploaded units.'
     if not defined and operations == {'Count'} and threshold is None and not compare:
-        return _render('**Count: 0 numeric cells.**', filename, column, source, missing, invalid, show_labels=True)
+        return _render('**Count: 0 numeric cells.**', filename, column, source, missing, invalid,
+                       show_labels=True, evidence=evidence)
     if not defined or (compare and len(defined) < 2):
         return _render(
             'There are insufficient numeric values for this request.', filename, column, source,
-            missing, invalid, show_labels=compare,
+            missing, invalid, show_labels=compare, evidence=evidence,
         )
 
     # Cell and selection limits bound the precision needed for exact sums and differences.
     with localcontext() as context:
         context.prec = 2 * MAX_CSV_CELL_CHARS + 8
         return _finish(filename, column, source, defined, operations, threshold, compare, range_requested,
-                       missing, invalid, descending=not re.search(r'\b(?:ascending|lowest first|lowest to highest)\b', words))
+                       missing, invalid, descending=not re.search(r'\b(?:ascending|lowest first|lowest to highest)\b', words),
+                       evidence=evidence)
 
 
-def _render(answer, filename, column, cells, missing, invalid, *, show_labels=False):
+def _render(answer, filename, column, cells, missing, invalid, *, show_labels=False, evidence=None):
     if missing or invalid:
         answer += f'\n\nExcluded cells: {missing} missing and {invalid} nonnumeric.'
-    return answer + '\n\n' + literal_file_block(_source_lines(filename, column, cells, show_labels=show_labels))
+    return answer + '\n\n' + literal_file_block(
+        _source_lines(filename, column, cells, show_labels=show_labels, evidence=evidence),
+    )
 
 
 def _finish(filename, column, source, defined, operations, threshold, compare, range_requested,
-            missing, invalid, *, descending):
+            missing, invalid, *, descending, evidence=None):
     values = [cell.value for cell in defined]
     lowest, highest = min(values), max(values)
     if threshold is not None:
@@ -295,7 +323,7 @@ def _finish(filename, column, source, defined, operations, threshold, compare, r
             answer = f'**Count: {len(defined)} numeric cells.**'
     # For a failed match, show no alleged qualifying operands. Other filtered views list
     # the matching cells; aggregate operations list every selected operand and exclusion.
-    return _render(answer, filename, column, chosen, missing, invalid, show_labels=True)
+    return _render(answer, filename, column, chosen, missing, invalid, show_labels=True, evidence=evidence)
 
 
 def _average(values: list[Decimal]) -> str:
@@ -494,11 +522,21 @@ def _literal_value(raw: str) -> str:
     return raw.strip() if is_csv_number(raw.strip()) else json.dumps(raw, ensure_ascii=False)
 
 
-def _table_evidence(filename, columns, rows, first_row, offsets, shown_columns, details=()):
+def _table_evidence(filename, columns, rows, first_row, offsets, shown_columns, details=(), *, evidence=None):
     shown = list(dict.fromkeys(shown_columns))
     identifiers = [column for column in columns if _words(column.label) in _ROW_IDENTIFIERS]
     if len(identifiers) == 1 and identifiers[0] not in shown:
         shown.insert(0, identifiers[0])
+    if evidence is not None:
+        table = evidence.table
+        lines = [f'File: {filename}', *evidence.lines(first_row, len(rows))]
+        lines.extend(table.field(column.index) for column in shown)
+        lines.extend(details)
+        for offset in offsets:
+            row = first_row + offset
+            readings = ' | '.join(table.evidence(row, column.index) for column in shown)
+            lines.append(f'{table.record(row)}: {readings}')
+        return literal_file_block(lines)
     lines = [f'File: {filename}', f'Selected data rows: {first_row}–{first_row + len(rows) - 1}']
     lines.extend(f'Column {chr(65 + column.index)}: {column.header}' for column in shown)
     lines.extend(details)
@@ -739,6 +777,7 @@ def _filter_details(conditions: list[_Condition], total: int, matched: int, miss
 
 def _composed_answer(
     prompt: str, filename: str, columns: list[_Column], rows: list[list[str]], first_row: int,
+    *, evidence: JsonEvidence | None = None,
 ) -> str | None:
     """Resolve a bounded filter and its optional next operation on this selection."""
     steps = [match for match in re.finditer(rf'{_QUOTED}|(?P<step>,?\s+then\s+)', prompt, re.I) if match['step']]
@@ -809,10 +848,11 @@ def _composed_answer(
     if isinstance(result, str):
         if not conditions:
             return result
-        return result + '\n\n' + _table_evidence(filename, columns, rows, first_row, offsets, condition_columns, details)
+        return result + '\n\n' + _table_evidence(filename, columns, rows, first_row, offsets, condition_columns, details,
+                                                 evidence=evidence)
     heading, evidence_rows, metrics, notes = result
     return heading + '\n\n' + _table_evidence(
-        filename, columns, rows, first_row, evidence_rows, condition_columns + metrics, details + notes,
+        filename, columns, rows, first_row, evidence_rows, condition_columns + metrics, details + notes, evidence=evidence,
     )
 
 
@@ -855,6 +895,7 @@ class _WorkflowTable:
     columns: tuple[_Column, ...]
     rows: tuple[tuple[str, ...], ...]
     first_row: int
+    json_evidence: JsonEvidence | None = None
 
     def column(self, name: str) -> _Column:
         column = _metric(name, self.columns, self.rows)
@@ -872,10 +913,16 @@ class _WorkflowTable:
         return selection.offsets
 
     def evidence(self, offsets, columns, details):
-        return _table_evidence(self.filename, self.columns, self.rows, self.first_row, offsets, columns, details)
+        return _table_evidence(self.filename, self.columns, self.rows, self.first_row, offsets, columns, details,
+                               evidence=self.json_evidence)
+
+    @property
+    def positions(self):
+        return 'JSON record indices' if self.json_evidence is not None else 'data rows'
 
     def row_numbers(self, offsets):
-        return ', '.join(str(self.first_row + offset) for offset in offsets)
+        first = self.first_row - (self.json_evidence is not None)
+        return ', '.join(str(first + offset) for offset in offsets)
 
 
 def _share_workflow(table: _WorkflowTable, filter_text: str, final_action: str) -> Generator[CsvWorkflowStep, None, None]:
@@ -904,7 +951,8 @@ def _share_workflow(table: _WorkflowTable, filter_text: str, final_action: str) 
     percentage = _percentage(Decimal(count), Decimal(len(valid)))
     details.extend([
         f'Matching count: {count}. Valid denominator: {len(valid)}.',
-        f'Valid data rows: {table.row_numbers(valid)}. Matching data rows: {table.row_numbers(verified) or "none"}.',
+        f'Valid {table.positions}: {table.row_numbers(valid)}. Matching {table.positions}: '
+        f'{table.row_numbers(verified) or "none"}.',
     ])
     answer = (f'**{percentage}** of valid readings in the selected rows match the filter '
               f'({count} of {len(valid)}).\n\n' + table.evidence(valid, [column], details))
@@ -922,7 +970,7 @@ def _rank_comparison_workflow(
     if not expected:
         raise CsvWorkflowError('No numeric temperatures are available for ranking.')
     ranked = _CsvSelection(table, expected)
-    yield CsvWorkflowStep(f'Ranked {len(expected)} rows by temperature. Selected data rows {table.row_numbers(expected)}.')
+    yield CsvWorkflowStep(f'Ranked {len(expected)} rows by temperature. Selected {table.positions} {table.row_numbers(expected)}.')
 
     offsets = table.verify(ranked, expected)
     if len(offsets) < limit:
@@ -956,7 +1004,7 @@ def _group_winner_workflow(table: _WorkflowTable, key: str, metric: str) -> Gene
         values, exclusions = _numeric_values(table.rows, offsets, column)
         label = _literal_value(table.rows[offsets[0]][group.index])
         evidence.extend(offsets)
-        details.append(f'Group {label}, data rows {table.row_numbers(offsets)}. {exclusions}')
+        details.append(f'Group {label}, {table.positions} {table.row_numbers(offsets)}. {exclusions}')
         if values:
             operands = list(values.values())
             # Compare exact means so display rounding cannot produce a false tie.
@@ -972,7 +1020,7 @@ def _group_winner_workflow(table: _WorkflowTable, key: str, metric: str) -> Gene
     greatest = max(mean for mean, *_ in averages)
     for mean, label, display, offsets in averages:
         rank = 'Highest average' if mean == greatest else 'Average'
-        details.append(f'{rank} for {label}: {display}. Valid data rows: {table.row_numbers(offsets)}.')
+        details.append(f'{rank} for {label}: {display}. Valid {table.positions}: {table.row_numbers(offsets)}.')
     best = next(display for mean, _, display, _ in averages if mean == greatest)
     ties = sum(mean == greatest for mean, *_ in averages)
     answer = (f'**Highest group average: {best} in the source column units.** '
@@ -989,14 +1037,15 @@ def _extrema_workflow(table: _WorkflowTable, metric: str) -> Generator[CsvWorkfl
     high, low = max(values.values()), min(values.values())
     expected = tuple(offset for offset, value in values.items() if value in (high, low))
     extremes = _CsvSelection(table, expected)
-    yield CsvWorkflowStep(f'Found highest {high:f} and lowest {low:f}. Data rows {table.row_numbers(expected)}.')
+    positions = 'Data rows' if table.json_evidence is None else table.positions
+    yield CsvWorkflowStep(f'Found highest {high:f} and lowest {low:f}. {positions} {table.row_numbers(expected)}.')
 
     offsets = table.verify(extremes, expected)
     readings = [values[offset] for offset in offsets]
     difference = max(readings) - min(readings)
     unit = f' {column.unit}' if column.unit else ''
-    details = [exclusions, f'Highest: {high:f}{unit}. Data rows: {table.row_numbers(i for i in offsets if values[i] == high)}.',
-               f'Lowest: {low:f}{unit}. Data rows: {table.row_numbers(i for i in offsets if values[i] == low)}.',
+    details = [exclusions, f'Highest: {high:f}{unit}. {positions}: {table.row_numbers(i for i in offsets if values[i] == high)}.',
+               f'Lowest: {low:f}{unit}. {positions}: {table.row_numbers(i for i in offsets if values[i] == low)}.',
                f'Difference: {high:f} − {low:f} = {difference:f}{unit}.']
     answer = (f'**The highest reading is {difference:f} above the lowest in the source column units.**\n\n'
               + table.evidence(offsets, [column], details))
@@ -1018,13 +1067,16 @@ _GROUP_WINNER_WORKFLOW = re.compile(
 )
 _EXTREMA_WORKFLOW = re.compile(
     r'(?:(?:find|show) (?:the )?highest and lowest (.+?),?\s+then calculate (?:their|the) difference|'
-    r'which .+? has the (?:greatest|highest) (.+?),?\s+and how much higher is it than the lowest)', re.I,
+    r'which .+? has the (?:greatest|highest) (.+?),?\s+and how much higher is it than the lowest|'
+    r'(?:find|calculate|what is) (?:the )?difference between (?:the )?'
+    r'(?:highest and lowest|lowest and highest) (.+))', re.I,
 )
 _RANK_WORDS = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve')
 
 
 def prepare_csv_workflow(
     question: str, filename: str, headers: list[str], rows: list[list[str]], first_row: int,
+    *, evidence: JsonEvidence | None = None,
 ) -> CsvWorkflow | None:
     """Recognize fixed dependent operations in the existing attachment analysis path."""
     prompt = re.sub(r'^please\s+', '', question.rstrip('?.!').strip(), flags=re.I)
@@ -1041,9 +1093,9 @@ def prepare_csv_workflow(
         run, args = _group_winner_workflow, match.groups()
     elif match := _EXTREMA_WORKFLOW.fullmatch(prompt):
         descriptions = ('Find the highest and lowest readings', 'Calculate the difference')
-        run, args = _extrema_workflow, (match[1] or match[2],)
+        run, args = _extrema_workflow, (next(value for value in match.groups() if value is not None),)
     else:
         return None
     columns = tuple(_Column.from_header(index, name) for index, name in enumerate(headers))
-    table = _WorkflowTable(filename, columns, tuple(tuple(row) for row in rows), first_row)
+    table = _WorkflowTable(filename, columns, tuple(tuple(row) for row in rows), first_row, evidence)
     return CsvWorkflow(descriptions, lambda: run(table, *args))

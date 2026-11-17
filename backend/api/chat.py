@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 from contextlib import aclosing, asynccontextmanager, closing
+from email.message import Message as HeaderMessage
 from time import monotonic as _file_workflow_clock
 import uuid
 from typing import AsyncGenerator, List, Optional
@@ -42,6 +43,7 @@ from pydantic import BaseModel, Field
 from python_multipart.exceptions import MultipartParseError
 from starlette.datastructures import UploadFile as MultipartUpload
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 
 from backend.schemas.chat import (
     ChatRequest,
@@ -61,13 +63,18 @@ from backend.multimodal.context import (
 )
 from backend.multimodal.service import VisionAnalysisUnavailable
 from backend.multimodal.text_file import (
-    MAX_TEXT_FILE_BYTES, MAX_TEXT_QUESTION_BYTES, TEXT_PREVIEW_CHARS,
-    TextFileError, decode_text_file, select_text_lines, text_filename, text_understanding_enabled,
+    MAX_TEXT_FILE_BYTES, MAX_TEXT_FORM_BYTES, MAX_TEXT_QUESTION_BYTES, MAX_TEXT_SOURCES, MAX_TEXT_SOURCE_BYTES,
+    TEXT_PREVIEW_CHARS, TextFileError, TextSource, decode_text_file, select_text_lines, select_text_source,
+    text_filename, text_understanding_enabled,
 )
-from backend.multimodal.csv_file import MAX_CSV_CONTEXT_BYTES, csv_column_types, parse_csv_file, select_csv_rows
+from backend.multimodal.csv_file import (
+    MAX_CSV_CONTEXT_BYTES, MAX_CSV_SELECTION, csv_column_types, parse_csv_file, select_csv_rows,
+)
+from backend.multimodal.cross_file import is_cross_file_question, prepare_cross_file_workflow, select_cross_file_sources
 from backend.multimodal.file_analysis import (
     CsvWorkflowError, analyze_csv_selection, literal_file_block, locate_text_passage, prepare_csv_workflow,
 )
+from backend.multimodal.json_file import JsonEvidence, parse_json_file
 from backend.security.artifact_presentation import public_tool_arguments, public_tool_summary, public_tool_name, public_agent_status
 
 logger = logging.getLogger(__name__)
@@ -187,7 +194,10 @@ async def chat(
         except PermissionError:
             raise HTTPException(status_code=404, detail="Conversation not found") from None
         missing = None
-        if requires_text_reattachment(history, body.message):
+        if is_cross_file_question(body.message):
+            missing = ('Attach the TXT limits and the CSV or JSON measurements for this comparison.',
+                       'TEXT_FILE_REATTACH_REQUIRED')
+        elif requires_text_reattachment(history, body.message):
             missing = (TEXT_REATTACH_MESSAGE, "TEXT_FILE_REATTACH_REQUIRED")
         elif requires_reattachment(history, body.message):
             missing = (IMAGE_REATTACH_MESSAGE, "IMAGE_REATTACH_REQUIRED")
@@ -694,6 +704,42 @@ def _text_file_http_error(error: TextFileError) -> HTTPException:
 
 class _TextFileMultipartParser(MultiPartParser):
     completed = False
+    spool_max_size = MAX_TEXT_FILE_BYTES
+    aggregate_file_limit = MAX_TEXT_SOURCE_BYTES
+    total_file_bytes = 0
+
+    def on_part_begin(self) -> None:
+        super().on_part_begin()
+        self.part_file_bytes = 0
+
+    def on_headers_finished(self) -> None:
+        if self.max_files > 1:
+            # Inspect the original disposition before python-multipart strips some Windows paths.
+            header = HeaderMessage()
+            header['content-type'] = self._current_part.content_disposition.decode('latin-1')
+            options = header.get_params([])
+            headers = [name for name, _ in self._current_part.item_headers]
+            if (not options or options[0][0].lower() != 'form-data'
+                    or sum(name == 'name' for name, _ in options) != 1
+                    or headers.count(b'content-disposition') != 1 or headers.count(b'content-type') > 1):
+                raise MultiPartException('Invalid upload part')
+            filenames = [value for name, value in options if name == 'filename']
+            if len(filenames) > 1 or any(not isinstance(value, str) or any(c in value for c in '/\\:')
+                                         for value in filenames):
+                raise TextFileError('Use an original filename without a directory path.')
+        super().on_headers_finished()
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._current_part.file is not None:
+            size = end - start
+            self.part_file_bytes += size
+            self.total_file_bytes += size
+            if self.part_file_bytes > MAX_TEXT_FILE_BYTES:
+                raise TextFileError('Each file must be at most 2 KiB.', status=413, code='TEXT_FILE_TOO_LARGE')
+            if self.total_file_bytes > self.aggregate_file_limit:
+                raise TextFileError('Combined file data must be at most 4 KiB.', status=413,
+                                    code='TEXT_ATTACHMENTS_TOO_LARGE')
+        super().on_part_data(data, start, end)
 
     def on_end(self) -> None:
         self.completed = True
@@ -704,14 +750,32 @@ class _TextFileMultipartParser(MultiPartParser):
             file.close()
 
 
+async def _bounded_text_body(request: Request):
+    error = TextFileError('The multipart request is too large.', status=413, code='TEXT_FORM_TOO_LARGE')
+    lengths = request.headers.getlist('content-length')
+    if lengths and (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdecimal()
+                    or len(lengths[0]) > 10 or int(lengths[0]) > MAX_TEXT_FORM_BYTES):
+        raise error
+    total = 0
+    async with aclosing(request.stream()) as stream:
+        async for chunk in stream:
+            total += len(chunk)
+            if total > MAX_TEXT_FORM_BYTES:
+                raise error
+            yield chunk
+
+
 @asynccontextmanager
-async def _text_file_form(request: Request, *, fields: set[str], csv_file: bool = False):
-    extension = '.csv' if csv_file else '.txt'
-    invalid_form = TextFileError(f"Send one {extension} file in a valid multipart request.", status=400, code="TEXT_FILE_FORM")
+async def _text_file_form(request: Request, *, fields: set[str], csv_file: bool = False, json_file: bool = False,
+                          multiple: bool = False):
+    extension = '.json' if json_file else '.csv' if csv_file else '.txt'
+    instruction = ('Send up to three TXT, CSV or JSON files in a valid multipart request.' if multiple else
+                   f'Send one {extension} file in a valid multipart request.')
+    invalid_form = TextFileError(instruction, status=400, code='TEXT_FILE_FORM')
     if request.headers.get("content-type", "").partition(";")[0].strip().lower() != "multipart/form-data":
         raise _text_file_http_error(invalid_form)
-    async with aclosing(request.stream()) as stream:
-        parser = _TextFileMultipartParser(request.headers, stream, max_files=1,
+    async with aclosing(_bounded_text_body(request)) as stream:
+        parser = _TextFileMultipartParser(request.headers, stream, max_files=MAX_TEXT_SOURCES if multiple else 1,
                                           max_fields=len(fields) - 1, max_part_size=MAX_TEXT_FILE_BYTES)
         parsed = False
         try:
@@ -719,18 +783,24 @@ async def _text_file_form(request: Request, *, fields: set[str], csv_file: bool 
             if not parser.completed:
                 raise MultiPartException("Incomplete form")
             parsed = True
-        except (MultiPartException, MultipartParseError):
+        except TextFileError as error:
+            raise _text_file_http_error(error) from None
+        except (MultiPartException, MultipartParseError, ClientDisconnect):
             raise _text_file_http_error(invalid_form) from None
         finally:
             if not parsed:
                 parser.close_partial_uploads()
     try:
         items = form.multi_items()
-        values = dict(items)
-        if (len(values) != len(items) or values.keys() - fields
-                or not isinstance(values.get("file"), MultipartUpload)
-                or any(not isinstance(value, str) for name, value in items if name != "file")):
+        scalar_items = [(name, value) for name, value in items if name != 'file']
+        values = dict(scalar_items)
+        uploads = form.getlist('file')
+        if (len(values) != len(scalar_items) or values.keys() - fields
+                or not 1 <= len(uploads) <= (MAX_TEXT_SOURCES if multiple else 1)
+                or any(not isinstance(upload, MultipartUpload) for upload in uploads)
+                or any(not isinstance(value, str) for value in values.values())):
             raise invalid_form
+        values['file'] = uploads if multiple else uploads[0]
         yield values
     except TextFileError as error:
         raise _text_file_http_error(error) from None
@@ -751,13 +821,14 @@ def _text_file_owner(request, engine, session_id, *, required: bool):
         raise HTTPException(404, "Conversation not found.") from None
 
 
-async def _read_text_file(file: MultipartUpload, *, csv_file: bool = False):
-    filename = text_filename(file.filename or "", '.csv' if csv_file else '.txt')
+async def _read_text_file(file: MultipartUpload, *, csv_file: bool = False, json_file: bool = False):
+    extension = '.json' if json_file else '.csv' if csv_file else '.txt'
+    filename = text_filename(file.filename or "", extension)
     try:
         data = await file.read(MAX_TEXT_FILE_BYTES + 1)
     except OSError:
         raise TextFileError("The text file could not be read.", status=400) from None
-    decode = parse_csv_file if csv_file else decode_text_file
+    decode = parse_json_file if json_file else parse_csv_file if csv_file else decode_text_file
     return filename, len(data), decode(data, file.content_type or "")
 
 
@@ -797,25 +868,83 @@ async def chat_csv_file(request: Request, engine=Depends(get_engine), model_rout
     return await _chat_attachment_file(request, engine, model_router, user, csv_file=True)
 
 
-async def _chat_attachment_file(request, engine, model_router, user, *, csv_file: bool = False):
+@router.post('/json-preview')
+async def preview_json_file(request: Request, response: Response,
+                            engine=Depends(get_engine), _user=Depends(require_permission(Permission.VIEW_DATA))):
+    if not text_understanding_enabled(getattr(request.app.state, 'settings', None)):
+        raise HTTPException(403, 'JSON preview requires the authenticated local chat-only profile.')
+    async with _text_file_form(request, fields={'file', 'session_id', 'row_start', 'row_end'}, json_file=True) as form:
+        _text_file_owner(request, engine, form.get('session_id'), required=False)
+        filename, size, table = await _read_text_file(form['file'], json_file=True)
+        rows, truncated = select_csv_rows(table.rows, form.get('row_start'), form.get('row_end'), preview=True)
+        first = int(form.get('row_start') or '1')
+    response.headers['Cache-Control'] = 'no-store'
+    return {'filename': filename, 'size_bytes': size, 'headers': table.headers,
+            'column_types': csv_column_types(rows), 'rows': table.preview(first, len(rows)),
+            'row_count': len(table.rows), 'truncated': truncated}
+
+
+@router.post('/text-attachments')
+async def chat_text_attachments(request: Request, engine=Depends(get_engine), model_router=Depends(get_router_obj),
+                                user: User = Depends(require_permission(Permission.VIEW_DATA))):
+    return await _chat_attachment_file(request, engine, model_router, user, multiple=True)
+
+
+async def _read_text_sources(uploads) -> list[TextSource]:
+    sources = []
+    for number, upload in enumerate(uploads, 1):
+        extension = (upload.filename or '').lower()
+        if not extension.endswith(('.csv', '.txt', '.json')):
+            raise TextFileError('Choose UTF-8 TXT, CSV or JSON files.', status=415, code='TEXT_FILE_TYPE')
+        csv_file = extension.endswith('.csv')
+        filename, size, content = await _read_text_file(upload, csv_file=csv_file, json_file=extension.endswith('.json'))
+        sources.append(TextSource(number, filename, size, csv_file, content))
+    return sources
+
+
+async def _chat_attachment_file(request, engine, model_router, user, *, csv_file: bool = False, multiple: bool = False):
     from backend.health.routes import model_readiness
     from backend.auth.request_context import request_tools_enabled
 
     if not text_understanding_enabled(getattr(request.app.state, "settings", None)):
         raise HTTPException(403, "Text-file questions require the authenticated local chat-only profile.")
-    start, end = ('row_start', 'row_end') if csv_file else ('line_start', 'line_end')
-    async with _text_file_form(request, fields={"file", "session_id", "message", "model", start, end}, csv_file=csv_file) as form:
+    fields = {'file', 'session_id', 'message', 'model'}
+    row_fields, line_fields = {'row_start', 'row_end'}, {'line_start', 'line_end'}
+    fields.update(row_fields | line_fields | {'source'} if multiple else row_fields if csv_file else line_fields)
+    source_number = None
+    cross_sources = None
+    json_evidence = None
+    mime_type = 'text/csv' if csv_file else 'text/plain'
+    async with _text_file_form(request, fields=fields, csv_file=csv_file, multiple=multiple) as form:
         session_id = form.get("session_id")
         identity = _text_file_owner(request, engine, session_id, required=True)
         question = form.get("message", "").strip()
         if not question or len(question.encode("utf-8")) > MAX_TEXT_QUESTION_BYTES:
             raise TextFileError("Enter a question of at most 1 KiB.", code="TEXT_QUESTION_INVALID")
+        if not multiple and is_cross_file_question(question):
+            raise TextFileError('Attach the TXT limits and the CSV or JSON measurements for this comparison.',
+                                status=409, code='TEXT_FILE_REATTACH_REQUIRED')
         try:
             history = engine._memory.get_history(session_id)
         except PermissionError:
             raise HTTPException(404, "Conversation not found.") from None
-        attachment_kind = 'csv' if csv_file else 'txt'
-        if requires_text_reattachment(history, question, current_attachment=attachment_kind):
+        if multiple:
+            sources = await _read_text_sources(form['file'])
+            cross_sources = select_cross_file_sources(sources, form.get('source'), question)
+            if cross_sources is None:
+                selected_source, question = select_text_source(sources, form.get('source'), question)
+            else:
+                selected_source = cross_sources.measurements
+            csv_file = selected_source.csv
+            if set(form) & (line_fields if selected_source.tabular else row_fields):
+                raise TextFileError('Use the range fields for the selected source format.', status=400, code='TEXT_FILE_FORM')
+            filename, size, content = selected_source.filename, selected_source.size_bytes, selected_source.content
+            source_number = selected_source.number
+            mime_type = selected_source.mime_type
+            if mime_type == 'application/json':
+                json_evidence = JsonEvidence(content, source_number)
+        attachment_kind = 'json' if json_evidence is not None else 'csv' if csv_file else 'txt'
+        if cross_sources is None and requires_text_reattachment(history, question, current_attachment=attachment_kind):
             raise TextFileError(TEXT_REATTACH_MESSAGE, status=409, code="TEXT_FILE_REATTACH_REQUIRED")
         if requires_reattachment(history, question, current_attachment=attachment_kind):
             raise TextFileError(IMAGE_REATTACH_MESSAGE, status=409, code="IMAGE_REATTACH_REQUIRED")
@@ -823,26 +952,35 @@ async def _chat_attachment_file(request, engine, model_router, user, *, csv_file
         model = f"{provider}/{name}"
         if model_readiness(request.app.state, model)["state"] != "available":
             raise TextFileError("Check inference for the selected local text model.", status=503, code="MODEL_NOT_READY")
-        filename, size, content = await _read_text_file(form["file"], csv_file=csv_file)
-        if csv_file:
-            headers, rows = content
-            selected, _ = select_csv_rows(rows, form.get(start), form.get(end))
+        if not multiple:
+            filename, size, content = await _read_text_file(form['file'], csv_file=csv_file)
+        tabular = csv_file or json_evidence is not None
+        start, end = ('row_start', 'row_end') if tabular else ('line_start', 'line_end')
+        if tabular:
+            headers, rows = content if json_evidence is None else (content.headers, content.rows)
+            if ((cross_sources is not None or json_evidence is not None)
+                    and not set(form) & row_fields and len(rows) <= MAX_CSV_SELECTION):
+                selected = rows
+            else:
+                selected, _ = select_csv_rows(rows, form.get(start), form.get(end))
             content = {"headers": headers, "rows": selected, "selected_row_count": len(selected)}
         else:
             content, _ = select_text_lines(content, form.get(start), form.get(end))
         first_record = int(form.get(start) or '1')
     request_tools_enabled.set(False)
     attachment = {"attachment_id": str(uuid.uuid4()), "filename": filename,
-                  "mime_type": "text/csv" if csv_file else "text/plain", "size_bytes": size}
+                  "mime_type": mime_type, "size_bytes": size}
     return StreamingResponse(
         _stream_text_file(engine, session_id, request, user.id, model, question, content, attachment,
-                          first_record=first_record, guard_initial_identity=identity),
+                          first_record=first_record, source_number=source_number, cross_sources=cross_sources,
+                          json_evidence=json_evidence, guard_initial_identity=identity),
         media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
 
 
 @_guard_conversation_stream()
-async def _stream_text_file(engine, session_id, request, owner, model, question, text, attachment, *, first_record=None):
+async def _stream_text_file(engine, session_id, request, owner, model, question, text, attachment, *,
+                            first_record=None, source_number=None, cross_sources=None, json_evidence=None):
     from backend.auth.models import check_authorization
     from backend.auth.request_context import dispatch_identity_resolver
     from backend.health.capabilities import loopback_tags_url, model_key
@@ -876,26 +1014,37 @@ async def _stream_text_file(engine, session_id, request, owner, model, question,
         workflow = None
         if first_record is not None:
             filename = attachment['filename']
-            if csv_file:
+            if csv_file or json_evidence is not None:
                 headers, rows = text['headers'], text['rows']
-                workflow = prepare_csv_workflow(question, filename, headers, rows, first_record)
+                if cross_sources is not None:
+                    workflow = prepare_cross_file_workflow(cross_sources, first_record, len(rows))
+                else:
+                    workflow = prepare_csv_workflow(question, filename, headers, rows, first_record, evidence=json_evidence)
                 if workflow is None:
-                    answer = analyze_csv_selection(question, filename, headers, rows, first_record)
+                    answer = analyze_csv_selection(question, filename, headers, rows, first_record, evidence=json_evidence)
             else:
                 answer = locate_text_passage(question, text, filename, first_record)
         model_used = 'Deterministic file analysis'
         if workflow is not None:
-            async with aclosing(_stream_csv_workflow(workflow, state.settings, require_current_owner)) as run:
+            if json_evidence is not None:
+                objective = 'Compare TXT limits with JSON readings' if cross_sources else 'Analyze the selected JSON records'
+            else:
+                objective = 'Compare TXT limits with CSV readings' if cross_sources else 'Analyze the selected CSV rows'
+            async with aclosing(_stream_csv_workflow(workflow, state.settings, require_current_owner, objective=objective)) as run:
                 async for event in run:
                     if isinstance(event, str):
                         answer = event
                     else:
                         yield f'data: {json.dumps(event)}\n\n'
         elif answer is None:
+            if source_number is not None:
+                raise TextFileError('Ask for a supported calculation or passage lookup on the selected source.',
+                                    code='TEXT_SOURCE_OPERATION_UNSUPPORTED')
             answer = await _model_text_file_answer(provider, name, question, text, csv_file=csv_file)
             model_used = model
         require_current_owner()
-        description = 'Question about an attached CSV file.' if csv_file else 'Question about an attached text file.'
+        format_name = 'JSON' if json_evidence is not None else 'CSV' if csv_file else 'text'
+        description = f'Question about an attached {format_name} file.'
         engine._memory.add_user_message(session_id, description, attachment=attachment)
         if workflow is not None:
             completed = StreamChunk(type="task_completed", content="", session_id=session_id)
@@ -903,7 +1052,12 @@ async def _stream_text_file(engine, session_id, request, owner, model, question,
             require_current_owner()
         yield f'data: {StreamChunk(type="delta", content=answer).model_dump_json()}\n\n'
         require_current_owner()
-        yield f'data: {StreamChunk(type="done", content="", session_id=session_id, model_used=model_used).model_dump_json()}\n\n'
+        source = ({**attachment, 'attachment_id': f'source-{source_number}'} if source_number is not None else None)
+        done = StreamChunk(type='done', content='', session_id=session_id, model_used=model_used, attachment=source)
+        if cross_sources is None:
+            yield f'data: {done.model_dump_json()}\n\n'
+        else:
+            yield f'data: {json.dumps({**done.model_dump(mode="json"), "file_sources": cross_sources.metadata()})}\n\n'
     except PermissionError:
         raise
     except TextFileError as error:
@@ -912,7 +1066,7 @@ async def _stream_text_file(engine, session_id, request, owner, model, question,
         yield f'data: {StreamChunk(type="error", content="The text or CSV file question could not be answered.", error_code="TEXT_ANSWER_UNAVAILABLE").model_dump_json()}\n\n'
 
 
-async def _stream_csv_workflow(workflow, settings, require_current_owner):
+async def _stream_csv_workflow(workflow, settings, require_current_owner, *, objective='Analyze the selected CSV rows'):
     from backend.config import Settings
 
     max_steps = getattr(settings, 'max_plan_steps', Settings.model_fields['max_plan_steps'].default)
@@ -925,7 +1079,7 @@ async def _stream_csv_workflow(workflow, settings, require_current_owner):
         for number, description in enumerate(workflow.descriptions, 1)
     ]
     require_current_owner()
-    yield {'type': 'plan_created', 'content': '', 'plan': {'objective': 'Analyze the selected CSV rows', 'steps': steps}}
+    yield {'type': 'plan_created', 'content': '', 'plan': {'objective': objective, 'steps': steps}}
 
     previous = None
     with closing(workflow.updates()) as updates:

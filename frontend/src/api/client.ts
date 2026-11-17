@@ -72,7 +72,7 @@ export async function streamSSE(
   callbacks: {
     onDelta: (delta: string) => void;
     onSources: (sources: any[]) => void;
-    onDone: (sessionId: string, modelUsed: string) => void;
+    onDone: (sessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'], fileSources?: StreamChunkPayload['file_sources']) => void;
     onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     // Phase 5: vision status events
@@ -228,7 +228,7 @@ export async function streamSSEFromFormData(
   callbacks: {
     onDelta: (delta: string) => void;
     onSources: (sources: any[]) => void;
-    onDone: (sessionId: string, modelUsed: string) => void;
+    onDone: (sessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'], fileSources?: StreamChunkPayload['file_sources']) => void;
     onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
@@ -290,7 +290,11 @@ export async function streamSSEFromFormData(
           } else if (chunk.type === 'done') {
             if (terminal) continue;
             terminal = true;
-            callbacks.onDone(chunk.session_id || '', chunk.model_used || '');
+            if (chunk.file_sources === undefined) {
+              callbacks.onDone(chunk.session_id || '', chunk.model_used || '', chunk.attachment ?? undefined);
+            } else {
+              callbacks.onDone(chunk.session_id || '', chunk.model_used || '', chunk.attachment ?? undefined, chunk.file_sources);
+            }
           } else if (chunk.type === 'error') {
             if (terminal) continue;
             terminal = true;

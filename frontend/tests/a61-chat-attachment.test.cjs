@@ -1,11 +1,11 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),Module=require('node:module'),ts=require('typescript');
-let slots,cursor,sent,revoked,effects,preview,previewCsv;
+let slots,cursor,sent,revoked,effects,preview,previewCsv,previewJson;
 const R={createElement:(type,props,...children)=>({type,props:{...props,children}}),useState(v){let i=cursor++;if(!(i in slots))slots[i]=v;return [slots[i],x=>slots[i]=x]},useRef(v){let i=cursor++;return slots[i]??={current:v}},useCallback:f=>f,useEffect(fn){effects.push(fn)}};
-const f=path.resolve(__dirname,'../src/components/chat/ChatInput.tsx'),m=new Module(f,module);m.filename=f;m.paths=Module._nodeModulePaths(path.dirname(f));let orig=m.require.bind(m);m.require=n=>n==='react'?R:n==='lucide-react'?new Proxy({},{get:(_,p)=>p}):n==='../../types'?{ALLOWED_IMAGE_TYPES:['image/png','image/jpeg','image/webp'],MAX_IMAGE_SIZE_BYTES:10*1024*1024}:n==='../../api/chat'?{previewTextFile:(...args)=>preview(...args),previewCsvFile:(...args)=>previewCsv(...args)}:orig(n);m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText,f);
+const f=path.resolve(__dirname,'../src/components/chat/ChatInput.tsx'),m=new Module(f,module);m.filename=f;m.paths=Module._nodeModulePaths(path.dirname(f));let orig=m.require.bind(m);m.require=n=>n==='react'?R:n==='lucide-react'?new Proxy({},{get:(_,p)=>p}):n==='../../types'?{ALLOWED_IMAGE_TYPES:['image/png','image/jpeg','image/webp'],MAX_IMAGE_SIZE_BYTES:10*1024*1024}:n==='../../api/chat'?{MAX_TEXT_ATTACHMENTS:3,MAX_TEXT_ATTACHMENT_BYTES:2048,MAX_TEXT_ATTACHMENT_TOTAL_BYTES:4096,previewTextFile:(...args)=>preview(...args),previewCsvFile:(...args)=>previewCsv(...args),previewJsonFile:(...args)=>previewJson(...args)}:orig(n);m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText,f);
 URL.createObjectURL=()=> 'blob:synthetic';URL.revokeObjectURL=x=>revoked.push(x);
 function render(p={}){cursor=0;effects=[];return m.exports.ChatInput({onSendMessage:(...a)=>sent.push(a),onStopStream:()=>{},onClearSession:()=>{},isStreaming:false,sendBlocked:false,imageBlocked:false,textFileSupported:true,...p})}
 function find(n,fn){if(!n||typeof n!=='object')return null;if(fn(n))return n;for(const c of (Array.isArray(n)?n:n.props?.children||[])){const found=find(c,fn);if(found)return found}return null}
-function setup(){slots=[];sent=[];revoked=[];preview=previewCsv=async()=>{throw Error('Unexpected preview')};return render()}
+function setup(){slots=[];sent=[];revoked=[];preview=previewCsv=previewJson=async()=>{throw Error('Unexpected preview')};return render()}
 test('image selection and submission preserve the selected file',()=>{let t=setup(),f={name:'synthetic.png',type:'image/png',size:5};find(t,n=>n.props?.id==='image-file-input').props.onChange({target:{files:[f],value:'x'}});t=render();assert.equal(find(t,n=>n.type==='img').props.src,'blob:synthetic');find(t,n=>n.type==='textarea').props.onChange({target:{value:'Describe',style:{},scrollHeight:5}});t=render();find(t,n=>n.props?.id==='send-message-btn').props.onClick();assert.deepEqual(sent,[['Describe',f]]);assert.deepEqual(revoked,['blob:synthetic'])});
 test('unsupported attachment shows error and blocked capability disables selection',()=>{let t=setup();find(t,n=>n.props?.id==='image-file-input').props.onChange({target:{files:[{type:'application/pdf',size:5}],value:'x'}});t=render();assert.ok(find(t,n=>n.type==='span'&&String(n.props.children).includes('INVALID FORMAT')));t=render({imageBlocked:true,imageStatus:'Vision unavailable'});assert.equal(find(t,n=>n.type==='button'&&n.props.title==='Vision unavailable').props.disabled,true)});
 test('streaming displays cancellation control',()=>{setup();let t=render({isStreaming:true});assert.ok(find(t,n=>n.props?.id==='stop-stream-btn'));assert.equal(find(t,n=>n.type==='textarea').props.disabled,true)});
@@ -44,6 +44,145 @@ const question = tree => find(tree, n => n.type === 'textarea')
   .props.onChange({ target: { value: 'What color?', style: {}, scrollHeight: 1 } });
 const visiblePreview = tree => find(tree, n => n.type === 'pre' && n.props['aria-label'] === 'Text file preview');
 
+const selectBatch = (tree, files) => find(tree, n => n.props?.id === 'text-file-input')
+  .props.onChange({ target: { files, value: 'selection' } });
+
+test('multi-file picker requires an explicit source and distinguishes duplicate filenames', async () => {
+  setup();
+  const a = { ...textFile };
+  const b = { ...textFile };
+  const options = { onSendTextFiles: (...args) => sent.push(args) };
+  const pick = render(options);
+  assert.equal(find(pick, n => n.props?.id === 'text-file-input').props.multiple, true);
+  selectBatch(pick, [a, b]);
+  let tree = render(options);
+  assert.ok(find(tree, n => n.type === 'span' && String(n.props.children).includes('Source ,1, · ,sample.txt')));
+  assert.ok(find(tree, n => n.type === 'span' && String(n.props.children).includes('Source ,2, · ,sample.txt')));
+  question(tree);
+  assert.equal(send(render(options)).props.disabled, true);
+  preview = async file => {
+    assert.equal(file, b);
+    return { filename: b.name, size_bytes: b.size, text: 'second only', line_count: 1, truncated: false };
+  };
+  const second = tree => find(find(tree, n => n.type === 'li' && find(n, el => el.props?.['aria-label'] === 'Remove source 2')),
+    n => n.props?.type === 'radio');
+  await second(render(options)).props.onChange();
+  tree = render(options);
+  assert.equal(second(tree).props.checked, true);
+  assert.equal(send(tree).props.disabled, false);
+  send(tree).props.onClick();
+  assert.deepEqual(sent, [['What color?', { files: [a, b], source: 2 }, undefined]]);
+  assert.equal(visiblePreview(render(options)), null);
+});
+
+test('cross-file guidance appears for an attached TXT and CSV pair', () => {
+  setup();
+  const options = { onSendTextFiles: () => assert.fail('batch was sent') };
+  const guidance = n => n.type === 'p' && String(n.props.children).includes('Compare the CSV against the TXT file.');
+  selectBatch(render(options), [textFile, { ...textFile, name: 'other.txt' }]);
+  assert.equal(find(render(options), guidance), null);
+  selectBatch(render(options), [textFile, { name: 'readings.csv', type: 'text/csv', size: 28 }]);
+  assert.ok(find(render(options), guidance));
+});
+
+test('a single JSON uses the record preview and sends through the identity-checked attachment route', async () => {
+  setup();
+  const file = { name: 'equipment.json', type: 'application/json', size: 24 };
+  const options = { onSendTextFiles: (...args) => sent.push(args) };
+  previewJson = async (upload, _session, _signal, range) => {
+    assert.equal(upload, file);
+    assert.equal(range, undefined);
+    return { filename: file.name, size_bytes: file.size, headers: ['temperature (°C)'],
+      column_types: ['Number'], rows: [['82']], row_count: 1, truncated: false };
+  };
+  await selectBatch(render(options), [file]);
+  const preview = find(render(options), node => node.props?.['aria-label'] === 'JSON preview');
+  assert.ok(find(preview, node => node.props?.scope === 'row' && node.props.children[0] === 0));
+  question(render(options));
+  assert.equal(send(render(options)).props.disabled, false);
+  send(render(options)).props.onClick();
+  assert.deepEqual(sent, [['What color?', { files: [file], source: 1 }, undefined]]);
+  assert.equal(find(render(options), node => node.props?.['aria-label'] === 'JSON preview'), null);
+});
+
+test('TXT, CSV and JSON can share a request, with zero-based JSON selection and one-based form ranges', async () => {
+  setup();
+  const csv = { name: 'readings.csv', type: 'text/csv', size: 28 };
+  const json = { name: 'equipment.json', type: 'application/json', size: 61 };
+  const files = [textFile, csv, json];
+  const options = { onSendTextFiles: (...args) => sent.push(args) };
+  const previewRanges = [];
+  previewJson = async (file, _session, _signal, range) => {
+    assert.equal(file, json);
+    previewRanges.push(range);
+    return { filename: file.name, size_bytes: file.size, headers: ['vibration (mm/s)'],
+      column_types: ['Number'], rows: range ? [['7.1']] : [['7.1'], ['4.6']], row_count: 2, truncated: false };
+  };
+  await selectBatch(render(options), files);
+  let tree = render(options);
+  assert.ok(find(tree, node => node.props?.['aria-label'] === 'Attach TXT, CSV or JSON files'));
+  for (const [index, file] of files.entries()) {
+    assert.ok(find(tree, node => node.type === 'span' && node.props.children.includes(index + 1) &&
+      node.props.children.includes(file.name)));
+  }
+  const item = find(tree, node => node.type === 'li' && find(node, el => el.props?.['aria-label'] === 'Remove source 3'));
+  await find(item, node => node.props?.type === 'radio').props.onChange();
+  for (const label of ['From record index', 'To record index']) {
+    const control = find(find(render(options), node => node.type === 'label' && node.props.children.includes(label)),
+      node => node.props?.type === 'number');
+    assert.equal(control.props.min, 0);
+    assert.equal(control.props.max, 1);
+    control.props.onChange({ target: { value: '0' } });
+  }
+  await find(render(options), node => node.type === 'button' && node.props.children.includes('Preview records')).props.onClick();
+  tree = render(options);
+  assert.deepEqual(previewRanges, [undefined, { start: 1, end: 1 }]);
+  assert.ok(find(tree, node => node.props?.scope === 'row' && node.props.children.includes(0)));
+  question(tree);
+  send(render(options)).props.onClick();
+  assert.deepEqual(sent, [['What color?', { files, source: 3 }, { start: 1, end: 1 }]]);
+});
+
+test('removing one source cancels its pending preview and preserves the remaining file', async () => {
+  setup();
+  const a = { ...textFile };
+  const b = { ...textFile, name: 'other.txt' };
+  const options = { onSendTextFiles: () => assert.fail('batch route was used'), onSendTextFile: (...args) => sent.push(args) };
+  let complete, signal;
+  preview = (file, _session, current) => {
+    if (file === b) {
+      signal = current;
+      return new Promise(resolve => { complete = resolve; });
+    }
+    return Promise.resolve({ filename: a.name, size_bytes: a.size, text: 'first', line_count: 1, truncated: false });
+  };
+  selectBatch(render(options), [a, b]);
+  const item = find(render(options), n => n.type === 'li' && find(n, el => el.props?.['aria-label'] === 'Remove source 2'));
+  const pending = find(item, n => n.props?.type === 'radio').props.onChange();
+  await find(render(options), n => n.props?.['aria-label'] === 'Remove source 2').props.onClick();
+  assert.equal(signal.aborted, true);
+  complete({ filename: b.name, size_bytes: b.size, text: 'late', line_count: 1, truncated: false });
+  await pending;
+  assert.equal(visiblePreview(render(options)).props.children[0], 'first');
+  question(render(options));
+  send(render(options)).props.onClick();
+  assert.deepEqual(sent, [['What color?', a]]);
+});
+
+test('a batch over the size or count limit never previews or sends its files', () => {
+  setup();
+  const options = { onSendTextFiles: () => assert.fail('batch was sent') };
+  const selected = { ...textFile, size: 1500 };
+  for (const [files, message] of [
+    [[selected, selected, selected], 'Combined file data must be at most 4 KiB'],
+    [[textFile, textFile, textFile, textFile], 'Choose up to three files'],
+  ]) {
+    selectBatch(render(options), files);
+    assert.ok(find(render(options), n => n.type === 'span' && String(n.props.children).includes(message)));
+    assert.equal(find(render(options), n => n.props?.['aria-label'] === 'Remove source 1'), null);
+  }
+});
+
 test('file capability gating is independent of text readiness and the picker accepts one file', () => {
   setup();
   const button = tree => find(tree, n => n.props?.['aria-label'] === 'Attach text or CSV file');
@@ -61,6 +200,10 @@ test('gated formats and oversize selections have accurate public errors', () => 
   const error = tree => find(tree, n => n.props?.role === 'alert');
   selectText(render(), { name: 'report.pdf', type: 'application/pdf', size: 12 });
   assert.ok(find(error(render()), n => String(n.props?.children).includes('PDF, DOCX and XLSX chat attachments are unavailable')));
+  selectText(render({ onSendTextFiles() {} }), {
+    name: 'report.xlsx', type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: 12,
+  });
+  assert.ok(find(error(render()), n => String(n.props?.children).includes('XLSX chat attachments are unavailable')));
   selectText(render(), { ...textFile, size: 2049 });
   assert.ok(find(error(render()), n => String(n.props?.children).includes('exceeds 2 KiB')));
 });

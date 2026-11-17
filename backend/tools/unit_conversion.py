@@ -27,12 +27,20 @@ class UnitConversionOutput(BaseModel):
     result: float = Field(allow_inf_nan=False)
 
 
-def convert_units(value: float, from_unit: str, to_unit: str) -> float:
-    source = _UNITS.get(from_unit); target = _UNITS.get(to_unit)
-    if source is None or target is None or source[0] != target[0] or not isfinite(value):
+def unit_scale_factors(from_unit: str, to_unit: str) -> tuple[Decimal, Decimal]:
+    """Return the approved scales to the same base unit."""
+    source, target = _UNITS.get(from_unit), _UNITS.get(to_unit)
+    if source is None or target is None or source[0] != target[0]:
         raise ValueError('Incompatible or invalid units')
+    return source[1], target[1]
+
+
+def convert_units(value: float, from_unit: str, to_unit: str) -> float:
+    if not isfinite(value):
+        raise ValueError('Incompatible or invalid units')
+    source, target = unit_scale_factors(from_unit, to_unit)
     try:
-        result = float(Decimal(str(value)) * source[1] / target[1])
+        result = float(Decimal(str(value)) * source / target)
     except (InvalidOperation, OverflowError) as exc:
         raise ValueError('Conversion unavailable') from exc
     if not isfinite(result) or abs(result) > 1e18:

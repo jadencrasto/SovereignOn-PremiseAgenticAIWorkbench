@@ -9,6 +9,8 @@ const api={createSession:signal=>createImpl(signal),fetchSessions:async()=>({cou
 api.streamChatMultimodal = api.streamChat;
 api.streamChatTextFile = (file, session_id, model, message, callbacks, signal, range) =>
   api.streamChat({ file, session_id, model, message, range }, callbacks, signal);
+api.streamChatTextFiles = (batch, session_id, model, message, callbacks, signal, range) =>
+  api.streamChat({ batch, session_id, model, message, range }, callbacks, signal);
 const chatFile=path.resolve(__dirname,'../src/api/chat.ts');
 const chatOut=ts.transpileModule(fs.readFileSync(chatFile,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
 const chatMod=new Module(chatFile,module);chatMod.filename=chatFile;chatMod.paths=Module._nodeModulePaths(path.dirname(chatFile));const chatRequire=chatMod.require.bind(chatMod);chatMod.require=n=>n==='./client'?{}:chatRequire(n);chatMod._compile(chatOut,chatFile);
@@ -127,12 +129,186 @@ test('conversation switches abort a text-file question and suppress its late ans
 
 const csv = { name: 'readings.csv', type: 'text/csv', size: 54 };
 const rowRange = { start: 2, end: 5 };
+
+test('batch answer is revealed only after matching the terminal source identity', async () => {
+  const { input } = setup();
+  const batch = { files: [csv, { ...csv }], source: 2 };
+  const pending = input.onSendTextFiles('Find the maximum', batch, rowRange);
+  const { payload, callbacks, resolve } = requests[0];
+  assert.deepEqual(payload, { batch, session_id: 'server-session', model: 'fake', message: 'Find the maximum', range: rowRange });
+  callbacks.onDelta('Verified data row');
+  assert.equal(parts().list.messages[1].content, '');
+  callbacks.onDone('server-session', 'Deterministic file analysis', {
+    attachment_id: 'source-2', filename: csv.name, mime_type: 'text/csv', size_bytes: csv.size,
+  });
+  resolve();
+  await pending;
+  assert.equal(parts().list.messages[1].fileSource, 2);
+  assert.equal(parts().list.messages[1].content, 'Verified data row');
+  assert.deepEqual(parts().list.messages[0].attachments.map(file => file.sourceNumber), [1, 2]);
+});
+
+test('a matching filename with a different source number cannot release a batch answer', async () => {
+  const { input } = setup();
+  const pending = input.onSendTextFiles('Find the maximum', { files: [csv, { ...csv }], source: 2 }, rowRange);
+  const { callbacks, resolve } = requests[0];
+  callbacks.onDelta('Withheld unmatched data');
+  callbacks.onDone('server-session', 'Deterministic file analysis', {
+    attachment_id: 'source-1', filename: csv.name, mime_type: 'text/csv', size_bytes: csv.size,
+  });
+  resolve();
+  await pending;
+  const reply = parts().list.messages[1];
+  assert.match(reply.errorMessage, /could not be matched/);
+  assert.equal(reply.content, '');
+  assert.equal(reply.fileSource, undefined);
+});
+
+const txtLimits = { name: 'limits.txt', type: 'text/plain', size: 31 };
+const measurements = { attachment_id: 'source-2', filename: csv.name, mime_type: 'text/csv', size_bytes: csv.size };
+const limitSource = { role: 'limits', attachment_id: 'source-1', filename: txtLimits.name,
+  mime_type: 'text/plain', size_bytes: txtLimits.size };
+
+function thresholdPlan(format) {
+  return { plan: { objective: `Compare TXT limits with ${format} readings`,
+    steps: ['Extract TXT limits', format === 'JSON' ? 'Verify JSON fields and units' : 'Verify CSV columns and units',
+      'Compare readings with limits'].map((description, index) => ({
+      id: 'file_step_' + (index + 1), description, status: 'pending', requires_approval: false,
+    })) } };
+}
+
+test('a cross-file result is released after checking both request-local identities', async () => {
+  const { input } = setup();
+  const pending = input.onSendTextFiles('Compare readings.csv against limits.txt.',
+    { files: [txtLimits, csv], source: 2 }, rowRange);
+  const { callbacks, resolve } = requests[0];
+  const sources = [limitSource, { role: 'measurements', ...measurements }];
+  callbacks.onPlanCreated(thresholdPlan('CSV'));
+  callbacks.onDelta('One of three readings violated the limit.');
+  assert.equal(parts().list.messages[1].content, '');
+  callbacks.onDone('server-session', 'Deterministic file analysis', measurements, sources);
+  resolve();
+  await pending;
+  assert.equal(parts().list.messages[1].content, 'One of three readings violated the limit.');
+  assert.deepEqual(parts().list.messages[1].fileSources, sources);
+});
+
+for (const [scenario, limits] of [
+  ['wrong source ordinal', { ...limitSource, attachment_id: 'source-2' }],
+  ['unexpected filename', { ...limitSource, filename: 'another.txt' }],
+  ['wrong role', { ...limitSource, role: 'measurements' }],
+  ['wrong size', { ...limitSource, size_bytes: 500 }],
+]) {
+  test('cross-file evidence is withheld for ' + scenario, async () => {
+    const { input } = setup();
+    const pending = input.onSendTextFiles('Compare readings.csv against limits.txt.',
+      { files: [txtLimits, csv], source: 2 }, rowRange);
+    const { callbacks, resolve } = requests[0];
+    callbacks.onDelta('Withheld private result');
+    callbacks.onDone('server-session', 'Deterministic file analysis', measurements,
+      [limits, { role: 'measurements', ...measurements }]);
+    resolve();
+    await pending;
+    const reply = parts().list.messages[1];
+    assert.match(reply.errorMessage, /could not be matched/);
+    assert.equal(reply.content, '');
+    assert.equal(reply.fileSources, undefined);
+  });
+}
 const localFilePlan = {
   plan: { objective: 'Analyze the selected CSV rows', steps: [
     { id: 'file_step_1', description: 'Filter selected rows', status: 'pending', requires_approval: false },
     { id: 'file_step_2', description: 'Calculate percentage of valid readings', status: 'pending', requires_approval: false },
   ] },
 };
+
+test('JSON comparison completion verifies the selected format and request-local evidence', async () => {
+  const { input } = setup();
+  const jsonFile = { name: 'equipment.json', type: 'application/json', size: 31 };
+  const batch = { files: [txtLimits, jsonFile], source: 2 };
+  const pending = input.onSendTextFiles('Compare equipment.json against limits.txt.', batch);
+  const { callbacks, resolve } = requests[0];
+  const jsonSource = { role: 'measurements', attachment_id: 'source-2', filename: jsonFile.name,
+    mime_type: 'application/json', size_bytes: jsonFile.size };
+  callbacks.onPlanCreated(thresholdPlan('JSON'));
+  callbacks.onDelta('JSON record index 1 at /equipment/1');
+  assert.equal(parts().list.messages[1].content, '');
+  callbacks.onDone('server-session', 'Deterministic file analysis', jsonSource, [limitSource, jsonSource]);
+  resolve();
+  await pending;
+  assert.equal(parts().list.messages[1].content, 'JSON record index 1 at /equipment/1');
+  assert.deepEqual(parts().list.messages[1].fileSources, [limitSource, jsonSource]);
+  assert.equal(parts().list.messages[0].attachments[1].mimeType, 'application/json');
+});
+
+test('a cross-file plan cannot release a result with only its measurement descriptor', async () => {
+  const { input } = setup();
+  const pending = input.onSendTextFiles('Compare readings.csv against limits.txt.',
+    { files: [txtLimits, csv], source: 2 }, rowRange);
+  const { callbacks, resolve } = requests[0];
+  callbacks.onPlanCreated(thresholdPlan('CSV'));
+  callbacks.onTaskStatus('task_completed', '');
+  callbacks.onDelta('Result missing its limits identity');
+  callbacks.onDone('server-session', 'Deterministic file analysis', measurements);
+  resolve();
+  await pending;
+  const result = parts().list.messages[1];
+  assert.equal(result.content, '');
+  assert.equal(result.plan, undefined);
+  assert.equal(result.workflowStatus, 'interrupted');
+  assert.match(result.errorMessage, /could not be matched/);
+});
+
+for (const [step, reason] of [
+  [1, 'TXT line 3 repeats or conflicts with another limit for the same parameter.'],
+  [2, 'The units on TXT line 2 and JSON field B cannot be compared.'],
+]) {
+  test('a threshold workflow marks step ' + step + ' failed and keeps only the earlier verified progress', async () => {
+    const { input } = setup();
+    const file = { name: 'equipment.json', type: 'application/json', size: 78 };
+    const pending = input.onSendTextFiles('Compare equipment.json against limits.txt.', { files: [txtLimits, file], source: 2 });
+    const { callbacks, resolve } = requests[0];
+    const plan = thresholdPlan('JSON');
+    callbacks.onPlanCreated(plan);
+    if (step === 2) callbacks.onPlanStep({ step_id: 'file_step_1', status: 'completed', summary: 'Explicit limits verified in the selected TXT source: 1.' });
+    callbacks.onPlanStep({ step_id: 'file_step_' + step, status: 'failed' });
+    callbacks.onError(`Step ${step} (${plan.plan.steps[step - 1].description}) did not complete. ${reason}`,
+      { code: 'TEXT_WORKFLOW_STEP_FAILED' });
+    resolve();
+    await pending;
+    const result = parts().list.messages[1];
+    assert.equal(result.content, '');
+    assert.equal(result.workflowStatus, 'failed');
+    assert.match(result.errorMessage, /did not complete/);
+    assert.ok(result.errorMessage.includes(reason));
+    assert.equal(result.plan.steps[step - 1].status, 'failed');
+    assert.equal(result.plan.steps[0].summary !== undefined, step === 2);
+    assert.equal(result.fileSources, undefined);
+  });
+}
+
+test('switching conversations drops buffered JSON comparison evidence and clears the composer', async (t) => {
+  const previous = global.sessionStorage;
+  const writes = [];
+  global.sessionStorage = { setItem: (...args) => writes.push(args), removeItem() {} };
+  t.after(() => { global.sessionStorage = previous; });
+  const { input, tree } = setup();
+  const file = { name: 'equipment.json', type: 'application/json', size: 78 };
+  const pending = input.onSendTextFiles('Compare equipment.json against limits.txt.', { files: [txtLimits, file], source: 2 });
+  const { callbacks, resolve, signal } = requests[0];
+  callbacks.onPlanCreated(thresholdPlan('JSON'));
+  callbacks.onDelta('Private JSON result at /equipment/1');
+  tree.props.children[0].props.children[0].props.children[0].props.onClick();
+  parts().sidebar.onSelectSession({ id: 'other-session', title: 'Other chat', messages: [] });
+  callbacks.onDone('server-session', 'Deterministic file analysis');
+  resolve();
+  await pending;
+  assert.equal(signal.aborted, true);
+  assert.notEqual(parts().input.key, input.key);
+  assert.deepEqual(parts().list.messages, []);
+  assert.ok(writes.every(([key]) => key === 'sovereign-active-conversation:a'));
+  assert.doesNotMatch(JSON.stringify(writes), /Private JSON|equipment\.json/);
+});
 
 test('file plan retains previous verified steps on a terminal failure', async () => {
   const { input } = setup();

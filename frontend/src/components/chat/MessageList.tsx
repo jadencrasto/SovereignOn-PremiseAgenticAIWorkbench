@@ -76,8 +76,8 @@ export const MessageList: React.FC<MessageListProps> = ({
           <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
             <h3 className="font-display text-base font-semibold text-slate-800">Analyze an attachment</h3>
             <p className="font-sans text-sm leading-normal text-slate-600">
-              When the TXT / CSV control is available, attach one file. Ask for a calculation on selected CSV rows
-              or find a passage in TXT.
+              When the TXT / CSV / JSON control is available, attach files and choose a source. Ask for a calculation
+              on selected CSV rows or JSON records, find a passage in TXT, or compare measurements against TXT limits.
             </p>
           </div>
 

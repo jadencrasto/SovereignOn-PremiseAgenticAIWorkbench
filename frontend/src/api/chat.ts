@@ -4,6 +4,7 @@ import type {
   ChatResponsePayload,
   MultimodalChatRequestPayload,
   SourceReference,
+  StreamChunkPayload,
   StreamErrorInfo,
   ToolEvent,
 } from '../types';
@@ -22,7 +23,7 @@ export async function streamChat(
   callbacks: {
     onDelta: (delta: string) => void;
     onSources: (sources: SourceReference[]) => void;
-    onDone: (sessionId: string, modelUsed: string) => void;
+    onDone: (sessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'], fileSources?: StreamChunkPayload['file_sources']) => void;
     onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
@@ -56,7 +57,7 @@ export async function streamChatMultimodal(
   callbacks: {
     onDelta: (delta: string) => void;
     onSources: (sources: SourceReference[]) => void;
-    onDone: (sessionId: string, modelUsed: string) => void;
+    onDone: (sessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'], fileSources?: StreamChunkPayload['file_sources']) => void;
     onError: (error: string, info?: StreamErrorInfo) => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
@@ -114,6 +115,15 @@ export interface TextFileLineRange {
   end: number;
 }
 
+export interface TextFileBatch {
+  files: readonly File[];
+  source: number;
+}
+
+export const MAX_TEXT_ATTACHMENTS = 3;
+export const MAX_TEXT_ATTACHMENT_BYTES = 2048;
+export const MAX_TEXT_ATTACHMENT_TOTAL_BYTES = 4096;
+
 export interface CsvPreview {
   filename: string;
   size_bytes: number;
@@ -132,13 +142,12 @@ function appendTextFileRange(form: FormData, field: 'line' | 'row', range?: Text
 }
 
 function attachmentPreview<T>(file: File, sessionId: string | undefined, signal: AbortSignal,
-  field: 'line' | 'row', range?: TextFileLineRange): Promise<T> {
+  field: 'line' | 'row', range?: TextFileLineRange, format = field === 'row' ? 'csv' : 'text'): Promise<T> {
   const form = new FormData();
   form.append('file', file, file.name);
   if (sessionId) form.append('session_id', sessionId);
   appendTextFileRange(form, field, range);
-  const path = field === 'row' ? '/api/chat/csv-preview' : '/api/chat/text-preview';
-  return apiRequest(path, { method: 'POST', body: form, signal, cache: 'no-store' });
+  return apiRequest('/api/chat/' + format + '-preview', { method: 'POST', body: form, signal, cache: 'no-store' });
 }
 
 export function previewTextFile(file: File, sessionId: string | undefined, signal: AbortSignal, range?: TextFileLineRange) {
@@ -149,10 +158,17 @@ export function previewCsvFile(file: File, sessionId: string | undefined, signal
   return attachmentPreview<CsvPreview>(file, sessionId, signal, 'row', range);
 }
 
+export function previewJsonFile(file: File, sessionId: string | undefined, signal: AbortSignal, range?: TextFileLineRange) {
+  return attachmentPreview<CsvPreview>(file, sessionId, signal, 'row', range, 'json');
+}
+
 export async function streamChatTextFile(
   file: File, sessionId: string, model: string, question: string,
   callbacks: Parameters<typeof streamChat>[1], signal: AbortSignal, range?: TextFileLineRange,
 ): Promise<void> {
+  if (file.name.toLowerCase().endsWith('.json')) {
+    return streamChatTextFiles({ files: [file], source: 1 }, sessionId, model, question, callbacks, signal, range);
+  }
   const form = new FormData();
   form.append('file', file, file.name);
   form.append('session_id', sessionId);
@@ -161,6 +177,22 @@ export async function streamChatTextFile(
   const csvFile = file.name.toLowerCase().endsWith('.csv');
   appendTextFileRange(form, csvFile ? 'row' : 'line', range);
   return streamSSEFromFormData(csvFile ? '/api/chat/csv-file' : '/api/chat/text-file', form, callbacks, signal);
+}
+
+export async function streamChatTextFiles(
+  batch: TextFileBatch, sessionId: string, model: string, question: string,
+  callbacks: Parameters<typeof streamChat>[1], signal: AbortSignal, range?: TextFileLineRange,
+): Promise<void> {
+  const selected = batch.files[batch.source - 1];
+  if (!selected) throw new RangeError('Select one attached source.');
+  const form = new FormData();
+  for (const file of batch.files) form.append('file', file, file.name);
+  form.append('source', String(batch.source));
+  form.append('session_id', sessionId);
+  form.append('model', model);
+  form.append('message', question);
+  appendTextFileRange(form, /\.(?:csv|json)$/i.test(selected.name) ? 'row' : 'line', range);
+  return streamSSEFromFormData('/api/chat/text-attachments', form, callbacks, signal);
 }
 
 export async function fetchSessions(): Promise<{ sessions: string[]; count: number }> {

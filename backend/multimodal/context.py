@@ -5,7 +5,7 @@ from typing import Literal
 
 from backend.models.base import Message
 
-AttachmentKind = Literal['image', 'txt', 'csv']
+AttachmentKind = Literal['image', 'txt', 'csv', 'json']
 
 IMAGE_REATTACH_MESSAGE = (
     "Earlier images are unavailable for follow-up questions. Reattach the image to ask about it."
@@ -52,8 +52,11 @@ _CSV_REFERENCE = re.compile(
 )
 _EARLIER_CSV_REFERENCE = re.compile(r'\b(?:previous|earlier|last|original|old)\s+(?:csv|table|spreadsheet)\b', re.IGNORECASE)
 _NAMED_CSV_REFERENCE = re.compile(r'\b(?:this|that|the|my|attached|uploaded)\s+\.?csv\b', re.IGNORECASE)
+_JSON_REFERENCE = re.compile(r'\b(?:this|that|the|my|previous|earlier|last|original|old|attached|uploaded)\s+'
+                             r'\.?(?:json|JSON)\b|\.json\b', re.IGNORECASE)
+_EARLIER_JSON_REFERENCE = re.compile(r'\b(?:previous|earlier|last|original|old)\s+json\b', re.IGNORECASE)
 _IMMEDIATE_CSV_FOLLOWUP = re.compile(
-    r'^(?:(?:and|now)\s+)?(?:how many (?:data )?rows'
+    r'^(?:(?:and|now)\s+)?(?:how many (?:data )?(?:rows|records)'
     r'|(?:what are|list) (?:the )?(?:column names|columns|headers)'
     r'|what about the (?:first|second|third|last|next)'
     r'|compare (?:it|them|those|these)'
@@ -61,6 +64,8 @@ _IMMEDIATE_CSV_FOLLOWUP = re.compile(
     r'|which of (?:those|these)'
     r'|(?:find|calculate|show) their (?:average|sum|minimum|maximum|total)'
     r'|compare (?:the )?first and second results'
+    r'|which (?:rows|records|readings|measurements|equipment) (?:violated|exceeded|met) (?:it|that limit|the (?:stated )?limits?)'
+    r'|what was (?:the|that) (?:threshold|limit|maximum deviation)'
     r'|(?:calculate|find) (?:the )?(?:average|sum|total) of (?:these|those) (?:values|readings))\b',
     re.IGNORECASE,
 )
@@ -104,6 +109,9 @@ def requires_text_reattachment(history: list[Message], prompt: str, *, current_a
             _is_file_turn(message, 'text/plain') for message in history
         ):
             return True
+        if (_EARLIER_JSON_REFERENCE.search(prompt) or (current_attachment != 'json' and _JSON_REFERENCE.search(prompt))
+                ) and any(_is_file_turn(message, 'application/json') for message in history):
+            return True
         return bool(_EARLIER_CSV_REFERENCE.search(prompt) or (
             current_attachment != 'csv' and _NAMED_CSV_REFERENCE.search(prompt)
         )) and any(_is_file_turn(message, 'text/csv') for message in history)
@@ -112,6 +120,8 @@ def requires_text_reattachment(history: list[Message], prompt: str, *, current_a
         return any(_is_file_turn(message) for message in history)
     if _CSV_REFERENCE.search(prompt) and any(_is_file_turn(message, 'text/csv') for message in history):
         return True
+    if _JSON_REFERENCE.search(prompt) and any(_is_file_turn(message, 'application/json') for message in history):
+        return True
     if re.search(r'\bamong (?:the )?filtered rows\b', prompt, re.I):
         return any(_is_file_turn(message, 'text/csv') for message in history)
     if _IMMEDIATE_TEXT_FILE_FOLLOWUP.match(prompt.strip()):
@@ -119,7 +129,7 @@ def requires_text_reattachment(history: list[Message], prompt: str, *, current_a
         return last_user is not None and _is_file_turn(last_user)
     if _IMMEDIATE_CSV_FOLLOWUP.match(prompt.strip()):
         last_user = next((message for message in reversed(history) if message.role == "user"), None)
-        return last_user is not None and _is_file_turn(last_user, 'text/csv')
+        return last_user is not None and (_is_file_turn(last_user, 'text/csv') or _is_file_turn(last_user, 'application/json'))
     return False
 
 

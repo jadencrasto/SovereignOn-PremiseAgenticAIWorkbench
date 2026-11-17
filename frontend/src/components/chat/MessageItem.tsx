@@ -146,7 +146,7 @@ function FileAnswer({ message }: { message: ChatMessage }) {
       {evidence && (
         <section aria-label="Verified source evidence" className="min-w-0 rounded-lg border border-slate-200 bg-slate-50">
           <h3 className="border-b border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Verified source evidence</h3>
-          <pre tabIndex={0} aria-label="Source columns, rows or lines"
+          <pre tabIndex={0} aria-label={filename?.toLowerCase().endsWith('.json') ? 'Source record indices and field paths' : 'Source columns, rows or lines'}
             className="max-h-72 max-w-full overflow-auto whitespace-pre-wrap p-3 text-xs leading-relaxed [overflow-wrap:anywhere]">
             {evidence}
           </pre>
@@ -189,10 +189,13 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                     className="w-full max-h-48 object-cover rounded-md border border-slate-100"
                   /> : <p className="px-2 text-xs text-slate-500">
                     {att.mimeType === 'text/csv' ? 'CSV · Attach again to ask about it' :
+                      att.mimeType === 'application/json' ? 'JSON · Attach again to ask about it' :
                       att.mimeType === 'text/plain' ? 'Text file · Attach again to ask about it' : 'Image preview unavailable in history'}
                   </p>}
                   <div className="flex items-center justify-between px-2 py-1.5 text-xs font-medium text-slate-700">
-                    <span className="max-w-[180px] break-all">{att.filename}</span>
+                    <span className="max-w-[180px] break-all">
+                      {att.sourceNumber ? 'Source ' + att.sourceNumber + ' · ' : ''}{att.filename}
+                    </span>
                     <span className="text-slate-500">{(att.sizeBytes / 1024).toFixed(0)} KB</span>
                   </div>
                 </div>
@@ -242,7 +245,15 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
       >
         {message.textFileAnswer && !message.withheld && (
           <div className="mb-3 text-xs text-slate-600">
-            {message.fileName && <p className="mb-1 font-semibold text-slate-800 [overflow-wrap:anywhere]">{message.fileName}</p>}
+            {message.fileSources?.length ? (
+              <ul className="mb-1 font-semibold text-slate-800 [overflow-wrap:anywhere]" aria-label="Compared file sources">
+                {message.fileSources.map(source => <li key={source.attachment_id}>
+                  {source.role === 'limits' ? 'Limits' : 'Measurements'} · Source {source.attachment_id.slice(7)} · {source.filename}
+                </li>)}
+              </ul>
+            ) : message.fileName && <p className="mb-1 font-semibold text-slate-800 [overflow-wrap:anywhere]">
+              {message.fileSource ? 'Source ' + message.fileSource + ' · ' : ''}{message.fileName}
+            </p>}
             <p>File results are available in this view only.</p>
           </div>
         )}

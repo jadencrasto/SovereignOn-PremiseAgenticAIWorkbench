@@ -10,7 +10,10 @@ import type { ChatMessage, ImageAttachment, SourceReference, StreamChunkPayload,
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { useWorkbench } from '../../context/WorkbenchContext';
-import { createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, guardChatCallbacks, type TextFileLineRange } from '../../api/chat';
+import {
+  createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, streamChatTextFiles,
+  guardChatCallbacks, type TextFileBatch, type TextFileLineRange,
+} from '../../api/chat';
 import { useAuth } from '../../context/AuthContext';
 import { capabilityFor, chatDisabled, describeCapability, permitsCapability, modelInInventory } from '../../api/capabilities';
 import { approveTaskStep, rejectTaskStep } from '../../api/tasks';
@@ -26,7 +29,22 @@ import {
 function fileTurnError(message: string, info?: StreamErrorInfo): string {
   switch (info?.code) {
     case 'TEXT_FILE_REATTACH_REQUIRED':
-      return 'Reattach the TXT or CSV file and restate any previous filters or row selections in your question.';
+      return 'Reattach the TXT, CSV or JSON sources and restate any previous filters or selections in your question.';
+    case 'TEXT_SOURCE_REQUIRED':
+    case 'TEXT_SOURCE_AMBIGUOUS':
+    case 'TEXT_SOURCE_CONFLICT':
+    case 'TEXT_SOURCE_INVALID':
+      return message || 'Attach the files again and choose the sources needed for your question.';
+    case 'TEXT_CROSS_SOURCE_UNSUPPORTED':
+      return 'Attach TXT limits and CSV or JSON readings for a comparison, or ask about one source.';
+    case 'TEXT_SOURCE_OPERATION_UNSUPPORTED':
+      return 'Ask for a supported calculation or passage lookup on one attached source.';
+    case 'TEXT_ATTACHMENTS_TOO_LARGE':
+      return 'The combined files exceed 4 KiB. Attach smaller files.';
+    case 'TEXT_FORM_TOO_LARGE':
+      return 'The combined upload request is too large. Attach smaller files.';
+    case 'TEXT_SOURCE_UNVERIFIED':
+      return 'The result could not be matched to the selected sources. Attach the files again to retry.';
     case 'TEXT_WORKFLOW_STEP_FAILED':
     case 'TEXT_WORKFLOW_TIMEOUT':
       // The attachment runner exposes a public step description and verified summary.
@@ -40,6 +58,14 @@ function fileTurnError(message: string, info?: StreamErrorInfo): string {
     case 'CSV_INVALID':
     case 'CSV_EMPTY':
       return 'The CSV needs valid comma-delimited rows and unique headers. Check it and attach it again.';
+    case 'JSON_DUPLICATE_KEY':
+      return 'JSON keys must be unique in each object.';
+    case 'JSON_INVALID':
+    case 'JSON_SHAPE':
+    case 'JSON_LIMIT':
+    case 'JSON_AMBIGUOUS_FIELD':
+    case 'JSON_NUMBER':
+      return 'Check the JSON format, unique fields, and supported record and number limits.';
     case 'CSV_RANGE_INVALID':
     case 'TEXT_FILE_RANGE_INVALID':
       return 'Choose and preview a valid range before submitting.';
@@ -48,9 +74,30 @@ function fileTurnError(message: string, info?: StreamErrorInfo): string {
   }
   if (info?.status === 403) return 'You do not have access to file analysis in this session.';
   if (info?.status === 413) return 'The file exceeds the 2 KiB or decoded text limit.';
-  if (info?.status === 415) return 'Choose a supported UTF-8 TXT or CSV file.';
+  if (info?.status === 415) return 'Choose a supported UTF-8 TXT, CSV or JSON file.';
   if (info?.status === 400 || info?.status === 422) return 'Check the file and selected range, then attach it again.';
   return 'We could not answer the file question. Reattach the file to try again.';
+}
+
+function fileAttachmentMime(filename: string) {
+  const name = filename.toLowerCase();
+  return name.endsWith('.json') ? 'application/json' : name.endsWith('.csv') ? 'text/csv' : 'text/plain';
+}
+
+function matchesComparisonSources(batch: TextFileBatch, sources: NonNullable<StreamChunkPayload['file_sources']>): boolean {
+  if (!Array.isArray(sources) || sources.length !== 2) return false;
+  const [limits, measurements] = sources;
+  if (limits?.role !== 'limits' || limits.mime_type !== 'text/plain' ||
+      measurements?.role !== 'measurements' ||
+      !['text/csv', 'application/json'].includes(measurements.mime_type) ||
+      measurements.attachment_id !== 'source-' + batch.source) return false;
+  const number = /^source-([1-3])$/.exec(limits.attachment_id);
+  if (!number || Number(number[1]) === batch.source) return false;
+  const txt = batch.files[Number(number[1]) - 1];
+  const table = batch.files[batch.source - 1];
+  return Boolean(txt && txt.name.toLowerCase().endsWith('.txt') && txt.name === limits.filename &&
+    txt.size === limits.size_bytes && table && fileAttachmentMime(table.name) === measurements.mime_type &&
+    table.name === measurements.filename && table.size === measurements.size_bytes);
 }
 
 export const ChatView: React.FC = () => {
@@ -159,7 +206,7 @@ export const ChatView: React.FC = () => {
    * Core message sender — handles text-only, multimodal, and agent planning paths.
    */
   const handleSendMessage = useCallback(
-    async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange) => {
+    async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange, batch?: TextFileBatch) => {
       if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current) return;
       if (textFile && capabilities?.text_file_understanding !== true) {
         addToast('info', 'Text-file questions require the authenticated local chat-only profile.');
@@ -261,8 +308,11 @@ export const ChatView: React.FC = () => {
           },
         ];
       } else if (textFile) {
-        userAttachments = [{ id: `local_${Math.random().toString(36).slice(2)}`,
-          filename: textFile.name, mimeType: textFile.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'text/plain', sizeBytes: textFile.size }];
+        userAttachments = (batch?.files ?? [textFile]).map((file, index) => ({
+          id: `local_${Math.random().toString(36).slice(2)}`,
+          filename: file.name, mimeType: fileAttachmentMime(file.name),
+          sizeBytes: file.size, sourceNumber: batch ? index + 1 : undefined,
+        }));
       }
 
       const userMsg: ChatMessage = {
@@ -305,9 +355,15 @@ export const ChatView: React.FC = () => {
       const controller = new AbortController();
       abortControllerRef.current = controller;
       let taskCompletionReported = false;
+      let batchAnswer = '';
+      let comparisonPlanned = false;
 
       const callbacks = {
         onDelta: (delta: string) => {
+          if (batch) {
+            batchAnswer += delta;
+            return;
+          }
           setMessages((prev) => {
             const next = prev.map((msg) =>
               msg.id === assistantId
@@ -345,6 +401,10 @@ export const ChatView: React.FC = () => {
         },
         onPlanCreated: (planData: StreamChunkPayload) => {
           if (textFile && (planData.task_id || !Array.isArray(planData.plan?.steps) || !planData.plan.steps.length)) return;
+          if (batch && (planData.plan?.objective === 'Compare TXT limits with CSV readings' ||
+                        planData.plan?.objective === 'Compare TXT limits with JSON readings')) {
+            comparisonPlanned = true;
+          }
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantId
@@ -446,11 +506,25 @@ export const ChatView: React.FC = () => {
           }
           // Successful task events can precede the final text and done event.
         },
-        onDone: (_returnedSessionId: string, modelUsed: string) => {
+        onDone: (returnedSessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'],
+          fileSources?: StreamChunkPayload['file_sources']) => {
+          if (batch) {
+            const selected = batch.files[batch.source - 1];
+            if (!batchAnswer.trim() || returnedSessionId !== sessionId || attachment?.attachment_id !== 'source-' + batch.source ||
+                attachment.filename !== selected.name || attachment.size_bytes !== selected.size ||
+                attachment.mime_type !== fileAttachmentMime(selected.name) ||
+                (comparisonPlanned && fileSources === undefined) ||
+                (fileSources !== undefined && (modelUsed !== 'Deterministic file analysis' ||
+                  !matchesComparisonSources(batch, fileSources)))) {
+              callbacks.onError('', { code: 'TEXT_SOURCE_UNVERIFIED' });
+              return;
+            }
+          }
           setMessages((prev) => {
             const next = prev.map((msg) =>
               msg.id === assistantId
                 ? { ...msg, isStreaming: false, model_used: modelUsed || (textFile ? undefined : selectedModel),
+                    ...(batch ? { content: batchAnswer, fileSource: batch.source, fileSources } : {}),
                     ...(taskCompletionReported && !msg.pendingApproval ? { workflowStatus: 'completed' as const } : {}) }
                 : msg
             );
@@ -478,6 +552,7 @@ export const ChatView: React.FC = () => {
             const next = prev.map((msg) =>
               msg.id === assistantId
                 ? { ...msg, errorMessage: publicError, error: true, isStreaming: false,
+                    ...(info?.code === 'TEXT_SOURCE_UNVERIFIED' ? { plan: undefined } : {}),
                     ...(msg.plan?.steps.some(step => step.status === 'failed') && textFile
                       ? { workflowStatus: 'failed' as const }
                       : msg.workflowStatus === 'planning' || msg.workflowStatus === 'executing'
@@ -496,7 +571,9 @@ export const ChatView: React.FC = () => {
       const guardedCallbacks = guardChatCallbacks(callbacks,
         () => abortControllerRef.current === controller && !controller.signal.aborted);
       try {
-        if (textFile) {
+        if (batch) {
+          await streamChatTextFiles(batch, sessionId, selectedModel, text, guardedCallbacks, controller.signal, lineRange);
+        } else if (textFile) {
           await streamChatTextFile(textFile, sessionId, selectedModel, text, guardedCallbacks, controller.signal, lineRange);
         } else if (image) {
           await streamChatMultimodal(
@@ -911,8 +988,14 @@ export const ChatView: React.FC = () => {
         hasEarlierImage={messages.some(message => message.attachments?.some(file => file.mimeType.startsWith('image/')))}
         hasEarlierTextFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/plain'))}
         hasEarlierCsvFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/csv'))}
+        hasEarlierJsonFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'application/json'))}
         onSendTextFile={capabilities?.text_file_understanding === true
           ? (question, file, range) => handleSendMessage(question, undefined, file, range) : undefined}
+        onSendTextFiles={capabilities?.text_file_understanding === true
+          ? (question, batch, range) => {
+            const file = batch.files[batch.source - 1];
+            if (file) return handleSendMessage(question, undefined, file, range, batch);
+          } : undefined}
         textFileSupported={capabilities?.text_file_understanding === true}
         onSessionExpired={handleSessionExpired}
         sessionId={activeSessionId || undefined}
