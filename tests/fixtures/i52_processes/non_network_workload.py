@@ -2,10 +2,21 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 import uuid
+
+
+def cooperate(operation, binding, channel, parent, native, deadline):
+    """Called only by the reviewed bootstrap after it pins the root channel."""
+    from tools.process_test_supervisor.handoff import CooperativeDescendant, HandoffError
+
+    if binding.op != operation:
+        raise HandoffError('Fixture operation mismatch')
+    command = [sys.executable, '-I', '-B', os.path.abspath(__file__), '--scenario', 'child',
+               '--operation-id', operation]
+    fixture = CooperativeDescendant(binding, parent, native, lambda: native.create_suspended_descendant(command))
+    fixture.run(channel, deadline)
 
 
 def main():
@@ -18,8 +29,7 @@ def main():
     if args.scenario == 'reject_containment':
         return 2  # The controller must not resume this case.
     if args.scenario == 'descendant':
-        subprocess.Popen([sys.executable, '-I', '-B', os.path.abspath(__file__), '--scenario', 'child',
-                          '--operation-id', args.operation_id], close_fds=True)
+        return 2  # The blocked standalone entry has no authenticated bootstrap.
     print(json.dumps({'operation_id': args.operation_id, 'scenario': args.scenario, 'pid': os.getpid()}), flush=True)
     if args.scenario == 'early_exit':
         return 0

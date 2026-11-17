@@ -112,6 +112,49 @@ def test_exited_second_root_is_detected_while_first_listener_is_absent():
     assert c.failure=='child_exited_or_unknown' and fake.stops==[fake.job]
 
 
+def test_second_port_conflict_is_detected_while_first_listener_is_absent():
+    fake = FakeDriver()
+    coordinator = RuntimeCoordinator(fake)
+    coordinator.start({'ready': True}, 0)
+    fake.listeners['frontend'] = 'other'
+    assert coordinator.poll(1) == State.FAILED
+    assert coordinator.failure == 'listener_ownership_unverified'
+    assert fake.probes == [] and fake.stops == [fake.job]
+
+
+def test_second_health_probe_cannot_invalidate_first_listener_and_claim_ready():
+    fake = FakeDriver()
+    coordinator = RuntimeCoordinator(fake)
+    coordinator.start({'ready': True}, 0)
+    fake.make_ready()
+
+    def probe(role):
+        if role == 'frontend':
+            fake.listeners['backend'] = 'other'
+        return True
+
+    fake.health_ready = probe
+    assert coordinator.poll(1) == State.FAILED
+    assert coordinator.failure == 'listener_ownership_changed'
+
+
+def test_listener_is_rechecked_before_its_health_probe():
+    fake = FakeDriver()
+    coordinator = RuntimeCoordinator(fake)
+    coordinator.start({'ready': True}, 0)
+    fake.make_ready()
+
+    def probe(role):
+        fake.probes.append(role)
+        fake.listeners['frontend'] = 'other'
+        return True
+
+    fake.health_ready = probe
+    assert coordinator.poll(1) == State.FAILED
+    assert coordinator.failure == 'listener_ownership_changed'
+    assert fake.probes == ['backend']
+
+
 @pytest.mark.parametrize('stage', ['startup', 'readiness'])
 def test_primary_interruption_survives_cleanup_interruption(stage):
     class PrimaryInterruption(BaseException): pass

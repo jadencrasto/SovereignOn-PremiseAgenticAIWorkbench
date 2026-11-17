@@ -12,6 +12,7 @@ import time
 import uuid
 
 from backend.runtime.windows_job_driver import WindowsJobDriver
+from tools.process_test_supervisor.handoff import ControllerHandoff
 
 
 @dataclass(frozen=True)
@@ -47,13 +48,14 @@ class OuterController:
     This is not evidence of a separate process, independent watchdog or OS
     isolation. A separate outer boundary must bound the controller itself.
     """
-    def __init__(self, driver=None, *, clock=time.monotonic, scenario='descendant'):
+    def __init__(self, driver=None, *, clock=time.monotonic, scenario='descendant', handoff_factory=None):
         if scenario not in SCENARIOS:
             raise ValueError('Unsupported fixture scenario')
         self.operation_id = str(uuid.uuid4())
         self._driver = driver if driver is not None else fixture_driver(scenario, self.operation_id)
         self._scenario = scenario
         self._clock = clock
+        self._handoff_factory = handoff_factory
         self._used = False
 
     def run(self, timeout_seconds):
@@ -65,10 +67,18 @@ class OuterController:
         self._used = True
         deadline = self._clock() + timeout_seconds
         job = None
+        handoff = None
         operation = 'failed'
         cleanup = 'uncertain'
         try:
-            job = self._driver.open_containment()
+            if self._handoff_factory is not None:
+                handoff = self._handoff_factory(self.operation_id, self._scenario, deadline)
+                if (type(handoff) is not ControllerHandoff or handoff.binding.op != self.operation_id
+                        or handoff.binding.scenario != self._scenario or handoff.deadline != deadline):
+                    raise RuntimeError('Authenticated fixture handoff unavailable')
+                handoff.check_peer()
+            job = (self._driver.open_containment() if handoff is None
+                   else self._driver.open_containment(handoff=handoff))
             if job is None:
                 raise RuntimeError('Containment unavailable')
             if self._clock() >= deadline:
@@ -80,7 +90,12 @@ class OuterController:
                     if self._scenario == 'reject_containment':
                         return False
                     return True
-                root = self._driver.start_contained(job, 'backend', before_resume=check_deadline)
+                if handoff is None:
+                    root = self._driver.start_contained(job, 'backend', before_resume=check_deadline)
+                else:
+                    root = self._driver.start_contained(job, 'backend', handoff=handoff)
+                    if self._scenario == 'descendant':
+                        self._driver.adopt_descendant(job, root, handoff)
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     operation = 'deadline_exceeded'
@@ -100,7 +115,10 @@ class OuterController:
             if job is not None:
                 try:
                     if self._driver.stop_containment(job) is True:
-                        cleanup = 'observed'
+                        if handoff is None or handoff.observe_cleanup() is True:
+                            cleanup = 'observed'
                 except Exception:
                     cleanup = 'uncertain'
+            if type(handoff) is ControllerHandoff:
+                handoff.abort()
         return Outcome(self.operation_id, operation, cleanup)

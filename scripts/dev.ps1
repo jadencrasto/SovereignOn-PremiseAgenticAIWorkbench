@@ -1,4 +1,4 @@
-# Sovereign On-Premise Agentic AI Workbench — Dev Server Script (Windows)
+# Sovereign On-Premise Agentic AI Workbench - Dev Server Script (Windows)
 # Starts both backend and frontend dev servers.
 # Usage: .\scripts\dev.ps1
 
@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 # Fail closed until descendant ownership and listener identity are verified.
 # PowerShell jobs alone do not prove that npm/reloader descendants are stopped,
 # and an HTTP response on the expected port does not identify its owner.
-throw 'Development launcher disabled: child-process cleanup and listener ownership are not verified. See APPLICATION_A1_READINESS_REPORT.md.'
+throw 'Development launcher disabled: R5.5 independent pre-resume observer handoff, descendant cleanup, and listener ownership are not verified. See APPLICATION_A1_READINESS_REPORT.md.'
 Set-Location (Split-Path -Parent $PSScriptRoot)
 if (-not (Test-Path 'backend\venv\Scripts\python.exe')) { throw 'Backend virtual environment missing: prepare backend\venv first.' }
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw 'Node.js/npm is missing.' }
@@ -18,7 +18,7 @@ foreach ($port in @(8000, 5173)) {
 }
 Write-Host 'Ollama models are not checked or started; use Check Ollama in the application.'
 
-Write-Host "`n=== Sovereign AI Workbench — Dev Servers ===" -ForegroundColor Cyan
+Write-Host "`n=== Sovereign AI Workbench - Dev Servers ===" -ForegroundColor Cyan
 
 $backendJob = $null
 $frontendJob = $null
@@ -40,7 +40,7 @@ if (Test-Path "frontend\package.json") {
     }
     Write-Host "[OK] Frontend started (Job ID: $($frontendJob.Id))" -ForegroundColor Green
 } else {
-    Write-Host "[SKIP] No frontend/package.json — skipping frontend" -ForegroundColor Yellow
+    Write-Host "[SKIP] No frontend/package.json - skipping frontend" -ForegroundColor Yellow
 }
 
 Write-Host "`n=== Dev servers starting; readiness not yet verified ===" -ForegroundColor Yellow

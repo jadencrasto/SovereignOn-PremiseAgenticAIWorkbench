@@ -107,22 +107,34 @@ class RuntimeCoordinator:
                 if self.driver.is_running(root) is not True:
                     self.failure = 'child_exited_or_unknown'
                     return self._cleanup(failed=True)
+            listener_pending = False
             for role, root in self._roots.items():
                 listener = self.driver.listener_state(self._job, root, role)
                 if listener == 'absent' and self.state == State.STARTING:
-                    return self.state
-                if listener != 'owned':
+                    listener_pending = True
+                elif listener != 'owned':
                     self.failure = 'listener_ownership_unverified'
                     return self._cleanup(failed=True)
-                if self.driver.health_ready(role) is not True:
-                    if self.state == State.READY:
-                        self.failure = 'health_lost_or_unknown'
-                        return self._cleanup(failed=True)
-                    return self.state
+            if listener_pending:
+                return self.state
+
+            healthy = True
+            for role, root in self._roots.items():
                 if self.driver.is_running(root) is not True or self.driver.listener_state(self._job, root, role) != 'owned':
                     self.failure = 'listener_ownership_changed'
                     return self._cleanup(failed=True)
-            self.state = State.READY
+                if self.driver.health_ready(role) is not True:
+                    healthy = False
+                    break
+            for role, root in self._roots.items():
+                if self.driver.is_running(root) is not True or self.driver.listener_state(self._job, root, role) != 'owned':
+                    self.failure = 'listener_ownership_changed'
+                    return self._cleanup(failed=True)
+            if healthy:
+                self.state = State.READY
+            elif self.state == State.READY:
+                self.failure = 'health_lost_or_unknown'
+                return self._cleanup(failed=True)
         except Exception:
             self.failure = 'readiness_check_failed'
             return self._cleanup(failed=True)
