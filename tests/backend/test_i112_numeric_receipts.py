@@ -25,7 +25,7 @@ def test_production_route_chains_verified_results_and_preserves_units(tmp_path):
             for message, result in [
                 ('What is 25 + 17?', 'Result: 42'),
                 ('Multiply that result by 3.', 'Result: 126'),
-                ('Add 5 to that result.', 'Result: 131'),
+                ('Now add 5.', 'Result: 131'),
                 ('Subtract 5 from the previous result.', 'Result: 126'),
                 ('Divide that result by 2.', 'Result: 63.0'),
                 ('Convert that result from kilometres to metres.', 'Result: 63000.0 m'),
@@ -49,7 +49,7 @@ def test_production_route_chains_verified_results_and_preserves_units(tmp_path):
                 effective_owner.reset(token)
             _, events = await turn('Convert that result from metres to kilometres.')
             assert [e['type'] for e in events] == ['error']
-            _, events = await turn('add 5')
+            _, events = await turn('Now, please add 5.')
             assert [(e['type'], e['error_code']) for e in events] == [('error', 'RESULT_REFERENCE_UNAVAILABLE')]
             _, events = await turn('Multiply that result by 3.', session='session-a')
             assert [e['type'] for e in events] == ['error']

@@ -270,7 +270,19 @@ def test_vision_check_is_authenticated_and_selects_only_configured_vision(tmp_pa
             probe.assert_awaited_once_with('http://127.0.0.1:11434/api/tags', 'other-vision:latest', vision=True)
             assert report['selected_vision_model']['state'] == 'available'
             assert report['selected_chat_model']['state'] == 'unknown'
+            assert report['capabilities']['multimodal'] == {
+                'state': 'unknown', 'reason': 'inference_not_checked',
+            }
             assert routes.model_readiness(app.state, 'ollama/vision', 'vision')['state'] == 'unknown'
+            checked_chat = await client.post('/api/health/capabilities/inference-check',
+                params={'vision_model': 'ollama/other-vision'}, json={'model': 'ollama/text'})
+            assert checked_chat.status_code == 200
+            assert checked_chat.json()['capabilities']['multimodal']['state'] == 'available'
+
+            app.state.inference_observation = None
+            current = await client.get('/api/health/capabilities', params={'vision_model': 'ollama/other-vision'})
+            assert current.json()['selected_vision_model']['state'] == 'available'
+            assert current.json()['capabilities']['multimodal']['state'] == 'unknown'
 
     run_offline(run())
 

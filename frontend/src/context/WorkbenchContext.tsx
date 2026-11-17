@@ -59,7 +59,8 @@ function withoutReadiness(report: CapabilityReport, kind: 'chat' | 'vision', id:
   return kind === 'chat' ? {
     ...report, selected_chat_model: { id, ...status },
     capabilities: { ...report.capabilities, chat: status,
-      planning: report.capabilities.planning.state === 'available' ? status : report.capabilities.planning },
+      planning: report.capabilities.planning.state === 'available' ? status : report.capabilities.planning,
+      multimodal: report.capabilities.multimodal.state === 'available' ? status : report.capabilities.multimodal },
   } : {
     ...report, selected_vision_model: { id, ...status },
     capabilities: { ...report.capabilities, multimodal: status },

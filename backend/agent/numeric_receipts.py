@@ -33,7 +33,7 @@ _UNIT_NAMES = {
 
 
 def _phrase(message: str) -> str:
-    return re.sub(r"^please\s+", "", message.strip().lower()).rstrip(".?").rstrip()
+    return re.sub(r"^(?:now,?\s+)?(?:please\s+)?", "", message.strip().lower()).rstrip(".?").rstrip()
 
 
 def requires_prior_numeric_receipt(message: str) -> bool:

@@ -54,6 +54,8 @@ def test_check_success_failure_cancellation_and_concurrency(monkeypatch):
         assert (await check())['selected_chat_model']['state'] == 'available'
         monkeypatch.setattr(routes, 'probe_inference', AsyncMock(return_value=False))
         assert (await check())['selected_chat_model']['reason'] == 'inference_check_failed'
+        monkeypatch.setattr(routes, 'probe_inference', AsyncMock(return_value=True))
+        assert (await check())['selected_chat_model']['reason'] == 'inference_verified'
         started = asyncio.Event()
         async def pending(*args):
             started.set(); await asyncio.sleep(10)
@@ -67,6 +69,69 @@ def test_check_success_failure_cancellation_and_concurrency(monkeypatch):
         with pytest.raises(asyncio.CancelledError): await task
         assert s.inference_observation is None and s.inference_check_in_progress is None
     run_offline(exercise())
+
+
+@pytest.mark.parametrize('header_delay, body_delay, vision, status, expected', [
+    pytest.param(17.42, 0, False, 200, True, id='cold-text'),
+    pytest.param(12.45, 0, True, 200, True, id='cold-vision'),
+    pytest.param(1.22, 0, False, 200, True, id='warm-text'),
+    pytest.param(0, 0, False, None, False, id='connection-refused'),
+    pytest.param(0, 0, False, 404, False, id='missing-model'),
+    pytest.param(31, 0, False, 200, False, id='missing-response-headers'),
+    pytest.param(17, 14, False, 200, False, id='cumulative-deadline'),
+])
+def test_probe_httpx_timeouts_with_simulated_load(monkeypatch, header_delay, body_delay, vision, status, expected):
+    client_type = httpx.AsyncClient
+    model = 'vision:latest' if vision else 'a:latest'
+    requests = []
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        elapsed = 0.0
+
+        def advance(seconds):
+            nonlocal elapsed
+            assert seconds is not None
+            elapsed += seconds
+            return []
+
+        # The timer-only loop advances through scheduled delays without wall-clock waits.
+        monkeypatch.setattr(loop, 'time', lambda: elapsed)
+        monkeypatch.setattr(loop._selector, 'select', advance)
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                await asyncio.sleep(body_delay)
+                yield json.dumps({
+                    'model': model, 'done': True, 'done_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': 'blue' if vision else 'OK'},
+                }).encode()
+
+        async def handle(request):
+            requests.append(request)
+            assert str(request.url) == 'http://127.0.0.1:11434/api/chat'
+            assert request.method == 'POST'
+            assert json.loads(request.content)['keep_alive'] == 0
+            if status is None:
+                raise httpx.ConnectError('Connection refused', request=request)
+            read_timeout = request.extensions['timeout']['read']
+            await asyncio.sleep(min(header_delay, read_timeout))
+            if header_delay > read_timeout:
+                raise httpx.ReadTimeout('No response headers', request=request)
+            return httpx.Response(status, stream=Body())
+
+        def client(**kwargs):
+            assert kwargs['trust_env'] is False and kwargs['follow_redirects'] is False
+            return client_type(transport=httpx.MockTransport(handle), **kwargs)
+
+        monkeypatch.setattr(routes.httpx, 'AsyncClient', client)
+        monkeypatch.setattr(routes.secrets, 'choice', lambda _: 'blue')
+        assert await routes.probe_inference('http://127.0.0.1:11434/api/tags', model, vision=vision) is expected
+        assert elapsed == pytest.approx(min(header_delay + body_delay, routes.INFERENCE_TIMEOUT))
+
+    run_offline(exercise())
+    request, = requests
+    assert request.extensions['timeout'] == httpx.Timeout(float(routes.INFERENCE_TIMEOUT)).as_dict()
 
 
 @pytest.mark.parametrize('payload, expected', [
@@ -86,7 +151,9 @@ def test_bounded_probe_response_and_cleanup(monkeypatch, payload, expected):
         async def aiter_raw(self, chunk_size):
             yield (json.dumps(payload) if isinstance(payload, dict) else payload).encode()
     class Client:
-        def __init__(self, **kwargs): assert kwargs == {'trust_env': False, 'follow_redirects': False}
+        def __init__(self, **kwargs):
+            assert kwargs == {'trust_env': False, 'follow_redirects': False,
+                              'timeout': httpx.Timeout(float(routes.INFERENCE_TIMEOUT))}
         async def __aenter__(self): return self
         async def __aexit__(self, *args): closed.append('client')
         def stream(self, *args, **kwargs): return Reply()
@@ -149,7 +216,7 @@ def test_vision_probe_sends_synthetic_image_and_checks_response(monkeypatch, ans
         return httpx.Response(200, stream=Body())
 
     def client(**kwargs):
-        assert kwargs == {'trust_env': False, 'follow_redirects': False}
+        assert kwargs['trust_env'] is False and kwargs['follow_redirects'] is False
         return client_type(transport=httpx.MockTransport(handle), **kwargs)
 
     monkeypatch.setattr(routes.secrets, 'choice', lambda _: 'blue')

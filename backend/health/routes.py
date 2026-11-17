@@ -154,7 +154,8 @@ def _report(state, selected_model: str | None = None, vision_model: str | None =
     report['capabilities']['chat'] = status.copy()
     report['capabilities']['planning'] = status.copy() if getattr(state, 'planner', None) else {
         'state': 'unavailable', 'reason': 'component_not_initialized'}
-    report['capabilities']['multimodal'] = {'state': vision['state'], 'reason': vision['reason']}
+    image_stage = chat if vision['state'] == 'available' else vision
+    report['capabilities']['multimodal'] = {'state': image_stage['state'], 'reason': image_stage['reason']}
     return report
 
 
@@ -173,7 +174,9 @@ async def probe_inference(target: str, model: str, *, vision: bool = False) -> b
                       'images': [base64.b64encode(buffer.getvalue()).decode('ascii')]}
     try:
         async with asyncio.timeout(INFERENCE_TIMEOUT):
-            async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(float(INFERENCE_TIMEOUT)), trust_env=False, follow_redirects=False,
+            ) as client:
                 async with client.stream('POST', target.removesuffix('/api/tags') + '/api/chat',
                     headers={'Accept-Encoding': 'identity'}, json={'model': model, 'stream': False,
                     'messages': [prompt],

@@ -57,6 +57,22 @@ test('render recovers after a failed backend response', () => {
   assert.match(render(null), /readiness endpoint did not respond/i);
   assert.match(render(fixture()), /Backend startup completed/);
 });
+test('model scanner reports the vision check separately from image chat readiness', () => {
+  const report = fixture();
+  const vision = 'ollama/vision:latest';
+  report.capabilities.multimodal = { state: 'unknown', reason: 'inference_not_checked' };
+  report.vision_models = [vision];
+  report.selected_vision_model = { id: vision, state: 'available', reason: 'inference_verified' };
+  state = { capabilities: report, availableModels: [], defaultModel: 'ollama/qwen:7b',
+    selectedVisionModel: vision, isBackendConnected: true, isCheckingHealth: false };
+  const { ModelScanner } = loadTs('../src/components/models/ModelScanner.tsx', {
+    '../../api/capabilities': helpers,
+    '../../context/WorkbenchContext': { useWorkbench: () => state },
+  });
+  const html = renderToStaticMarkup(React.createElement(ModelScanner));
+  assert.match(html, /completed a recent inference check/);
+  assert.doesNotMatch(html, /not been checked for chat inference/);
+});
 test('an installed alternate model cannot override blocked, unavailable or unknown chat', () => {
   const report = fixture();
   report.capabilities.ollama = { state: 'available', reason: 'inventory_observed' };

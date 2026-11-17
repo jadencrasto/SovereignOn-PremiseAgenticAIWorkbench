@@ -190,6 +190,10 @@ def is_general_knowledge_query(query: str) -> bool:
         return False
 
     # 4. Check for general knowledge phrasing
+    if re.fullmatch(r"(?:hello|hi|hey|howdy)(?:[,\s]+(?:what can you (?:help me with|do)|how are you))?[.!?]*", q):
+        return True
+    if re.fullmatch(r"(?:summari[sz]e|recap)\s+(?:what we discussed|(?:our|this) (?:conversation|discussion))[.!?]*", q):
+        return True
     general_question_starters = [
         r"^what\s+(is|are|was|were)\b",
         r"^define\b",

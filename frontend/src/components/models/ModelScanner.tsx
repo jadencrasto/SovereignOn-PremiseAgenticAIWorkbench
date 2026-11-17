@@ -9,7 +9,7 @@ export const ModelScanner: React.FC = () => {
     selectedVisionModel, setSelectedVisionModel, checkSelectedVision } = useWorkbench();
   const ollama = capabilityFor(capabilities, 'ollama');
   const visionModels = capabilities?.vision_models ?? [];
-  const visionStatus = capabilityFor(capabilities, 'multimodal');
+  const visionStatus = capabilities?.selected_vision_model ?? { state: 'unknown', reason: 'status_pending' } as const;
   const modelKey = (id: string) => {
     const name = id.startsWith('ollama/') ? id.slice('ollama/'.length) : id;
     return name.lastIndexOf(':') > name.lastIndexOf('/') ? name : `${name}:latest`;

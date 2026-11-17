@@ -254,3 +254,55 @@ def test_direct_question_uses_plain_chat_without_tool_dispatch(tmp_path):
             assert 'tool_start' not in response.text
             engine._tool_registry.execute.assert_not_awaited()
     run_offline(run())
+
+
+def test_greeting_and_recap_use_plain_chat_with_owned_history(tmp_path):
+    import httpx
+    from unittest.mock import AsyncMock
+    from backend.models.base import ChatChunk
+    from test_a21_conversation_offline import make_app
+    from test_a22_async_offline import run_offline
+
+    engine = setup_workflow(tmp_path, '[]')
+    engine._max_tool_iterations = 5
+    model_inputs = []
+
+    class Provider:
+        provider_name = 'fake'
+
+        async def chat_stream(self, request):
+            model_inputs.append([(message.role, message.content) for message in request.messages])
+            yield ChatChunk('Synthetic conversational answer.', True)
+
+    engine._router.get_provider_for_model = lambda _: (Provider(), 'fake')
+    engine._tool_registry.execute = AsyncMock()
+    app = make_app(engine)
+    turns = ['Hello, what can you help me with?', 'Explain how centrifugal pumps work.', 'Summarize what we discussed.']
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                                     headers={'Authorization': 'Bearer a'}) as client:
+            for turn in turns:
+                response = await client.post('/api/chat', json={
+                    'session_id': 's', 'message': turn, 'stream': True, 'tools_enabled': True,
+                })
+                assert response.status_code == 200
+                events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+                assert events[-1]['type'] == 'done'
+                assert all(event['type'] in ('delta', 'done') for event in events)
+
+            history = await client.get('/api/chat/sessions/s')
+            assert history.status_code == 200
+            answers = [item for item in history.json()['messages'] if item['role'] == 'assistant']
+            assert len(answers) == len(turns)
+            assert all(item['content'] == 'Synthetic conversational answer.' and not item['withheld']
+                       for item in answers)
+
+    run_offline(run())
+    assert model_inputs[-1] == [
+        ('system', 'Be helpful.'),
+        ('user', turns[0]), ('assistant', 'Synthetic conversational answer.'),
+        ('user', turns[1]), ('assistant', 'Synthetic conversational answer.'),
+        ('user', turns[2]),
+    ]
+    engine._tool_registry.execute.assert_not_awaited()
