@@ -926,9 +926,9 @@ async def _stream_arithmetic_result(
     engine._memory.add_user_message(session_id, user_message)
 
     answer = f"**{result}**"
-    engine._memory.add_assistant_message(session_id, answer, access_provenance={
-        'version': 1, 'kind': 'deterministic_calculation', 'sources': [],
-    })
+    identity = engine._memory.stream_identity(session_id)
+    engine._memory.record_plain_response(session_id, identity, answer,
+                                         producer='calculator', calculation=True)
 
     # This is a direct deterministic calculation, not a registry tool call.
 
@@ -1744,7 +1744,11 @@ async def read_session(
     for message in messages:
         if message.role == 'system':
             continue
-        allowed = (message.role != 'assistant' or engine._memory.verify_independent_plain_chat(session_id, message) or may_read_assistant(message, doc_service, clearance))
+        if message.role == 'assistant':
+            allowed = (engine._memory.verify_assistant_provenance(session_id, message)
+                       or may_read_assistant(message, doc_service, clearance))
+        else:
+            allowed = 'access_provenance_v1' not in message.extra_fields
         attachments = message.extra_fields.get('attachments_v1')
         attachment = (safe_image_attachment(attachments[0])
                       if message.role == 'user' and isinstance(attachments, list) and len(attachments) == 1 else None)

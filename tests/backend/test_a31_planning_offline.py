@@ -209,6 +209,9 @@ def test_direct_arithmetic_does_not_fabricate_tool_event(tmp_path):
         events=immediate(run())
         assert [e['type'] for e in events]==['delta','done']
         assert '42' in events[0]['content']
+        answer = engine._memory.get_history('s')[-1]
+        assert engine._memory.verify_assistant_provenance('s', answer)
+        assert 'tool_events_v1' not in answer.extra_fields
     finally: effective_owner.reset(owner)
 
 

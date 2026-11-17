@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     tasks_dir: Path = Field(default=PROJECT_ROOT / "data" / "tasks")
     tasks_db_path: Path = Field(default=PROJECT_ROOT / "data" / "tasks" / "tasks.db")
     conversation_memory_path: Optional[Path] = Field(default=None, description="Optional explicit conversation JSON path; defaults to existing local storage.")
+    provenance_key_mode: str = Field(
+        default="ephemeral", description="Assistant provenance key mode. Durable startup requires an independently approved protected store."
+    )
     approval_timeout_seconds: int = Field(default=300)
     max_plan_steps: int = Field(default=10)
     tool_timeout_seconds: int = Field(default=30)

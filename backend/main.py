@@ -39,6 +39,7 @@ from backend.utils.logging import request_id_ctx, setup_logging
 from backend.models.router import ModelRouter
 from backend.agent.memory import ConversationMemory
 from backend.agent.engine import AgentEngine
+from backend.security.provenance_keystore import KeyStoreError, startup_provenance_keys
 from backend.rag.embeddings import EmbeddingService
 from backend.rag.store import VectorStore
 from backend.rag.retriever import Retriever
@@ -497,7 +498,14 @@ async def lifespan(app: FastAPI):
 async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     active_settings = getattr(app.state, "settings", settings)
 
-    # 0. Fail-fast configuration validation
+    # Reject blocked provenance modes before configuration validation touches storage.
+    # No native provider is registered until the protected storage boundary is approved.
+    try:
+        provenance_keys = startup_provenance_keys(active_settings.provenance_key_mode)
+    except KeyStoreError as exc:
+        logger.error("Assistant provenance startup blocked (%s)", exc.code.value)
+        raise
+
     validator = ConfigValidator(active_settings)
     validator.enforce_or_exit()
 
@@ -557,8 +565,7 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     # ---- Conversation memory ----
     from backend.agent.conversation_registry import ConversationRegistry
     conversation_registry = ConversationRegistry(active_settings.tasks_db_path)
-    memory_path = active_settings.conversation_memory_path
-    memory = ConversationMemory(storage_file=memory_path) if memory_path is not None else ConversationMemory()
+    memory = ConversationMemory(storage_file=active_settings.conversation_memory_path, provenance_keys=provenance_keys)
     memory.attach_security_registry(conversation_registry)
     app.state.conversation_registry = conversation_registry
 

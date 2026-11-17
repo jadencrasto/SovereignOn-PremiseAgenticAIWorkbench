@@ -41,21 +41,18 @@ def test_artifact_routes_enforce_owner_task_and_admin(tmp_path):
     app.dependency_overrides[get_current_user] = lambda: identity['user']
     with TestClient(app) as client:
         response = client.get('/api/artifacts')
-        assert response.status_code == 200
-        assert [item['filename'] for item in response.json()['artifacts']] == ['a.txt']
-        assert 'path' not in response.json()['artifacts'][0]
-        assert client.get('/api/artifacts/a.txt').status_code == 200
-        assert client.get('/api/artifacts/a.txt/preview').status_code == 200
-        for name in ('b.txt', 'legacy.txt', 'bad-task.txt'):
+        assert response.status_code == 503
+        assert response.headers.get('X-Error-Code') == 'ARTIFACT_UNAVAILABLE'
+        for name in ('a.txt', 'b.txt', 'legacy.txt', 'bad-task.txt'):
             assert client.get(f'/api/artifacts/{name}').status_code == 404
             assert client.get(f'/api/artifacts/{name}/preview').status_code == 404
         assert client.get('/api/artifacts/%2e%2e%5csecret').status_code in (400, 404)
         identity['user'] = user('b', 'viewer')
-        assert client.get('/api/artifacts/b.txt').status_code == 200
+        assert client.get('/api/artifacts/b.txt').status_code == 404
         assert client.get('/api/artifacts/a.txt').status_code == 404
         identity['user'] = user('root', 'admin')
-        assert client.get('/api/artifacts/a.txt').status_code == 200
-        assert client.get('/api/artifacts/legacy.txt').status_code == 200
+        assert client.get('/api/artifacts/a.txt').status_code == 404
+        assert client.get('/api/artifacts/legacy.txt').status_code == 404
         assert client.get('/api/artifacts/bad-task.txt').status_code == 404
 
 
@@ -71,10 +68,10 @@ def test_source_policy_clearance_reclassification_and_missing(tmp_path):
         levels = {'viewer':1, 'operator':2, 'admin':3}
         service.get_document_details.side_effect = lambda document_id, user_clearance: (
             docs.get(document_id) if levels[user_clearance] >= levels[classification[document_id]] else None)
-        assert may_read_assistant(msg, service, 'admin')
+        assert not may_read_assistant(msg, service, 'admin')
         assert not may_read_assistant(msg, service, 'viewer')
         classification['d2'] = 'viewer'
-        assert may_read_assistant(msg, service, 'viewer')
+        assert not may_read_assistant(msg, service, 'viewer')
         classification['d2'] = 'admin'  # reclassification after an answer was saved
         assert not may_read_assistant(msg, service, 'viewer')
         docs['d2'] = None  # deleted source: fail closed for every clearance
@@ -110,8 +107,20 @@ def test_attachment_descriptor_is_owner_bound_and_contains_no_bytes(tmp_path):
     finally:
         effective_owner.reset(token)
 
-@pytest.mark.asyncio
-async def test_plain_chat_records_provenance_and_excludes_old_assistant_context(tmp_path):
+def immediate(coro):
+    import sniffio
+    token = sniffio.current_async_library_cvar.set('asyncio')
+    try:
+        try:
+            coro.send(None)
+        except StopIteration as done:
+            return done.value
+        raise AssertionError('unexpected asynchronous suspension')
+    finally:
+        sniffio.current_async_library_cvar.reset(token)
+
+
+def test_plain_chat_records_provenance_and_excludes_old_assistant_context(tmp_path):
     from unittest.mock import AsyncMock
     from backend.agent.engine import AgentEngine
     from backend.config import Settings
@@ -125,7 +134,7 @@ async def test_plain_chat_records_provenance_and_excludes_old_assistant_context(
         provider.chat = AsyncMock(return_value=ChatResponse(content='grounded', model='synthetic', provider='fake'))
         engine = AgentEngine(Settings(), router, memory)
         engine._retrieve_context = AsyncMock(return_value=[SimpleNamespace(document_id='d1', chunk_id='c1', page=1, filename='fixture', score=0.2, text='synthetic source')])
-        await engine.chat('s', 'question', user_clearance='admin')
+        immediate(engine.chat('s', 'question', user_clearance='admin'))
         sent = provider.chat.call_args.args[0].messages
         assert all('legacy confidential' not in message.content for message in sent)
         saved = ConversationMemory(tmp_path/'memory.json').get_history('s')[-1]

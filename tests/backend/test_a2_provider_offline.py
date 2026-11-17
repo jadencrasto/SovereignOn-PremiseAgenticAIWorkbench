@@ -219,7 +219,7 @@ def test_provider_closes_line_iterator_on_consumer_cancellation(monkeypatch):
     assert closed == [True]
 
 
-def test_real_engine_does_not_persist_incomplete_stream():
+def test_real_engine_does_not_persist_incomplete_stream_as_completed():
     engine = AgentEngine.__new__(AgentEngine)
     engine._ensure_session = MagicMock()
     engine._memory = MagicMock()
@@ -235,7 +235,10 @@ def test_real_engine_does_not_persist_incomplete_stream():
     async def collect(): return [x async for x in engine.chat_stream('s', 'hello')]
     with pytest.raises(RuntimeError, match='interrupted'):
         immediate(collect())
-    engine._memory.add_assistant_message.assert_not_called()
+    engine._memory.record_plain_response.assert_called_once_with(
+        's', engine._memory.stream_identity.return_value, '',
+        status='failed', producer=None, access_provenance=None,
+    )
 
 
 def test_engine_streams_and_rejects_split_tool_syntax():
@@ -253,8 +256,14 @@ def test_engine_streams_and_rejects_split_tool_syntax():
     async def collect(engine): return [x async for x in engine.chat_stream('s', 'hello')]
     engine = make_engine([ChatChunk('Hello ', False), ChatChunk('world!', True)])
     assert immediate(collect(engine)) == ['H', 'ello world!', []]
-    engine._memory.add_assistant_message.assert_called_once()
+    engine._memory.record_plain_response.assert_called_once_with(
+        's', engine._memory.stream_identity.return_value, 'Hello world!',
+        status=None, producer=None, access_provenance=None,
+    )
     engine = make_engine([ChatChunk('text <tool_', False), ChatChunk('call>{}</tool_call>', True)])
     with pytest.raises(RuntimeError, match='Invalid'):
         immediate(collect(engine))
-    engine._memory.add_assistant_message.assert_not_called()
+    engine._memory.record_plain_response.assert_called_once_with(
+        's', engine._memory.stream_identity.return_value, '',
+        status='failed', producer=None, access_provenance=None,
+    )

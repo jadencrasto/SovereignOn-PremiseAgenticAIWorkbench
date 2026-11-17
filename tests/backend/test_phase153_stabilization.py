@@ -33,11 +33,11 @@ def test_authorized_source_independent_turn_remains_in_model_context(tmp_path):
     try:
         memory = ConversationMemory(tmp_path / 'memory.json')
         memory.create_session(session_id='s')
-        memory.add_assistant_message('s', 'previous calculation', access_provenance={
-            'version':1, 'kind':'deterministic_calculation', 'sources':[]})
+        memory.record_plain_response('s', memory.stream_identity('s'), 'previous calculation',
+                                     producer='calculator', calculation=True)
         memory.add_assistant_message('s', 'unverified historical text')
         memory.add_assistant_message('s', 'invalid calculation', access_provenance={
-            'version':1, 'kind':'deterministic_calculation', 'sources':[{'document_id':'d','chunk_id':'c'}]})
+            'version':1, 'kind':'deterministic_calculation', 'sources':[]})
         memory.add_assistant_message('s', 'source-derived prior answer', access_provenance={
             'version':1, 'kind':'plain_chat', 'sources':[{'document_id':'d','chunk_id':'c'}]})
         memory.add_user_message('s', 'continue')

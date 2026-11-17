@@ -21,14 +21,10 @@ def may_read_assistant(message, doc_service, clearance):
     provenance = message.extra_fields.get('access_provenance_v1')
     if not isinstance(provenance, dict) or provenance.get('version') != 1:
         return False
-    if provenance.get('kind') not in ('plain_chat', 'deterministic_calculation'):
+    if provenance.get('kind') != 'plain_chat':
         return False
     refs = provenance.get('sources')
-    if not isinstance(refs, list) or len(refs) > 64:
-        return False
-    if provenance['kind'] == 'plain_chat' and not refs:
-        return False
-    if provenance['kind'] == 'deterministic_calculation' and refs:
+    if not isinstance(refs, list) or not 0 < len(refs) <= 64:
         return False
     for ref in refs:
         from backend.security.provenance_foundation import document_content_allowed

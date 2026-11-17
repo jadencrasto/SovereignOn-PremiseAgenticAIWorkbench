@@ -218,6 +218,7 @@ class AgentEngine:
 
         self._ensure_session(session_id)
         self._memory.add_user_message(session_id, user_message)
+        origin_identity = self._memory.stream_identity(session_id)
 
         provider, model_name = self._router.get_provider_for_model(model_id)
 
@@ -240,9 +241,8 @@ class AgentEngine:
         if "<tool_call" in response.content.lower() or "</tool_call" in response.content.lower():
             raise RuntimeError("Invalid model response")
 
-        from backend.security.conversation_access import source_provenance
-        provenance = self._plain_response_provenance(session_id, response.content, sources, independent)
-        self._memory.add_assistant_message(session_id, response.content, access_provenance=provenance)
+        self._record_plain_response(session_id, origin_identity, response.content, sources,
+                                    independent, provider.provider_name, model_name)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -269,6 +269,7 @@ class AgentEngine:
 
         self._ensure_session(session_id)
         self._memory.add_user_message(session_id, user_message)
+        origin_identity = self._memory.stream_identity(session_id)
 
         provider, model_name = self._router.get_provider_for_model(model_id)
 
@@ -296,7 +297,6 @@ class AgentEngine:
         emitted = []
         completed = False
         pending = ""
-        origin_identity = self._memory.stream_identity(session_id)
         try:
             async with aclosing(provider.chat_stream(request)) as provider_stream:
                 async for chunk in provider_stream:
@@ -321,18 +321,17 @@ class AgentEngine:
             # Do not persist the withheld detection buffer or mask the original failure.
             try:
                 partial = ''.join(emitted)
-                provenance = self._plain_response_provenance(session_id, partial, sources, independent)
-                self._memory.record_incomplete_plain_response(
-                    session_id, origin_identity, partial,
-                    'failed' if isinstance(exc, Exception) else 'interrupted', provenance)
+                self._record_plain_response(
+                    session_id, origin_identity, partial, sources, independent,
+                    provider.provider_name, model_name,
+                    status='failed' if isinstance(exc, Exception) else 'interrupted')
             except Exception:
                 logger.warning('Could not persist incomplete response', exc_info=True)
             raise
 
         full_response = "".join(accumulated)
-        from backend.security.conversation_access import source_provenance
-        provenance = self._plain_response_provenance(session_id, full_response, sources, independent)
-        self._memory.add_assistant_message(session_id, full_response, access_provenance=provenance)
+        self._record_plain_response(session_id, origin_identity, full_response, sources,
+                                    independent, provider.provider_name, model_name)
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -5990,6 +5989,8 @@ class AgentEngine:
             return None
         try:
             identity = self._memory.stream_identity(session_id)
+            if not all(identity):
+                return None
             for message in messages:
                 if message.images:
                     return None
@@ -6005,16 +6006,14 @@ class AgentEngine:
         except (PermissionError, AttributeError, TypeError):
             return None
 
-    def _plain_response_provenance(self, session_id, content, sources, identity):
+    def _record_plain_response(self, session_id, identity, content, sources, independent,
+                               provider_name, model_name, *, status=None):
         from backend.security.conversation_access import source_provenance
         from backend.security.provenance_foundation import document_content_allowed
-        if identity is not None and not document_content_allowed():
-            try:
-                if self._memory.stream_identity(session_id) == identity:
-                    return self._memory.sign_independent_plain_chat(session_id, content)
-            except PermissionError:
-                raise
-        return source_provenance(sources)
+        producer = (f'{provider_name}/{model_name}'
+                    if independent is not None and independent == identity and not document_content_allowed() else None)
+        self._memory.record_plain_response(session_id, identity, content, status=status,
+                                           producer=producer, access_provenance=source_provenance(sources))
 
     def _build_messages(
         self,
@@ -6038,21 +6037,16 @@ class AgentEngine:
         the model cannot be confused by instructions inside documents.
         """
         from backend.multimodal.context import request_scoped_history
-        from backend.security.conversation_access import may_read_assistant
         history = []
         for message in request_scoped_history(self._memory.get_history(session_id),
                                               current_image_turn=current_image_turn):
             if message.role != 'assistant':
-                history.append(message)
+                if 'access_provenance_v1' not in message.extra_fields:
+                    history.append(message)
                 continue
             if message.extra_fields.get('response_state_v1') in ('interrupted', 'failed'):
                 continue
-            provenance = message.extra_fields.get('access_provenance_v1')
-            # Only the deterministic calculator has verified independent inputs.
-            # Source-derived, tool and legacy output need transitive lineage first.
-            if (self._memory.verify_independent_plain_chat(session_id, message)
-                    or (isinstance(provenance, dict) and provenance.get('kind') == 'deterministic_calculation'
-                        and may_read_assistant(message, None, 'viewer'))):
+            if self._memory.verify_assistant_provenance(session_id, message):
                 history.append(message)
 
         if not sources:

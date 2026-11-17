@@ -138,8 +138,8 @@ def test_incomplete_provenance_binds_status_identity_and_content(tmp_path):
     try:
         memory.prepare_new_chat('s', 'a', 'Be helpful.')
         identity = memory.stream_identity('s')
-        proof = memory.sign_independent_plain_chat('s', 'partial')
-        original = memory.record_incomplete_plain_response('s', identity, 'partial', 'interrupted', proof)
+        original = memory.record_plain_response('s', identity, 'partial', status='interrupted',
+                                                producer='fake/fake')
         assert memory.verify_independent_plain_chat('s', original)
         for change in ('status', 'remove_status', 'id', 'timestamp', 'content'):
             altered = deepcopy(original)
@@ -228,9 +228,10 @@ def test_calculator_result_is_present_in_next_provider_input(tmp_path):
     try:
         memory.prepare_new_chat('s','a','Be helpful.')
         memory.add_user_message('s', 'What is 25 + 17?')
-        memory.add_assistant_message('s','42',access_provenance={'version':1,'kind':'deterministic_calculation','sources':[]})
+        memory.record_plain_response('s', memory.stream_identity('s'), '42',
+                                     producer='calculator', calculation=True)
         immediate(engine.chat('s','Multiply that result by 2.'))
         assert ('assistant','42') in captured[-1]
-        # Existing calculator provenance is not an ephemeral proof; output is withheld.
+        # A calculator proof does not establish independent plain-chat lineage.
         assert not memory.verify_independent_plain_chat('s', memory.get_history('s')[-1])
     finally: effective_owner.reset(token)
