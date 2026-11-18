@@ -11,6 +11,7 @@ from backend.multimodal import document_source_recovery as recovery
 from backend.multimodal import document_transport
 from backend.multimodal.document_source_approvals import DeploymentSourceApprovals
 from backend.multimodal.document_source_authority import LocalSourceAuthority
+from recovery_custody_fixture import restore_with_checkpoint
 from test_a22_async_offline import run_offline
 from test_r848_document_agent_lease_offline import app_engine, denied, host  # noqa: F401
 from test_r856_source_approvals_offline import deployment, establish, execute  # noqa: F401
@@ -39,10 +40,10 @@ def test_other_app_and_startup_stay_quarantined_until_checkpoint_matches(deploym
             unavailable(lambda: bound.get_approved_source(*arguments))
             unavailable(lambda: DeploymentSourceApprovals(app))
             unavailable(lambda: DeploymentSourceApprovals(maintenance_app(other.state.settings.tasks_db_path)))
-            unavailable(lambda: recovery.validate_source_restore(other, trusted_checkpoint=None))
-            unavailable(lambda: recovery.validate_source_restore(other, trusted_checkpoint='0' * 64))
+            unavailable(lambda: restore_with_checkpoint(other, trusted_checkpoint=None))
+            unavailable(lambda: restore_with_checkpoint(other, trusted_checkpoint='0' * 64))
             unavailable(lambda: DeploymentSourceApprovals(app))
-            recovery.validate_source_restore(other, trusted_checkpoint=checkpoint)
+            restore_with_checkpoint(other, trusted_checkpoint=checkpoint)
             unavailable(lambda: bound.get_approved_source(*arguments))
         unavailable(approvals.source_provider)
         fresh = DeploymentSourceApprovals(app).source_provider()
@@ -56,23 +57,23 @@ def test_validation_cannot_clear_a_newer_declaration(deployment, monkeypatch):
     _, _, owner, _, _ = deployment
     app = owner.app
     other = maintenance_app(app.state.settings.tasks_db_path)
-    original = recovery._checkpoint
+    original = recovery._scan_checkpoint
 
     async def run():
         await establish(deployment)
         checkpoint = recovery.capture_source_checkpoint(app)
         recovery.quarantine_source_authority(app)
 
-        def redeclare(database):
-            result = original(database)
+        def redeclare(connection, deadline):
+            result = original(connection, deadline)
             recovery.quarantine_source_authority(other)
             return result
 
         with monkeypatch.context() as interleaved:
-            interleaved.setattr(recovery, '_checkpoint', redeclare)
-            unavailable(lambda: recovery.validate_source_restore(app, trusted_checkpoint=checkpoint))
+            interleaved.setattr(recovery, '_scan_checkpoint', redeclare)
+            unavailable(lambda: restore_with_checkpoint(app, trusted_checkpoint=checkpoint))
         unavailable(lambda: DeploymentSourceApprovals(app))
-        recovery.validate_source_restore(other, trusted_checkpoint=checkpoint)
+        restore_with_checkpoint(other, trusted_checkpoint=checkpoint)
         assert isinstance(DeploymentSourceApprovals(app), DeploymentSourceApprovals)
 
     run_offline(run())
@@ -159,8 +160,8 @@ def test_worker_restart_and_buffered_release_respect_shared_quarantine(tmp_path)
         blocked = restarted.call('run')
         assert_no_evidence(blocked)
         assert blocked['reads'] == 0
-    unavailable(lambda: recovery.validate_source_restore(maintenance, trusted_checkpoint=None))
-    recovery.validate_source_restore(maintenance, trusted_checkpoint=checkpoint)
+    unavailable(lambda: restore_with_checkpoint(maintenance, trusted_checkpoint=None))
+    restore_with_checkpoint(maintenance, trusted_checkpoint=checkpoint)
     with open_worker(tmp_path) as recovered:
         assert recovered.call('attach', **seed) == {'state': 'attached'}
         assert recovered.call('run')['evidence'] is True

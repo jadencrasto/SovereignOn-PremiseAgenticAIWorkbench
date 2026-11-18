@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 from starlette.applications import Starlette
 
+from recovery_custody_fixture import restore_with_checkpoint
+
 from backend.multimodal import document_source_recovery as recovery
 from backend.multimodal.document_reasoning import ReasoningError
 from backend.multimodal.document_source_approvals import DeploymentSourceApprovals
@@ -29,14 +31,14 @@ def provisioned(tmp_path):
 def test_stale_validator_cannot_reopen_completed_restore(provisioned, use_current_checkpoint):
     app, database, checkpoint = provisioned
     recovery.quarantine_source_authority(app)
-    recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+    restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
     ready_approvals = DeploymentSourceApprovals(app)
     path = recovery._coordination_path(database)
     ready = recovery._read_shared_state(path)
     stale = _app(database, declare=True)
 
     with pytest.raises(ReasoningError) as denied:
-        recovery.validate_source_restore(stale, trusted_checkpoint=checkpoint if use_current_checkpoint else None)
+        restore_with_checkpoint(stale, trusted_checkpoint=checkpoint if use_current_checkpoint else None)
     assert denied.value.code == 'AUTHORIZATION_UNAVAILABLE'
     assert recovery._read_shared_state(path) == ready
     ready_approvals.source_provider()
@@ -47,7 +49,7 @@ def test_validator_does_not_create_missing_shared_state(provisioned):
     path = recovery._coordination_path(database)
     path.unlink()
     with pytest.raises(ReasoningError) as denied:
-        recovery.validate_source_restore(_app(database, declare=True), trusted_checkpoint=checkpoint)
+        restore_with_checkpoint(_app(database, declare=True), trusted_checkpoint=checkpoint)
     assert denied.value.code == 'AUTHORIZATION_UNAVAILABLE'
     assert not path.exists()
 
@@ -66,7 +68,7 @@ def test_startup_flag_cannot_overwrite_newer_restore_state(provisioned, monkeypa
             interleaved.setattr(recovery, '_read_shared_state', read_state)
             recovery.quarantine_source_authority(app)
             if recover_before_startup_resumes:
-                recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+                restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
         committed_elsewhere.append(read_state(path))
         return seen
 
@@ -82,4 +84,4 @@ def test_startup_flag_cannot_overwrite_newer_restore_state(provisioned, monkeypa
     if recover_before_startup_resumes:
         DeploymentSourceApprovals(app).source_provider()
     else:
-        recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+        restore_with_checkpoint(app, trusted_checkpoint=checkpoint)

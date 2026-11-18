@@ -1,7 +1,7 @@
 """Offline restore validation for deployment-owned source metadata.
 
-The expected checkpoint is retained independently by deployment operations.
-Neither SQLite nor this process can attest to an undeclared database rollback.
+An external deployment authority authenticates the expected checkpoint and its
+freshness. SQLite cannot attest to undeclared rollback of all trust domains.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from uuid import uuid4
 from starlette.applications import Starlette
 
 from backend.agent.sqlite_transaction import immediate_transaction, read_only_connection
+from backend.multimodal.document_checkpoint_custody import CheckpointCustody
 from backend.multimodal.document_transport import _error
 
 
@@ -41,6 +42,8 @@ class MaintenanceObservation:
     active: bool
     registered_workers: int | None
     awaiting_shutdown: int | None
+    supervisor_registered: bool = False
+    supervisor_workers: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,10 +177,15 @@ def _check_barrier(connection: sqlite3.Connection, state: _RecoveryState) -> str
 
 
 def _require_drained_for_validation(connection: sqlite3.Connection, state: _RecoveryState) -> None:
+    from backend.multimodal.document_recovery_supervisor import supervisor_diagnostics
+
     if _check_barrier(connection, state) is not None or (
         _has_table(connection, 'source_recovery_workers')
         and connection.execute('SELECT 1 FROM source_recovery_workers LIMIT 1').fetchone() is not None
     ):
+        raise _error('AUTHORIZATION_UNAVAILABLE')
+    # An empty supervisor still owns admission. Require its explicit release.
+    if supervisor_diagnostics(connection, None)[0]:
         raise _error('AUTHORIZATION_UNAVAILABLE')
 
 
@@ -197,13 +205,19 @@ def _nonce_hash(worker: _WorkerRegistration) -> str:
 
 def register_recovery_worker(app: Starlette) -> _WorkerRegistration:
     """Admit the owning lifespan before it opens the application database."""
+    from backend.multimodal.document_recovery_supervisor import claim_worker
+
     if getattr(app.state, 'source_recovery_registration', None) is not None:
         raise _error('AUTHORIZATION_UNAVAILABLE')
     loop = asyncio.get_running_loop()
     database = Path(app.state.settings.tasks_db_path).resolve()
     path = _coordination_path(database)
     declared = getattr(app.state.settings, 'document_source_restore_pending', False)
-    _initialize_shared_state(database, path, pending=bool(declared), provision_database=True)
+    admission = getattr(app.state, 'source_supervisor_admission', None)
+    if admission is None:
+        _initialize_shared_state(database, path, pending=bool(declared), provision_database=True)
+    elif not database.is_file():
+        raise _error('AUTHORIZATION_UNAVAILABLE')
     try:
         with immediate_transaction(path, require_existing=True) as connection:
             state = _read_state(connection)
@@ -213,11 +227,14 @@ def register_recovery_worker(app: Starlette) -> _WorkerRegistration:
             if connection.execute('SELECT COUNT(*) FROM source_recovery_workers').fetchone()[0] >= _MAX_WORKERS:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
             worker = _WorkerRegistration(database, uuid4().hex, os.getpid(), state.generation, uuid4().hex, app, loop)
+            claim_worker(connection, worker, state)
             connection.execute('INSERT INTO source_recovery_workers VALUES (?, ?, ?, ?, NULL)', (
                 worker.worker_id, worker.pid, worker.startup_generation, _nonce_hash(worker),
             ))
     except (OSError, sqlite3.Error):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
+    if admission is not None:
+        del app.state.source_supervisor_admission
     app.state.source_recovery_registration = worker
     app.state.source_recovery_documents_installed = False
     return worker
@@ -226,6 +243,7 @@ def register_recovery_worker(app: Starlette) -> _WorkerRegistration:
 def acknowledge_recovery_worker_shutdown(app: Starlette, worker: _WorkerRegistration) -> None:
     """Record an owning lifespan's completed shutdown. Absence or expiry proves nothing."""
     from backend.agent.deployment_documents import inspect_document_worker
+    from backend.multimodal.document_recovery_supervisor import record_worker_shutdown
 
     if (worker.app is not app or worker.loop is not asyncio.get_running_loop()
             or getattr(app.state, 'source_recovery_registration', None) is not worker
@@ -251,6 +269,7 @@ def acknowledge_recovery_worker_shutdown(app: Starlette, worker: _WorkerRegistra
                 )
             if cursor.rowcount != 1:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
+            record_worker_shutdown(connection, worker)
     except (OSError, sqlite3.Error):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
     app.state.source_recovery_registration = None
@@ -258,14 +277,17 @@ def acknowledge_recovery_worker_shutdown(app: Starlette, worker: _WorkerRegistra
 
 def inspect_recovery_maintenance(database: Path, state: _RecoveryState) -> MaintenanceObservation:
     """Read a generation-bound snapshot. An empty roster grants no authority."""
+    from backend.multimodal.document_recovery_supervisor import supervisor_diagnostics
+
     try:
         with read_only_connection(_coordination_path(database)) as connection:
             connection.execute('BEGIN')
             if _read_state(connection) != state:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
             generation = _check_barrier(connection, state)
+            registered, managed_count = supervisor_diagnostics(connection, generation)
             if not _has_table(connection, 'source_recovery_workers'):
-                if generation is not None:
+                if generation is not None or registered:
                     raise _error('AUTHORIZATION_UNAVAILABLE')
                 return MaintenanceObservation(False, None, None)
             total, awaiting = connection.execute('''SELECT COUNT(*), COUNT(CASE
@@ -273,13 +295,15 @@ def inspect_recovery_maintenance(database: Path, state: _RecoveryState) -> Maint
                 FROM source_recovery_workers''', (generation,)).fetchone()
             if total > _MAX_WORKERS:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
-            return MaintenanceObservation(generation is not None, total, awaiting)
+            return MaintenanceObservation(generation is not None, total, awaiting, registered, managed_count)
     except (OSError, sqlite3.Error):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
 
 
 def set_recovery_maintenance(database: Path, expected_generation: str, *, active: bool) -> None:
     """Operator-only barrier transition. Quarantine can never be cleared here."""
+    from backend.multimodal.document_recovery_supervisor import prepare_window
+
     try:
         with immediate_transaction(_coordination_path(database), require_existing=True) as connection:
             state = _read_state(connection)
@@ -287,16 +311,20 @@ def set_recovery_maintenance(database: Path, expected_generation: str, *, active
             if not state.pending or state.generation != expected_generation or (generation is not None) == active:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
             _ensure_maintenance_tables(connection)
+            prepare_window(connection, state.generation, active=active)
             if active:
                 connection.execute('INSERT INTO source_recovery_barrier VALUES (1, ?)', (state.generation,))
             else:
-                connection.execute('DELETE FROM source_recovery_workers WHERE stopped_generation = ?', (generation,))
-                connection.execute('DELETE FROM source_recovery_barrier WHERE id = 1')
-                # A cancelled window must never share its generation with a later
-                # window or with a validator that started before preparation.
-                connection.execute('UPDATE source_restore_state SET generation = ? WHERE id = 1', (uuid4().hex,))
+                _cancel_maintenance(connection, state.generation)
     except (OSError, sqlite3.Error):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
+
+
+def _cancel_maintenance(connection: sqlite3.Connection, generation: str) -> None:
+    connection.execute('DELETE FROM source_recovery_workers WHERE stopped_generation = ?', (generation,))
+    connection.execute('DELETE FROM source_recovery_barrier WHERE id = 1')
+    # Cancelled generations cannot be reused by a new window or a stale validator.
+    connection.execute('UPDATE source_restore_state SET generation = ? WHERE id = 1', (uuid4().hex,))
 
 
 def _offline_database(app: Starlette) -> Path:
@@ -366,17 +394,24 @@ def _checkpoint(database: Path) -> str:
     deadline = monotonic() + _MAX_SECONDS
     try:
         with read_only_connection(database) as connection:
-            connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 128 * 1024)
-            connection.set_progress_handler(lambda: int(monotonic() >= deadline), 1000)
             # Keep both tables in the same committed snapshot, including under WAL.
             connection.execute('BEGIN')
-            return _checkpoint_connection(connection, deadline)
+            return _scan_checkpoint(connection, deadline)
     except (OSError, sqlite3.Error, ValueError):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
 
 
+def _scan_checkpoint(connection: sqlite3.Connection, deadline: float) -> str:
+    connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 128 * 1024)
+    connection.set_progress_handler(lambda: int(monotonic() >= deadline), 1000)
+    try:
+        return _checkpoint_connection(connection, deadline)
+    finally:
+        connection.set_progress_handler(None, 0)
+
+
 def capture_source_checkpoint(app: Starlette) -> str:
-    """Capture known-current metadata during coordinated offline maintenance."""
+    """Capture the catalog digest during coordinated offline maintenance."""
     database = _offline_database(app)
     binding = SourceRestoreBinding(app, database)
     digest = _checkpoint(database)
@@ -384,26 +419,35 @@ def capture_source_checkpoint(app: Starlette) -> str:
     return digest
 
 
-def validate_source_restore(app: Starlette, *, trusted_checkpoint: str | None) -> None:
-    """Clear an existing shared quarantine using the independently retained checkpoint.
+def validate_source_restore(app: Starlette, *, trusted_checkpoint: bytes | None,
+                            custody: CheckpointCustody | None = None) -> None:
+    """Validate an existing offline quarantine against authenticated current evidence.
 
     Deployment must stop every worker before restoring or validating the file.
     This operation never declares a new restore.
     """
     database = _offline_database(app)
     state = _read_shared_state(_coordination_path(database), require_drained=True)
-    if (not state.pending or type(trusted_checkpoint) is not str
-            or re.fullmatch('[0-9a-f]{64}', trusted_checkpoint) is None
-            or not hmac.compare_digest(_checkpoint(database), trusted_checkpoint)):
+    if not state.pending or type(custody) is not CheckpointCustody or type(trusted_checkpoint) is not bytes:
         raise _error('AUTHORIZATION_UNAVAILABLE')
     ready_generation = uuid4().hex
+    deadline = monotonic() + _MAX_SECONDS
     try:
-        with immediate_transaction(_coordination_path(database), require_existing=True) as connection:
-            if _read_state(connection) != state:
+        statement = custody.verify(trusted_checkpoint, database=database, generation=state.generation)
+        # Keep ordinary SQLite writers out until the coordinator commits. Take
+        # the catalog lock first, as coordinator initialization does.
+        with immediate_transaction(database, require_existing=True) as catalog:
+            if not hmac.compare_digest(_scan_checkpoint(catalog, deadline), statement.catalog_sha256):
                 raise _error('AUTHORIZATION_UNAVAILABLE')
-            _require_drained_for_validation(connection, state)
-            connection.execute('UPDATE source_restore_state SET generation = ?, pending = 0 WHERE id = 1',
-                               (ready_generation,))
-    except (OSError, sqlite3.Error):
+            with immediate_transaction(_coordination_path(database), require_existing=True) as connection:
+                if _read_state(connection) != state:
+                    raise _error('AUTHORIZATION_UNAVAILABLE')
+                _require_drained_for_validation(connection, state)
+                custody.verify(trusted_checkpoint, database=database, generation=state.generation)
+                if monotonic() >= deadline:
+                    raise _error('AUTHORIZATION_UNAVAILABLE')
+                connection.execute('UPDATE source_restore_state SET generation = ?, pending = 0 WHERE id = 1',
+                                   (ready_generation,))
+    except (OSError, sqlite3.Error, ValueError):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
     app.state.document_source_validated_generation = ready_generation

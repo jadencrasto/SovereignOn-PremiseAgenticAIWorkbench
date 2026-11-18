@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 from starlette.applications import Starlette
 
+from recovery_custody_fixture import restore_with_checkpoint
+
 from backend.multimodal import document_source_maintenance as maintenance
 from backend.multimodal import document_source_recovery as recovery
 from backend.multimodal import document_transport as transport
@@ -42,21 +44,21 @@ def test_validator_cannot_commit_across_prepare_then_cancel(authority, monkeypat
     checkpoint = recovery.capture_source_checkpoint(app)
     recovery.quarantine_source_authority(app)
     first = _state(database)
-    compute = recovery._checkpoint
+    compute = recovery._scan_checkpoint
 
-    def interrupt(path):
-        digest = compute(path)
+    def interrupt(connection, deadline):
+        digest = compute(connection, deadline)
         recovery.set_recovery_maintenance(database, first.generation, active=True)
         recovery.set_recovery_maintenance(database, first.generation, active=False)
         return digest
 
     with monkeypatch.context() as scope:
-        scope.setattr(recovery, '_checkpoint', interrupt)
+        scope.setattr(recovery, '_scan_checkpoint', interrupt)
         with pytest.raises(ReasoningError):
-            recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+            restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
 
     assert _state(database).pending
-    recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+    restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
     assert not _state(database).pending
 
 
@@ -70,24 +72,24 @@ def test_checkpoint_validation_requires_registered_worker_shutdown(authority, mo
     worker.state.settings = SimpleNamespace(tasks_db_path=database)
 
     async def run():
-        compute = recovery._checkpoint
+        compute = recovery._scan_checkpoint
 
-        def join(path):
-            digest = compute(path)
+        def join(connection, deadline):
+            digest = compute(connection, deadline)
             recovery.register_recovery_worker(worker)
             return digest
 
         with monkeypatch.context() as scope:
             if register_during_digest:
-                scope.setattr(recovery, '_checkpoint', join)
+                scope.setattr(recovery, '_scan_checkpoint', join)
             else:
                 recovery.register_recovery_worker(worker)
             with pytest.raises(ReasoningError):
-                recovery.validate_source_restore(maintenance_app, trusted_checkpoint=checkpoint)
+                restore_with_checkpoint(maintenance_app, trusted_checkpoint=checkpoint)
         assert _state(database) == pending
         worker.state.startup_complete = False
         recovery.acknowledge_recovery_worker_shutdown(worker, worker.state.source_recovery_registration)
-        recovery.validate_source_restore(maintenance_app, trusted_checkpoint=checkpoint)
+        restore_with_checkpoint(maintenance_app, trusted_checkpoint=checkpoint)
         assert not _state(database).pending
 
     run_offline(run())

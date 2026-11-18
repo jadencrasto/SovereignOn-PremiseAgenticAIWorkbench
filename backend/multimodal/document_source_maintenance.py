@@ -16,6 +16,7 @@ import sys
 from time import monotonic
 
 from backend.multimodal import document_source_recovery as recovery
+from backend.multimodal.document_checkpoint_custody import MAX_EVIDENCE_BYTES, CheckpointCustody, CheckpointCustodyError
 from backend.multimodal.document_reasoning import ReasoningError
 from backend.multimodal.document_source_approvals import _CREATE
 from backend.multimodal.document_source_provider import _CREATE_CATALOG
@@ -265,15 +266,15 @@ def _completed_backup(path: Path, deadline: float) -> str:
     return _inspect_backup(path, deadline)
 
 
-def _read_checkpoint(path: Path) -> str:
+def _read_checkpoint(path: Path) -> bytes:
     _safe_path(path)
     if not path.is_file():
         raise MaintenanceError('CHECKPOINT_UNREADABLE')
     with path.open('rb') as stream:
-        raw = stream.read(67)
-    if re.fullmatch(b'[0-9a-f]{64}(?:\r?\n)?', raw) is None:
+        raw = stream.read(MAX_EVIDENCE_BYTES + 1)
+    if not raw or len(raw) > MAX_EVIDENCE_BYTES:
         raise MaintenanceError('INVALID_CHECKPOINT')
-    return raw[:64].decode('ascii')
+    return raw
 
 
 def _inspect_destination(database: Path, deadline: float) -> None:
@@ -299,15 +300,24 @@ def _inspect_destination(database: Path, deadline: float) -> None:
             raise MaintenanceError('DESTINATION_SQLITE_ACTIVITY_POSSIBLE')
 
 
-def _preflight(database: Path, backup: Path, trusted_checkpoint: Path, expected_generation: str) -> Preflight:
+def _preflight(database: Path, backup: Path, trusted_checkpoint: Path, expected_generation: str, *,
+               custody: CheckpointCustody | None = None) -> Preflight:
     checks = []
+    statement = None
     try:
         deadline = monotonic() + _MAINTENANCE_SECONDS
         checkpoint = _completed_backup(backup, deadline)
         checks.append('BACKUP_INTEGRITY_AND_SCHEMA_VALID')
-        if not hmac.compare_digest(checkpoint, _read_checkpoint(trusted_checkpoint)):
-            raise MaintenanceError('TRUSTED_CHECKPOINT_MISMATCH')
-        checks.append('SUPPLIED_CHECKPOINT_MATCHES')
+        supplied = _read_checkpoint(trusted_checkpoint)
+        envelope = supplied.startswith(b'{')
+        if re.fullmatch(b'[0-9a-f]{64}(?:\r?\n)?', supplied):
+            if not hmac.compare_digest(checkpoint.encode('ascii'), supplied[:64]):
+                raise MaintenanceError('TRUSTED_CHECKPOINT_MISMATCH')
+            checks.append('SUPPLIED_CHECKPOINT_MATCHES')
+        elif not envelope:
+            raise MaintenanceError('INVALID_CHECKPOINT')
+        elif type(custody) is not CheckpointCustody:
+            raise MaintenanceError('CHECKPOINT_CUSTODY_UNVERIFIED')
         _safe_path(database)
         if not database.is_file():
             raise MaintenanceError('DESTINATION_UNREADABLE')
@@ -319,17 +329,30 @@ def _preflight(database: Path, backup: Path, trusted_checkpoint: Path, expected_
         if _GENERATION.fullmatch(expected_generation) is None or state.generation != expected_generation:
             raise MaintenanceError('RECOVERY_GENERATION_MISMATCH')
         checks.append('EXPECTED_QUARANTINE_GENERATION')
+        if envelope:
+            statement = custody.verify(supplied, database=database, generation=state.generation)
+            if not hmac.compare_digest(checkpoint, statement.catalog_sha256):
+                raise MaintenanceError('TRUSTED_CHECKPOINT_MISMATCH')
         _inspect_destination(database, deadline)
         checks.append('DESTINATION_INTEGRITY_VALID')
         if _coordinator(database) != state:
             raise MaintenanceError('RECOVERY_GENERATION_CHANGED')
         workers = recovery.inspect_recovery_maintenance(database, state)
-    except MaintenanceError as exc:
+        if statement is not None:
+            custody.verify(supplied, database=database, generation=state.generation)
+            if _coordinator(database) != state:
+                raise MaintenanceError('RECOVERY_GENERATION_CHANGED')
+            checks.append('AUTHENTICATED_CHECKPOINT_CURRENT')
+        if monotonic() >= deadline:
+            raise MaintenanceError('MAINTENANCE_TIMEOUT')
+    except (MaintenanceError, CheckpointCustodyError) as exc:
         return Preflight('BLOCKED', tuple(checks), (str(exc),))
     except (OSError, sqlite3.Error, ValueError, ReasoningError):
         return Preflight('BLOCKED', tuple(checks), ('STORAGE_OR_COORDINATION_UNAVAILABLE',))
-    blockers = ['CHECKPOINT_CUSTODY_UNVERIFIED', 'WORKER_QUIESCENCE_UNVERIFIED',
-                'SUPERVISOR_RESTART_UNVERIFIED', 'SQLITE_CLIENT_INVENTORY_UNVERIFIED']
+    blockers = [] if statement is not None else ['CHECKPOINT_CUSTODY_UNVERIFIED']
+    blockers.extend(('WORKER_QUIESCENCE_UNVERIFIED', 'SUPERVISOR_RESTART_UNVERIFIED', 'SQLITE_CLIENT_INVENTORY_UNVERIFIED'))
+    if workers.supervisor_registered and workers.active:
+        checks.append('SUPERVISOR_ADMISSION_LOCK_RECORDED')
     if not workers.active:
         blockers.append('MAINTENANCE_BARRIER_REQUIRED')
     elif workers.awaiting_shutdown != 0:
@@ -414,7 +437,7 @@ def _guard_location(stack: ExitStack, api: WindowsKeyStoreNative, path: Path, ow
         raise MaintenanceError('STORAGE_ACCESS_UNVERIFIED') from None
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, custody: CheckpointCustody | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     backup = commands.add_parser('backup')
@@ -461,7 +484,8 @@ def main(argv: list[str] | None = None) -> int:
                     state = _coordinator(args.database)
                     workers = recovery.inspect_recovery_maintenance(args.database, state)
                     result = {'status': 'COORDINATION_READ', 'pending': state.pending, 'generation': state.generation,
-                              'maintenance': asdict(workers), 'supervisor_verified': False}
+                              'maintenance': asdict(workers), 'supervisor_verified': False,
+                              'checkpoint_custody_verified': False}
                 else:
                     _standalone_database(coordinator, maximum=1024 * 1024)
                     active = args.command == 'prepare-maintenance'
@@ -472,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
                 _guard_location(stack, api, args.database, owner, purpose='destination')
                 _guard_location(stack, api, args.backup, owner, purpose='input')
                 _guard_location(stack, api, args.trusted_checkpoint, owner, purpose='input')
-                result = asdict(_preflight(args.database, args.backup, args.trusted_checkpoint, args.expected_generation))
+                result = asdict(_preflight(args.database, args.backup, args.trusted_checkpoint, args.expected_generation,
+                                           custody=custody))
     except MaintenanceError as exc:
         result = {'status': 'BLOCKED', 'checks': [], 'blockers': [str(exc)]}
     except (OSError, sqlite3.Error, ValueError, ReasoningError):

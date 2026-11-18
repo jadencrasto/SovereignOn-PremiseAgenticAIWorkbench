@@ -16,6 +16,8 @@ from starlette.applications import Starlette
 from backend.agent.deployment_documents import _RecoveryWorker, get_deployment_documents, inspect_document_worker
 from backend.agent.document_workflow import _DocumentRunActivity
 from backend.health.capabilities import capability_report
+from recovery_custody_fixture import restore_with_checkpoint
+
 from backend.multimodal import document_source_maintenance as maintenance
 from backend.multimodal import document_source_recovery as recovery
 from backend.multimodal.document_reasoning import ReasoningError
@@ -188,22 +190,22 @@ def test_checkpoint_validation_rechecks_barrier_at_commit(authority, monkeypatch
     checkpoint = recovery.capture_source_checkpoint(app)
     recovery.quarantine_source_authority(app)
     state = _state(database)
-    compute = recovery._checkpoint
+    compute = recovery._scan_checkpoint
 
-    def prepare_mid_validation(path):
-        result = compute(path)
+    def prepare_mid_validation(connection, deadline):
+        result = compute(connection, deadline)
         recovery.set_recovery_maintenance(database, state.generation, active=True)
         return result
 
     with monkeypatch.context() as scope:
-        scope.setattr(recovery, '_checkpoint', prepare_mid_validation)
+        scope.setattr(recovery, '_scan_checkpoint', prepare_mid_validation)
         with pytest.raises(ReasoningError):
-            recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+            restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
     assert _state(database) == state
     with pytest.raises(ReasoningError):
-        recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+        restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
     recovery.set_recovery_maintenance(database, state.generation, active=False)
-    recovery.validate_source_restore(app, trusted_checkpoint=checkpoint)
+    restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
     assert not _state(database).pending and _state(database).generation != state.generation
 
 

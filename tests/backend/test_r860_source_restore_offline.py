@@ -11,9 +11,10 @@ from backend.multimodal.document_reasoning import ReasoningError
 from backend.multimodal.document_source_approvals import DeploymentSourceApprovals
 from backend.multimodal.document_source_authority import LocalSourceAuthority
 from backend.multimodal.document_source_recovery import (
-    capture_source_checkpoint, quarantine_source_authority, validate_source_restore,
+    capture_source_checkpoint, quarantine_source_authority,
 )
 from backend.security.provenance_foundation import document_content_allowed
+from recovery_custody_fixture import restore_with_checkpoint
 from test_a22_async_offline import run_offline
 from test_r848_document_agent_lease_offline import PASSAGE, Upload, app_engine, denied, host  # noqa: F401
 from test_r856_source_approvals_offline import deployment, establish, execute  # noqa: F401
@@ -68,7 +69,7 @@ def test_normal_reopen_and_current_restore_preserve_authority_state(deployment, 
             await assert_authority()
         quarantine_source_authority(app)
         backup(known_current, database)
-        validate_source_restore(app, trusted_checkpoint=checkpoint)
+        restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
         await assert_authority()
 
     run_offline(run())
@@ -98,7 +99,7 @@ def test_retained_post_withdrawal_checkpoint_rejects_pre_withdrawal_backup(deplo
                 'SELECT generation, withdrawn_at FROM document_source_approvals',
             ).fetchone() == (review['generation'], None)
             assert connection.execute('SELECT withdrawn_us FROM approved_document_sources').fetchone() == (None,)
-        unavailable(lambda: validate_source_restore(app, trusted_checkpoint=checkpoint))
+        unavailable(lambda: restore_with_checkpoint(app, trusted_checkpoint=checkpoint))
         unavailable(lambda: DeploymentSourceApprovals(app))
         unavailable(lambda: capture_source_checkpoint(app))
         await owner.authenticate()
@@ -133,7 +134,7 @@ def test_restore_declaration_fails_closed_on_missing_or_inconsistent_metadata(de
                     connection.execute('UPDATE document_source_approvals SET sha256 = ?', (b'invalid',))
                 else:
                     connection.execute('CREATE INDEX unexpected_idx ON approved_document_sources (expires_us)')
-        unavailable(lambda: validate_source_restore(app, trusted_checkpoint=checkpoint))
+        unavailable(lambda: restore_with_checkpoint(app, trusted_checkpoint=checkpoint))
         unavailable(lambda: DeploymentSourceApprovals(app))
         if state == 'missing_table':
             with closing(sqlite3.connect(app.state.settings.tasks_db_path)) as connection:
@@ -156,9 +157,9 @@ def test_successful_validation_keeps_all_pre_restore_instances_invalid_and_check
             assert admitted.get_approved_source('report', 'a', 'a-conversation', review['generation']) is not None
             quarantine_source_authority(app)
             app.state.startup_complete = True
-            unavailable(lambda: validate_source_restore(app, trusted_checkpoint=checkpoint))
+            unavailable(lambda: restore_with_checkpoint(app, trusted_checkpoint=checkpoint))
             app.state.startup_complete = False
-            validate_source_restore(app, trusted_checkpoint=checkpoint)
+            restore_with_checkpoint(app, trusted_checkpoint=checkpoint)
             unavailable(lambda: admitted.get_approved_source('report', 'a', 'a-conversation', review['generation']))
         unavailable(approvals.source_provider)
         unavailable(lambda: second.withdraw(owner.request, 'a-conversation', 'report'))
@@ -221,8 +222,8 @@ def test_declared_restore_blocks_lifespan_source_authority_until_offline_validat
         async with restarted.router.lifespan_context(restarted):
             assert restarted.state.startup_complete
             unavailable(lambda: get_deployment_documents(restarted))
-            unavailable(lambda: validate_source_restore(restarted, trusted_checkpoint=checkpoint))
-        validate_source_restore(restarted, trusted_checkpoint=checkpoint)
+            unavailable(lambda: restore_with_checkpoint(restarted, trusted_checkpoint=checkpoint))
+        restore_with_checkpoint(restarted, trusted_checkpoint=checkpoint)
         async with restarted.router.lifespan_context(restarted):
             upload = Upload((restarted, owner.token), owner.files)
             await upload.authenticate()

@@ -13,6 +13,7 @@ import time
 _CLEANUP_TIMEOUT = 2.0
 _CLEANUP_POLL_INTERVAL = 0.05
 _KILL_ON_JOB_CLOSE = 0x2000
+_ACTIVE_PROCESS_LIMIT = 0x0008
 _JOB_LIST_ATTRIBUTE = 0x0002000D
 _HANDLE_LIST_ATTRIBUTE = 0x00020002
 _SUSPENDED_EXTENDED_STARTUP = 0x00000004 | 0x00080000 | 0x08000000
@@ -382,14 +383,24 @@ class WindowsNativeAPI:
         if not value: raise OSError(self.C.get_last_error(), 'Windows process operation failed')
 
     def create_kill_on_close_job(self):
+        return self._create_job(_KILL_ON_JOB_CLOSE)
+
+    def create_single_worker_job(self):
+        """Create an unnamed, noninheritable lifetime job without breakaway."""
+        return self._create_job(_KILL_ON_JOB_CLOSE | _ACTIVE_PROCESS_LIMIT, active_limit=1)
+
+    def _create_job(self, flags, *, active_limit=0):
         job = self.k.CreateJobObjectW(None, None); self._require(job)
-        info = self.ExtendedLimit(); info.BasicLimitInformation.LimitFlags = _KILL_ON_JOB_CLOSE
+        info = self.ExtendedLimit()
+        info.BasicLimitInformation.LimitFlags = flags
+        info.BasicLimitInformation.ActiveProcessLimit = active_limit
         try:
             self._require(self.k.SetInformationJobObject(job, 9, self.C.byref(info), self.C.sizeof(info)))
             observed = self.ExtendedLimit()
             self._require(self.k.QueryInformationJobObject(job, 9, self.C.byref(observed),
                                                            self.C.sizeof(observed), None))
-            if observed.BasicLimitInformation.LimitFlags != _KILL_ON_JOB_CLOSE:
+            if (observed.BasicLimitInformation.LimitFlags != flags
+                    or (active_limit and observed.BasicLimitInformation.ActiveProcessLimit != active_limit)):
                 raise RuntimeError('Job limits not verified')
         except BaseException:
             self.k.CloseHandle(job)
@@ -405,8 +416,10 @@ class WindowsNativeAPI:
             raise RuntimeError('Invalid observer inheritance allowlist')
         return self._create_with_attributes(job, command, bootstrap_handles)
 
-    def _create_with_attributes(self, job, command, bootstrap_handles):
+    def _create_with_attributes(self, job, command, bootstrap_handles, *, create_process=None,
+                                creation_flags=_SUSPENDED_EXTENDED_STARTUP):
         C, k = self.C, self.k
+        create = k.CreateProcessW if create_process is None else create_process
         size = C.c_size_t()
         attribute_count = 2 if bootstrap_handles else 1
         initialized = k.InitializeProcThreadAttributeList(None, attribute_count, 0, C.byref(size))
@@ -427,8 +440,8 @@ class WindowsNativeAPI:
                 handles = (self.W.HANDLE * len(bootstrap_handles))(*bootstrap_handles)
                 self._require(k.UpdateProcThreadAttribute(attribute_list, 0, _HANDLE_LIST_ATTRIBUTE,
                                                          C.byref(handles), C.sizeof(handles), None, None))
-            self._require(k.CreateProcessW(command[0], cmd, None, None, bool(bootstrap_handles), _SUSPENDED_EXTENDED_STARTUP,
-                                           None, None, C.byref(info.StartupInfo), C.byref(process)))
+            self._require(create(command[0], cmd, None, None, bool(bootstrap_handles), creation_flags,
+                                 None, None, C.byref(info.StartupInfo), C.byref(process)))
         finally:
             k.DeleteProcThreadAttributeList(attribute_list)
         return process.hProcess, process.hThread

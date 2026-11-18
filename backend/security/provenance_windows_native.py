@@ -150,10 +150,59 @@ class WindowsKeyStoreNative:
 
     def open_process_token(self):
         process = self._function("kernel32", "GetCurrentProcess", _HANDLE)()
+        return self.open_process_token_for(process)
+
+    def open_process_token_for(self, process):
+        """Read the primary token of a retained process handle."""
         token = _HANDLE()
         open_token = self._function("advapi32", "OpenProcessToken", _LONG, _HANDLE, _DWORD, _PTR)
         _require(open_token(process, 8, C.byref(token)) and token.value and token.value != _INVALID_HANDLE)
         return token.value
+
+    def token_session_id(self, token) -> int:
+        session = _DWORD()
+        _require(self._token_info(token, 12, session) == C.sizeof(session))
+        return session.value
+
+    def supervised_worker_token_identity(self, token) -> tuple[str, int]:
+        """Require a filtered interactive primary token with medium integrity."""
+        elevation_type, elevated = _DWORD(), _DWORD()
+        _require(self._token_info(token, 18, elevation_type) == C.sizeof(elevation_type))
+        _require(self._token_info(token, 20, elevated) == C.sizeof(elevated))
+        _require(elevation_type.value == 3 and elevated.value == 0)
+        label = C.create_string_buffer(128)
+        size = self._token_info(token, 25, label)  # TokenIntegrityLevel (TOKEN_MANDATORY_LABEL)
+        start = C.addressof(label)
+        pointer = _PTR.from_buffer(label).value
+        _require(2 * C.sizeof(_PTR) <= size <= C.sizeof(label) and pointer
+                 and start + 2 * C.sizeof(_PTR) <= pointer < start + size)
+        _require(self._copy_sid(pointer, start + size - pointer) == 'S-1-16-8192')
+        facts = self.token_facts(token)
+        _require(facts.primary and facts.logon_type in (2, 11) and facts.sid == facts.logon_sid)
+        return facts.sid, self.token_session_id(token)
+
+    def current_process_creation_time(self) -> int:
+        """Read the creation FILETIME for the current process through its pseudo-handle."""
+        current = self._function("kernel32", "GetCurrentProcess", _HANDLE)()
+        return self._process_creation_time(current)
+
+    def live_process_matches(self, pid: int, created: int) -> bool:
+        """Observe just the recorded owner. The handle grants no process control."""
+        open_process = self._function("kernel32", "OpenProcess", _HANDLE, _DWORD, _LONG, _DWORD)
+        handle = open_process(0x101000, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION.
+        if not handle:
+            return False
+        try:
+            wait = self._function("kernel32", "WaitForSingleObject", _DWORD, _HANDLE, _DWORD)
+            return self._process_creation_time(handle) == created and wait(handle, 0) == 0x102  # WAIT_TIMEOUT.
+        finally:
+            self.close(handle)
+
+    def _process_creation_time(self, handle) -> int:
+        created, exited, kernel, user = (_DWORD * 2)(), (_DWORD * 2)(), (_DWORD * 2)(), (_DWORD * 2)()
+        query = self._function("kernel32", "GetProcessTimes", _LONG, _HANDLE, _PTR, _PTR, _PTR, _PTR)
+        _require(query(handle, created, exited, kernel, user))
+        return (created[1] << 32) | created[0]
 
     def _copy_sid(self, pointer, limit=68):
         _require(pointer and limit >= 8)
