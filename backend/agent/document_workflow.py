@@ -3,6 +3,8 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import aclosing
+from contextvars import ContextVar
+from dataclasses import dataclass
 from uuid import uuid4
 
 from starlette.requests import Request
@@ -38,6 +40,14 @@ _DELIVERY_ERRORS = {
     'TIMEOUT': 'The document request exceeded its deadline.',
     'OPERATION_UNAVAILABLE': 'The document workflow could not be completed safely.',
 }
+
+
+@dataclass(eq=False)
+class _DocumentRunActivity:
+    buffered: bool = False
+
+
+_active_document_run: ContextVar[_DocumentRunActivity | None] = ContextVar('active_document_run', default=None)
 
 
 def _delivery_failure(code: str, task_id: str) -> tuple[dict, ...]:
@@ -94,6 +104,7 @@ async def run_document_workflow(
     Keep the batch in request memory. This interface has no streaming callback.
     """
     buffered: list[dict] = []
+    activity = _active_document_run.get()
     task_id = uuid4().hex
     terminal = None
     try:
@@ -113,6 +124,8 @@ async def run_document_workflow(
                     elif event['task_id'] != task_id:
                         raise ValueError('Mixed document presentation tasks')
                     buffered.append(event)
+                    if activity is not None:
+                        activity.buffered = True
                     if event['type'] in _TERMINALS:
                         terminal = event
             if terminal is None:

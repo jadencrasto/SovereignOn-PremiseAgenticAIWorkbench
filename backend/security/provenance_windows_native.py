@@ -190,6 +190,25 @@ class WindowsKeyStoreNative:
         finally:
             _require(free_session(data) == 0)
 
+    def elevated_administrator(self, handle) -> bool:
+        """Check the primary process token and effective Administrators membership."""
+        elevation_type = _DWORD()
+        elevated = _DWORD()
+        _require(self._token_info(handle, 18, elevation_type) == C.sizeof(elevation_type))
+        _require(self._token_info(handle, 20, elevated) == C.sizeof(elevated))
+        if elevation_type.value not in (1, 2) or elevated.value != 1:  # Default or Full, never Limited.
+            return False
+        sid = C.create_string_buffer(68)
+        length = _DWORD(C.sizeof(sid))
+        make_sid = self._function("advapi32", "CreateWellKnownSid", _LONG, _DWORD, _PTR, _PTR, _PTR)
+        _require(make_sid(26, None, sid, C.byref(length)))  # WinBuiltinAdministratorsSid
+        member = _LONG()
+        check = self._function("advapi32", "CheckTokenMembership", _LONG, _HANDLE, _PTR, _PTR)
+        # The caller has rejected impersonation. NULL checks the effective token
+        # and excludes disabled and deny-only memberships.
+        _require(check(None, sid, C.byref(member)))
+        return member.value == 1
+
     def service_sid(self, virtual: bool):
         domain = "NT SERVICE"
         if not virtual:
@@ -244,13 +263,13 @@ class WindowsKeyStoreNative:
         _require(filesystem.value == "NTFS" and _VOLUME_ROOT(root) is not None)
         return root.casefold()
 
-    def open_child(self, parent, name: str, directory: bool, *, inspect_acl: bool):
+    def open_child(self, parent, name: str, directory: bool, *, inspect_acl: bool, share_write: bool = False):
         access = _READ_ATTRIBUTES | _SYNCHRONIZE | (0x20 if directory else 1)
         if inspect_acl:
             access |= _READ_CONTROL
-        return self._open_relative(parent, name, access, directory=directory)
+        return self._open_relative(parent, name, access, directory=directory, share_write=share_write)
 
-    def _open_relative(self, parent, name, access, *, directory=False, descriptor=None):
+    def _open_relative(self, parent, name, access, *, directory=False, descriptor=None, share_write=False):
         # One component per call. FILE_OPEN_REPARSE_POINT applies to that component.
         _require(isinstance(name, str) and name not in ("", ".", "..")
                  and not any(char in name for char in ("\\", "/", ":", "\0")))
@@ -267,11 +286,15 @@ class WindowsKeyStoreNative:
         disposition = 1  # FILE_OPEN
         if descriptor is not None:
             options |= 0x2  # FILE_WRITE_THROUGH
+            if directory:
+                # A new directory is created exclusively. No existing component is followed.
+                options = 0x23  # DIRECTORY_FILE | WRITE_THROUGH | SYNCHRONOUS_IO_NONALERT
             disposition = 2  # FILE_CREATE (exclusive, no replacement)
         create = self._function("ntdll", "NtCreateFile", _LONG, _PTR, _DWORD, _PTR, _PTR,
                                 _PTR, _DWORD, _DWORD, _DWORD, _DWORD, _PTR, _DWORD)
+        share = _FILE_SHARE_READ | (2 if share_write else 0)  # FILE_SHARE_WRITE, never share deletion.
         result = create(C.byref(handle), access, C.byref(attributes), C.byref(status), None, 0,
-                        _FILE_SHARE_READ, disposition, options, None, 0)
+                        share, disposition, options, None, 0)
         _require(handle.value and handle.value != _INVALID_HANDLE)
         if result != 0:
             if result > 0:  # An unexpected successful status may still own a handle.
@@ -282,14 +305,26 @@ class WindowsKeyStoreNative:
     @contextmanager
     def create_record(self, parent, name, service_sid):
         _require(valid_service_sid(service_sid))
+        with self._create_secured(parent, name, f"D:P(A;;FA;;;SY)(A;;FA;;;{service_sid})", directory=False) as handle:
+            yield handle
+
+    @contextmanager
+    def create_maintenance_item(self, parent, name, operator_sid, *, directory):
+        _require(valid_service_sid(operator_sid))  # Validated Windows account SID from the process token.
+        flags = "OICI" if directory else ""
+        acl = f"O:{operator_sid}D:P(A;{flags};FA;;;SY)(A;{flags};FA;;;{operator_sid})"
+        with self._create_secured(parent, name, acl, directory=directory) as handle:
+            yield handle
+
+    @contextmanager
+    def _create_secured(self, parent, name, acl, *, directory):
         descriptor = _PTR()
         convert = self._function("advapi32", "ConvertStringSecurityDescriptorToSecurityDescriptorW",
                                  _LONG, _WSTRING, _DWORD, _PTR, _PTR)
-        acl = f"D:P(A;;FA;;;SY)(A;;FA;;;{service_sid})"
-        access = 0x40000000 | _READ_ATTRIBUTES | _READ_CONTROL | _SYNCHRONIZE
+        access = 0x40000000 | _READ_ATTRIBUTES | _READ_CONTROL | _SYNCHRONIZE | (0x20 if directory else 0)
         try:
             _require(convert(acl, 1, C.byref(descriptor), None) and descriptor.value)
-            handle = self._open_relative(parent, name, access, descriptor=descriptor.value)
+            handle = self._open_relative(parent, name, access, directory=directory, descriptor=descriptor.value)
             try:
                 yield handle
             finally:

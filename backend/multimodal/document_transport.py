@@ -548,10 +548,12 @@ async def open_document_transport(request: Request, conversation_id: str, *, sou
             issuer, authority_deadline, authority_cancelled = source_authority._claim(request, conversation_id)
             cleanup.callback(source_authority.close)
             deadline = min(deadline, authority_deadline)
-            transport_cancelled = cancelled
+            # A deployment predicate may do a SQLite authorization read per poll.
+            if cancelled is not authority_cancelled:
+                transport_cancelled = cancelled
 
-            def cancelled():
-                return transport_cancelled() is not False or authority_cancelled() is not False
+                def cancelled():
+                    return transport_cancelled() is not False or authority_cancelled() is not False
 
         elif getattr(request.state, 'local_source_authority_used', False):
             raise _error('AUTHORIZATION_UNAVAILABLE')

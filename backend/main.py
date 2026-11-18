@@ -486,12 +486,16 @@ def _clear_readiness(app):
 async def lifespan(app: FastAPI):
     # Own resources immediately after acquisition, including before startup yields.
     _clear_readiness(app)
+    app.state.document_recovery_worker = None
     async with AsyncExitStack() as stack:
         try:
             async with _lifespan_body(app, stack):
                 yield
         finally:
             _clear_readiness(app)
+    from backend.multimodal.document_source_recovery import acknowledge_recovery_worker_shutdown
+
+    acknowledge_recovery_worker_shutdown(app, app.state.source_recovery_registration)
 
 
 @asynccontextmanager
@@ -521,6 +525,11 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     from backend.agent.conversation_registry import require_registry_for_existing_history
     from backend.agent.memory import MEMORY_FILE
     require_registry_for_existing_history(active_settings.conversation_memory_path or MEMORY_FILE, active_settings.tasks_db_path)
+
+    # Serialize lifespan admission and the maintenance barrier before any shared DB client starts.
+    from backend.multimodal.document_source_recovery import register_recovery_worker
+
+    register_recovery_worker(app)
 
     # ---- Phase 7: Local Authentication & Audit Systems ----
     auth_store = AuthStore(db_path=active_settings.tasks_db_path)

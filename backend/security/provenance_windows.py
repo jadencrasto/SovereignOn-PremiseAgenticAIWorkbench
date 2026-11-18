@@ -88,12 +88,13 @@ class WindowsServiceIdentity:
             raise KeyStoreError(KeyStoreCode.IDENTITY) from None
 
 
-def _require_private_acl(security: FileSecurity, sid: str, *, directory: bool) -> None:
+def _require_private_acl(security: FileSecurity, sid: str, *, directory: bool, allow_inherited: bool = False) -> None:
     code = KeyStoreCode.STORAGE
     allowed = {SYSTEM_SID, sid}
     _require(type(security) is FileSecurity and type(security.owner) is str
              and security.owner in allowed and type(security.control) is int
-             and security.control & 0x100C == 0x1004, code)  # PROTECTED | PRESENT; never DEFAULTED.
+             and security.control & 0xC == 0x4
+             and (allow_inherited or security.control & 0x1000 != 0), code)
     raw = security.dacl
     _require(type(raw) is bytes and 8 <= len(raw) <= 65535, code)
     declared, count = struct.unpack_from("<HH", raw, 2)
@@ -104,6 +105,8 @@ def _require_private_acl(security: FileSecurity, sid: str, *, directory: bool) -
         _require(offset + 8 <= len(raw), code)
         kind, flags, size, mask = struct.unpack_from("<BBHI", raw, offset)
         end = offset + size
+        if allow_inherited:
+            flags &= ~0x10  # The caller has separately verified the parent and scope.
         _require(kind == 0 and flags in ((0, 3) if directory else (0,))
                  and size >= 20 and end <= len(raw) and mask == FILE_ALL_ACCESS, code)
         try:

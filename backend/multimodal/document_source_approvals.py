@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePath
 from uuid import uuid4
@@ -11,7 +10,7 @@ from uuid import uuid4
 from starlette.applications import Starlette
 from starlette.requests import Request
 
-from backend.agent.sqlite_transaction import immediate_transaction
+from backend.agent.sqlite_transaction import immediate_transaction, read_only_connection
 from backend.auth.models import (
     ClearanceLevel, Permission, User, has_permission, is_clearance_sufficient,
     parse_clearance, resolve_user_clearance,
@@ -82,7 +81,6 @@ class DeploymentSourceApprovals:
         try:
             self._db = Path(app.state.settings.tasks_db_path).resolve(strict=True)
             self._restore = SourceRestoreBinding(app, self._db)
-            self._read_uri = f'{self._db.as_uri()}?mode=ro'
             with immediate_transaction(self._db, require_existing=True) as connection:
                 self._restore.check()
                 connection.execute(_CREATE)
@@ -99,7 +97,7 @@ class DeploymentSourceApprovals:
         self._restore.check()
         first = records[0]
         placeholders = ', '.join('?' for _ in records)
-        with closing(sqlite3.connect(self._read_uri, timeout=1.0, uri=True)) as connection:
+        with read_only_connection(self._db) as connection:
             rows = connection.execute(
                 f"""SELECT s.reference, s.revision, s.filename, s.byte_length, s.sha256, s.clearance,
                            s.registered_us, s.expires_us, a.approved_at, a.expires_at,
@@ -209,7 +207,7 @@ class DeploymentSourceApprovals:
             if (identity != (owner_id, generation) or not parse_clearance(owner.clearance)
                     or not has_permission(owner.role, Permission.EXECUTE_READ_TOOLS)):
                 return None
-            with closing(sqlite3.connect(self._read_uri, timeout=1.0, uri=True)) as connection:
+            with read_only_connection(self._db) as connection:
                 row = connection.execute(_CURRENT, (reference, owner_id, conversation_id, generation, _USE)).fetchone()
             if row is None:
                 return None

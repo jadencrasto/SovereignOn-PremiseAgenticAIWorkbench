@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePath
@@ -14,7 +14,7 @@ from time import time_ns
 from starlette.applications import Starlette
 from starlette.requests import Request
 
-from backend.agent.sqlite_transaction import immediate_transaction
+from backend.agent.sqlite_transaction import immediate_transaction, read_only_connection
 from backend.auth.models import ClearanceLevel, Permission, has_permission, is_clearance_sufficient
 from backend.multimodal.document_evidence import valid_source_filename
 from backend.multimodal.document_source_authority import (
@@ -115,7 +115,6 @@ class DeploymentSourceProvider:
             self._app = app
             self._db = Path(app.state.settings.tasks_db_path).resolve(strict=True)
             self._restore = SourceRestoreBinding(app, self._db)
-            self._read_uri = f'{self._db.as_uri()}?mode=ro'
             with immediate_transaction(self._db, require_existing=True) as connection:
                 self._restore.check()
                 connection.execute(_CREATE_CATALOG)
@@ -202,7 +201,7 @@ class DeploymentSourceProvider:
         if approval is None:
             return None
         try:
-            with closing(sqlite3.connect(self._read_uri, timeout=1.0, uri=True)) as connection:
+            with read_only_connection(self._db) as connection:
                 row = connection.execute(_SELECT_SOURCE, (reference, *scope)).fetchone()
         except sqlite3.Error:
             access.lifetime()
