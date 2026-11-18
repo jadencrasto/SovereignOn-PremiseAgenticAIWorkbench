@@ -578,7 +578,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           {textFileSupported ? (onSendTextFiles
             ? 'Pick up to three TXT, CSV or JSON files, 2 KiB each and 4 KiB total. A new pick replaces the set.'
             : 'One UTF-8 TXT or CSV per request, up to 2 KiB.') :
-            'TXT, CSV and JSON require authenticated local chat mode.'}
+            'TXT, CSV and JSON require authenticated local chat mode.'}{' '}
+          PDF, DOCX and XLSX chat attachments are unavailable.
         </span>
       </div>
     </div>

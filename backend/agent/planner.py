@@ -541,6 +541,16 @@ class AgentPlanner:
     def max_plan_steps(self) -> int:
         return self._max_plan_steps
 
+    def create_document_plan(self, task_id: str, objective: str) -> AgentPlan:
+        """Plan read-only actions over offline document evidence."""
+        from backend.agent.document_plan import document_plan_steps
+        from backend.multimodal.document_reasoning import ReasoningError
+
+        steps = document_plan_steps(objective)
+        if len(steps) > self._max_plan_steps:
+            raise ReasoningError('PLAN_LIMIT', 'The document plan exceeds the configured step budget.')
+        return AgentPlan(task_id=task_id, objective='Grounded document analysis', steps=steps)
+
     async def create_plan(
         self,
         task_id: str,

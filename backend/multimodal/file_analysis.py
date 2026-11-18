@@ -326,11 +326,16 @@ def _finish(filename, column, source, defined, operations, threshold, compare, r
     return _render(answer, filename, column, chosen, missing, invalid, show_labels=True, evidence=evidence)
 
 
-def _average(values: list[Decimal]) -> str:
+def _rounded_average(values: list[Decimal]) -> tuple[Decimal, bool]:
     total = sum(values, Decimal(0))
     places = max(-value.as_tuple().exponent for value in values) + 2
     result = (total / len(values)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
-    prefix = 'approximately ' if result * len(values) != total else ''
+    return result, result * len(values) != total
+
+
+def _average(values: list[Decimal]) -> str:
+    result, approximate = _rounded_average(values)
+    prefix = 'approximately ' if approximate else ''
     return f'{prefix}{result:f}'
 
 

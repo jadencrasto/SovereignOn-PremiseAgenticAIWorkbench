@@ -6,6 +6,7 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 export const SystemHealth: React.FC = () => {
   const { capabilities, isCheckingHealth, refreshCapabilities } = useWorkbench();
   const backend = capabilityFor(capabilities, 'backend', !isCheckingHealth);
+  const documents = capabilities?.document_intelligence;
 
   return (
     <div className="flex-1 overflow-auto bg-white p-6 text-slate-900 space-y-6">
@@ -42,6 +43,27 @@ export const SystemHealth: React.FC = () => {
           </div>;
         })}
       </div>
+      <section aria-labelledby="document-capability-heading">
+        <h2 id="document-capability-heading" className="text-sm font-semibold">Document workflows</h2>
+        <dl className="mt-2 space-y-2 text-sm">
+          <div>
+            <dt className="font-medium">TXT, CSV and JSON attachments</dt>
+            <dd className="text-slate-600">{capabilities?.text_file_understanding === true
+              ? 'Request-scoped analysis is enabled for authenticated local chat with a ready model.'
+              : capabilities?.text_file_understanding === false ? 'Unavailable in the current chat configuration.' : 'Status unknown.'}</dd>
+          </div>
+          <div>
+            <dt className="font-medium">PDF, DOCX and XLSX</dt>
+            <dd className="text-slate-600">{documents
+              ? 'Extraction, source-grounded reasoning and agent planning verified offline. Direct document chat is blocked.'
+              : 'Offline document verification status unknown.'}</dd>
+          </div>
+          {documents && <>
+            <div><dt className="font-medium">Protected artifact publication</dt><dd className="text-slate-600">Blocked.</dd></div>
+            <div><dt className="font-medium">External browser integration</dt><dd className="text-slate-600">Unverified.</dd></div>
+          </>}
+        </dl>
+      </section>
       {capabilities && <section>
         <h2 className="text-sm font-semibold">Configured models</h2>
         <dl className="mt-2 text-sm space-y-1">

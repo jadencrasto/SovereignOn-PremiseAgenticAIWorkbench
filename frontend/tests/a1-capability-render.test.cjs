@@ -57,6 +57,22 @@ test('render recovers after a failed backend response', () => {
   assert.match(render(null), /readiness endpoint did not respond/i);
   assert.match(render(fixture()), /Backend startup completed/);
 });
+test('offline document status, gated routes, and unverified browser integration are distinct', () => {
+  const report = visionFixture();
+  report.text_file_understanding = true;
+  report.document_intelligence = { formats: ['PDF', 'DOCX', 'XLSX'], extraction: 'offline_verified',
+    reasoning: 'offline_verified', planning: 'offline_verified', direct_chat: 'blocked',
+    artifact_publication: 'blocked', external_browser: 'unverified' };
+  const markup = render(helpers.parseCapabilityReport(report));
+  assert.match(markup, /Request-scoped analysis is enabled for authenticated local chat with a ready model/);
+  assert.match(markup, /Extraction, source-grounded reasoning and agent planning verified offline. Direct document chat is blocked/);
+  assert.match(markup, /Protected artifact publication<\/dt>.*Blocked/);
+  assert.match(markup, /External browser integration<\/dt>.*Unverified/);
+  report.document_intelligence.direct_chat = 'available';
+  assert.throws(() => helpers.parseCapabilityReport(report), /Invalid capability response/);
+  delete report.document_intelligence;
+  assert.match(render(helpers.parseCapabilityReport(report)), /Offline document verification status unknown/);
+});
 test('model scanner reports the vision check separately from image chat readiness', () => {
   const report = fixture();
   const vision = 'ollama/vision:latest';

@@ -16,6 +16,16 @@ export type CapabilityState = 'available' | 'unavailable' | 'blocked' | 'unknown
 export type Capability = { state: CapabilityState; reason: string };
 type ModelReadiness = Capability & { id: string; expires_at?: number; identity_evidence?: 'provider_digest' | 'unavailable' };
 
+interface DocumentIntelligenceReport {
+  formats: ['PDF', 'DOCX', 'XLSX'];
+  extraction: 'offline_verified';
+  reasoning: 'offline_verified';
+  planning: 'offline_verified';
+  direct_chat: 'blocked';
+  artifact_publication: 'blocked';
+  external_browser: 'unverified';
+}
+
 export interface CapabilityReport {
   schema_version: 1;
   environment: string;
@@ -28,6 +38,7 @@ export interface CapabilityReport {
   selected_vision_model?: ModelReadiness;
   vision_models?: string[];
   text_file_understanding?: boolean;
+  document_intelligence?: DocumentIntelligenceReport;
 }
 
 const reasons: Record<string, string> = {
@@ -123,6 +134,7 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
       }) ||
       !Array.isArray(report.installed_models) || !report.installed_models.every(name => typeof name === 'string') ||
       !Array.isArray(report.chat_models) || !report.chat_models.every(name => typeof name === 'string') ||
+      (report.document_intelligence !== undefined && !isDocumentIntelligence(report.document_intelligence)) ||
       !isModelReadiness(report.selected_chat_model) ||
       (report.vision_models !== undefined &&
         (!Array.isArray(report.vision_models) || !report.vision_models.every(name => typeof name === 'string'))) ||
@@ -131,4 +143,12 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
     throw new Error('Invalid capability response');
   }
   return report as CapabilityReport;
+}
+
+function isDocumentIntelligence(value: DocumentIntelligenceReport): boolean {
+  return !!value && Array.isArray(value.formats) && value.formats.length === 3 &&
+    value.formats[0] === 'PDF' && value.formats[1] === 'DOCX' && value.formats[2] === 'XLSX' &&
+    value.extraction === 'offline_verified' && value.reasoning === 'offline_verified' &&
+    value.planning === 'offline_verified' && value.direct_chat === 'blocked' &&
+    value.artifact_publication === 'blocked' && value.external_browser === 'unverified';
 }

@@ -41,6 +41,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tupl
 import yaml
 
 from backend.agent.memory import ConversationMemory
+from backend.agent.plan_execution import bind_verified_arguments, execute_plan_action, verify_plan_result
 from backend.config import Settings
 from backend.models.base import ChatRequest, Message
 from backend.models.router import ModelRouter
@@ -139,26 +140,33 @@ class AgentEngine:
         self._tool_registry = registry
         logger.info("AgentEngine: ToolRegistry wired — Tools enabled")
 
+    def _current_dispatch_identity(self, session_id, user_id):
+        from backend.auth.models import UserRole
+        from backend.auth.request_context import dispatch_identity_resolver, effective_owner
+
+        resolver = dispatch_identity_resolver.get()
+        user = resolver() if resolver else None
+        if (not user or not user.is_active or not user_id or str(user.id) != str(user_id)
+                or effective_owner.get() != str(user_id) or not session_id):
+            raise PermissionError
+        UserRole(user.role)
+        identity = self._memory.stream_identity(session_id)
+        if not identity or identity[0] != str(user_id) or not identity[1]:
+            raise PermissionError
+        return user, identity
+
     async def _dispatch_tool(self, name, arguments, **kwargs):
         """Enforce execution policy before any normal, planned or resumed dispatch."""
         from backend.security.execution_policy import code_execution_allowed, EXECUTION_DISABLED_MESSAGE
         from backend.tools.registry import ToolResult
-        from backend.auth.request_context import dispatch_identity_resolver, effective_owner, effective_clearance
-        from backend.auth.models import UserRole, resolve_user_clearance
+        from backend.auth.request_context import effective_clearance
+        from backend.auth.models import resolve_user_clearance
         if name == 'code_execution' and not code_execution_allowed():
             return ToolResult(tool=name, success=False, error=EXECUTION_DISABLED_MESSAGE)
         try:
-            resolver = dispatch_identity_resolver.get()
-            user = resolver() if resolver else None
             uid = kwargs.get('user_id')
             session_id = kwargs.get('session_id')
-            if (not user or not user.is_active or not uid or str(user.id) != str(uid)
-                    or effective_owner.get() != str(uid) or not session_id):
-                raise PermissionError
-            UserRole(user.role)  # Unknown roles fail closed, including in dev.
-            identity = self._memory.stream_identity(session_id)
-            if not identity or identity[0] != str(uid) or not identity[1]:
-                raise PermissionError
+            user, _ = self._current_dispatch_identity(session_id, uid)
             if kwargs.get('task_id'):
                 task = self._task_manager.get_task(kwargs['task_id'])
                 if not task or task.user_id != str(uid) or task.session_id != session_id:
@@ -181,25 +189,8 @@ class AgentEngine:
 
     def _verify_registered_tool_result(self, name, arguments, result):
         """Validate opted-in tool output without granting authorization."""
-        from backend.tools.registry import ToolResult
-        # Neither a generator's success payload nor its claimed digest can be
-        # promoted to a task receipt. The isolated verifier is deliberately not
-        # an execution-bound authority; keep these results non-consumable even
-        # if an accidental caller or replacement returns success.
-        if name in {'docx_create', 'xlsx_report', 'file_write', 'artifact_verifier'} and result.success:
-            return ToolResult(tool=name, success=False,
-                              error='Verified artifact execution is unavailable.'), False
         definition = self._tool_registry.get(name) if self._tool_registry else None
-        if not result.success or not definition or not definition.result_schema or not definition.result_verifier:
-            return result, False
-        try:
-            payload = definition.result_schema.model_validate(result.result, strict=True).model_dump()
-            if definition.result_verifier(arguments, payload) is not True:
-                raise ValueError('Result verification failed')
-            result.result = payload
-            return result, bool(definition.read_only and not definition.requires_approval)
-        except Exception:
-            return ToolResult(tool=name, success=False, error='Tool result verification failed'), False
+        return verify_plan_result(name, arguments, result, definition)
 
     async def chat(
         self,
@@ -959,6 +950,125 @@ class AgentEngine:
                 except Exception:
                     logger.exception('Unable to record interrupted task')
 
+    async def run_document_task(
+        self, session_id: str, objective: str, files, *, user_id: str,
+        authorize_sources: Callable[[str, str, tuple[tuple[str, bytes], ...], str], bool],
+        cancelled: Callable[[], bool] | None = None,
+        present: bool = False,
+    ) -> AsyncIterator[dict]:
+        """Execute a read-only document plan from an independently authorized offline caller.
+
+        `authorize_sources(owner, conversation, files, clearance)` checks the exact
+        byte inputs under current source policy. Events are in-process and must not
+        be written to task storage, conversation history or diagnostic logs.
+        `present=True` projects terminal evidence to display data inside the live scope.
+        """
+        from backend.agent.document_plan import DocumentActions
+        from backend.agent.document_presentation import present_answer
+        from backend.agent.planner import StepStatus
+        from backend.auth.models import Permission, has_permission, resolve_user_clearance
+        from backend.auth.request_context import cap_clearance, request_tools_enabled
+        from backend.multimodal.document_reasoning import ReasoningError, document_inputs, open_document_reasoning
+
+        task_id = uuid.uuid4().hex
+        step = None
+        actions = None
+        try:
+            try:
+                _, origin = self._current_dispatch_identity(session_id, user_id)
+            except Exception:
+                raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'Document request authorization is unavailable.') from None
+            inputs = document_inputs(files)
+
+            def allowed(owner, conversation):
+                user, current = self._current_dispatch_identity(conversation, owner)
+                return (current == origin and request_tools_enabled.get() is True
+                        and has_permission(user.role, Permission.EXECUTE_READ_TOOLS)
+                        and authorize_sources(owner, conversation, inputs, cap_clearance(resolve_user_clearance(user))) is True)
+
+            with open_document_reasoning(inputs, owner_id=user_id, conversation_id=session_id,
+                                         allowed=allowed, cancelled=cancelled) as scope:
+                actions = DocumentActions(scope)
+                plan = self._planner.create_document_plan(task_id, objective).model_copy(deep=True)
+                lookup = actions.contracts.get
+                if (not 2 <= len(plan.steps) <= 3 or plan.steps[-1].tool_name != 'document_synthesize'
+                        or any(item.tool_name not in actions.contracts or item.tool_name == 'document_synthesize'
+                               for item in plan.steps[:-1])
+                        or not plan.steps[-1].bindings or plan.steps[-1].arguments
+                        or self._plan_validator.validate(plan, tool_lookup=lookup)):
+                    raise ReasoningError('PLAN_INVALID', 'The document plan could not be validated.')
+                expected = dict(zip(('finding', 'next_finding'), (item.id for item in plan.steps[:-1])))
+                if {name: binding.step_id for name, binding in plan.steps[-1].bindings.items()} != expected:
+                    raise ReasoningError('PLAN_INVALID', 'The document plan could not verify all findings in order.')
+                self._plan_validator.enforce_approval_requirements(plan, tool_lookup=lookup)
+                yield {'type': 'task_started', 'task_id': task_id, 'status': 'planning'}
+                yield {'type': 'plan_created', 'task_id': task_id, 'plan': {
+                    'objective': plan.objective,
+                    'steps': [{'id': item.id, 'description': item.description, 'status': StepStatus.pending.value}
+                              for item in plan.steps],
+                }}
+                results, states, findings = [], {}, []
+                for step in plan.steps:
+                    event = {'type': 'plan_step', 'task_id': task_id, 'step_id': step.id, 'description': step.description}
+                    yield {**event, 'status': StepStatus.running.value}
+                    try:
+                        scope.sources()  # Recheck identity, evidence lifetime and cancellation after yielding.
+                        definition = lookup(step.tool_name)
+                        if step.requires_approval or not definition or not definition.enabled or not definition.read_only:
+                            raise ReasoningError('TOOL_UNAVAILABLE', 'The document operation is unavailable.')
+                        try:
+                            arguments = bind_verified_arguments(step, definition, results, states)
+                        except ValueError:
+                            raise ReasoningError('DEPENDENCY_UNAVAILABLE', 'A required document finding was unavailable.') from None
+                        result, verified = await execute_plan_action(
+                            step.tool_name, arguments, lambda: actions.execute(step.tool_name, arguments), lookup,
+                        )
+                        scope.sources()
+                        if not verified:
+                            raise ReasoningError('CITATION_UNVERIFIED', 'The document result could not be verified.')
+                    except Exception as exc:
+                        yield {**event, 'status': StepStatus.failed.value}
+                        error = exc if isinstance(exc, ReasoningError) else ReasoningError(
+                            'OPERATION_UNAVAILABLE', 'The document operation could not be completed safely.')
+                        partial = None
+                        try:
+                            scope.sources()
+                            if findings:
+                                answer = actions.answer(*findings)
+                                partial = present_answer(scope, answer) if present else answer
+                        except ReasoningError as current_error:
+                            if current_error.code in {'CANCELLED', 'TIMEOUT', 'AUTHORIZATION_UNAVAILABLE'}:
+                                error = current_error
+                        terminal = self._document_failure(task_id, error, step, partial)
+                        break
+                    states[step.id] = StepStatus.completed.value
+                    results.append({'step_id': step.id, 'tool': step.tool_name, 'success': result.success,
+                                    'evidence_verified': verified, 'result': result.result})
+                    handle = result.result['handle']
+                    if step.tool_name != 'document_synthesize':
+                        findings.append(handle)
+                    yield {**event, 'status': StepStatus.completed.value}
+                else:
+                    answer = actions.completed_answer(handle)
+                    terminal = {'type': 'task_completed', 'task_id': task_id,
+                                'answer': present_answer(scope, answer) if present else answer}
+        except ReasoningError as error:
+            terminal = self._document_failure(task_id, error, step)
+        except Exception:
+            error = ReasoningError('OPERATION_UNAVAILABLE', 'The document workflow could not be completed safely.')
+            terminal = self._document_failure(task_id, error, step)
+        finally:
+            if actions is not None:
+                actions.close()
+            inputs = files = ()
+        yield terminal
+
+    @staticmethod
+    def _document_failure(task_id, error, step, partial=None):
+        return {'type': 'task_cancelled' if error.code == 'CANCELLED' else 'task_failed', 'task_id': task_id,
+                'error_code': error.code, 'error': str(error), 'step_id': step.id if step else None,
+                'operation': step.description if step else None, 'partial': partial}
+
     async def _run_agent_task_impl(
         self,
         session_id: str,
@@ -1158,36 +1268,9 @@ class AgentEngine:
             # earlier read-only steps of this run. Never interpolate model text.
             if step.bindings:
                 try:
-                    target = self._tool_registry.get(step.tool_name)
-                    if not target or not target.enabled or not target.read_only or target.requires_approval:
-                        raise ValueError('Dependency unavailable')
-                    resolved = dict(step.arguments)
-                    bound_unit = None
                     states = {item.id: item.status for item in task.plan.steps} if task.plan else {}
-                    for argument, binding in step.bindings.items():
-                        prior = next((item for item in executed_step_results if item.get('step_id') == binding.step_id), None)
-                        if (argument in resolved or not prior or prior.get('evidence_verified') is not True
-                                or prior.get('success') is not True or states.get(binding.step_id) != StepStatus.completed.value):
-                            raise ValueError('Dependency unavailable')
-                        output = prior.get('result')
-                        if not isinstance(output, dict) or binding.field not in output:
-                            raise ValueError('Dependency unavailable')
-                        value = output[binding.field]
-                        if (step.tool_name == 'unit_conversion' and argument == 'value'
-                                and prior.get('tool') == 'unit_conversion' and binding.field == 'result'):
-                            bound_unit = output.get('to_unit')
-                            if not bound_unit:
-                                raise ValueError('Dependency unit unavailable')
-                        if (type(value) not in (str, int, float, bool) or (isinstance(value, str) and len(value) > 4096)
-                                or (type(value) is int and value.bit_length() > 850)):
-                            raise ValueError('Dependency unavailable')
-                        if isinstance(value, float) and not math.isfinite(value):
-                            raise ValueError('Dependency unavailable')
-                        resolved[argument] = value
-                    if bound_unit is not None and resolved.get('from_unit') != bound_unit:
-                        raise ValueError('Dependency unit mismatch')
-                    target.input_schema.model_validate(resolved)
-                    step.arguments = resolved
+                    step.arguments = bind_verified_arguments(step, self._tool_registry.get(step.tool_name),
+                                                            executed_step_results, states)
                 except Exception:
                     self._task_manager.update_step_status(task.task_id, step.id, StepStatus.running.value)
                     self._task_manager.update_step_status(task.task_id, step.id, StepStatus.failed.value, error='Dependency unavailable')
@@ -1793,16 +1876,21 @@ class AgentEngine:
                 yield sources
                 return
 
+            evidence_verified = False
             if prior_numeric_receipt is not None and not prior_result_is_current():
                 from backend.tools.registry import ToolResult
                 result = ToolResult(tool=step.tool_name, success=False, error="Prior result is unavailable")
             elif self._tool_registry:
                 effective_uid = user_id or getattr(task, "user_id", None)
-                result = await self._dispatch_tool(
-                    step.tool_name, step.arguments, session_id=session_id, user_role=user_role,
-                    user_id=effective_uid,
-                    task_id=task.task_id, step_id=step.id,
-                    expected_registration=registrations[step.tool_name],
+                result, evidence_verified = await execute_plan_action(
+                    step.tool_name, step.arguments,
+                    lambda: self._dispatch_tool(
+                        step.tool_name, step.arguments, session_id=session_id, user_role=user_role,
+                        user_id=effective_uid, task_id=task.task_id, step_id=step.id,
+                        expected_registration=registrations[step.tool_name],
+                    ),
+                    self._tool_registry.get,
+                    current=lambda: self._tool_registry.registration_token(step.tool_name) == registrations[step.tool_name],
                 )
             else:
                 from backend.tools.registry import ToolResult
@@ -1811,10 +1899,6 @@ class AgentEngine:
                     error="Tool system is not initialized.",
                 )
 
-            if self._tool_registry and self._tool_registry.registration_token(step.tool_name) != registrations[step.tool_name]:
-                from backend.tools.registry import ToolResult
-                result = ToolResult(tool=step.tool_name, success=False, error='Tool registration changed during execution; outcome cannot be verified.')
-            result, evidence_verified = self._verify_registered_tool_result(step.tool_name, step.arguments, result)
             if result.success and (numeric_steps is not None or result_unit is not None) and not evidence_verified:
                 from backend.tools.registry import ToolResult
                 result = ToolResult(tool=step.tool_name, success=False, error='Tool result verification failed')

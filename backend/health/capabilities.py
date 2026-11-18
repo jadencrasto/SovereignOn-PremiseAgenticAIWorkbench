@@ -111,6 +111,15 @@ def capability_report(
         "schema_version": 1,
         "environment": environment,
         "deployment_verified": False,
+        "document_intelligence": {
+            "formats": ["PDF", "DOCX", "XLSX"],
+            "extraction": "offline_verified",
+            "reasoning": "offline_verified",
+            "planning": "offline_verified",
+            "direct_chat": "blocked",
+            "artifact_publication": "blocked",
+            "external_browser": "unverified",
+        },
         "capabilities": {
             "backend": entry("available", "startup_complete") if ready else entry("unavailable", "startup_incomplete"),
             "ollama": entry(observation.state, observation.reason),

@@ -59,7 +59,7 @@ class PlanValidator:
         self._tool_registry = tool_registry
         self._max_plan_steps = max_plan_steps
 
-    def validate(self, plan: AgentPlan) -> List[PlanValidationError]:
+    def validate(self, plan: AgentPlan, *, tool_lookup=None) -> List[PlanValidationError]:
         """
         Validate an entire plan.  Returns a list of errors (empty = valid).
 
@@ -73,6 +73,7 @@ class PlanValidator:
             7. No recursive patterns (same tool called with same args)
         """
         errors: List[PlanValidationError] = []
+        get_tool = self._tool_registry.get if tool_lookup is None else tool_lookup
 
         # --- Plan-level checks ---
         if not plan.steps:
@@ -99,7 +100,7 @@ class PlanValidator:
         # keep their prior behavior and cannot act as dependency evidence.
         if any(step.bindings for step in plan.steps):
             for step in plan.steps:
-                tool = self._tool_registry.get(step.tool_name) if step.tool_name else None
+                tool = get_tool(step.tool_name) if step.tool_name else None
                 if (not tool or not tool.enabled or not tool.read_only or tool.requires_approval
                         or not tool.result_schema or not callable(tool.result_verifier)):
                     errors.append(PlanValidationError(step.id, 'Bound workflow requires verified read-only tool contracts'))
@@ -108,11 +109,11 @@ class PlanValidator:
         tool_call_signatures = []
         previous_steps = {}
         for step in plan.steps:
-            step_errors = self._validate_step(step)
-            target = self._tool_registry.get(step.tool_name) if step.tool_name else None
+            step_errors = self._validate_step(step, get_tool, tool_lookup is not None)
+            target = get_tool(step.tool_name) if step.tool_name else None
             for argument, binding in step.bindings.items():
                 source = previous_steps.get(binding.step_id)
-                source_tool = self._tool_registry.get(source.tool_name) if source and source.tool_name else None
+                source_tool = get_tool(source.tool_name) if source and source.tool_name else None
                 output = getattr(source_tool, 'result_schema', None)
                 if (not target or not target.read_only or target.requires_approval
                         or argument not in target.input_schema.model_fields or argument in step.arguments
@@ -162,7 +163,7 @@ class PlanValidator:
 
         return errors
 
-    def _validate_step(self, step: PlanStep) -> List[PlanValidationError]:
+    def _validate_step(self, step: PlanStep, get_tool, local: bool) -> List[PlanValidationError]:
         """Validate a single plan step."""
         errors: List[PlanValidationError] = []
 
@@ -175,12 +176,12 @@ class PlanValidator:
             return errors
 
         # --- Check tool exists ---
-        tool = self._tool_registry.get(step.tool_name)
+        tool = get_tool(step.tool_name)
         if tool is None:
-            available = [t.name for t in self._tool_registry.list_tools()]
+            available = '' if local else f' Available: {[t.name for t in self._tool_registry.list_tools()]}'
             errors.append(PlanValidationError(
                 step.id,
-                f"Unknown tool '{step.tool_name}'. Available: {available}"
+                f"Unknown tool '{step.tool_name}'.{available}"
             ))
             return errors  # can't validate further
 
@@ -251,19 +252,20 @@ class PlanValidator:
 
         return errors
 
-    def enforce_approval_requirements(self, plan: AgentPlan) -> None:
+    def enforce_approval_requirements(self, plan: AgentPlan, *, tool_lookup=None) -> None:
         """
         Post-validation pass to ensure approval requirements strictly mirror tool definitions:
         high-risk / mutating tools require approval; safe / read-only tools never require approval.
 
         Mutates the plan in-place.
         """
+        get_tool = self._tool_registry.get if tool_lookup is None else tool_lookup
         for step in plan.steps:
             if step.tool_name is None:
                 step.requires_approval = False
                 continue
 
-            tool = self._tool_registry.get(step.tool_name)
+            tool = get_tool(step.tool_name)
             if tool is None:
                 continue
 

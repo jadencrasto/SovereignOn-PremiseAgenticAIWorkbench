@@ -19,12 +19,28 @@ import io
 import logging
 import re
 import uuid
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from backend.multimodal.document_evidence import (
+    DocumentEvidence, ExtractedBlock, ExtractedTable, ExtractionBudget, ExtractionLimit,
+    ExtractionWarning, SourceLocation, header_unit, valid_source_filename,
+)
+from backend.multimodal.openxml_limits import validate_openxml
+from backend.multimodal.pdf_limits import open_bounded_pdf
+
 logger = logging.getLogger(__name__)
+
+
+def _markdown_table(rows):
+    lines = []
+    for index, row in enumerate(rows):
+        values = [(cell or '').replace('\n', ' ').replace('|', '\\|') for cell in row]
+        lines.append('| ' + ' | '.join(values) + ' |')
+        if index == 0:
+            lines.append('| ' + ' | '.join(['---'] * len(row)) + ' |')
+    return '\n'.join(lines)
 
 # ---------------------------------------------------------------------------
 # Internal data structures
@@ -38,6 +54,7 @@ class Document:
     file_type: str          # pdf | txt | md | docx
     text: str               # full extracted text
     metadata: dict = field(default_factory=dict)
+    evidence: DocumentEvidence | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -67,6 +84,8 @@ class DocumentParser:
     SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx"}
     MAX_INPUT_BYTES = 50 * 1024 * 1024
     MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+    MAX_OUTPUT_CHARS = 10 * 1024 * 1024
+    EXTRACTION_SECONDS = 5
 
     @classmethod
     def parse(cls, filename: str, content: bytes) -> Document:
@@ -83,6 +102,8 @@ class DocumentParser:
         Raises:
             ValueError : unsupported extension or empty content
         """
+        if not valid_source_filename(filename):
+            raise ValueError("Invalid document filename.")
         suffix = Path(filename).suffix.lower()
         if suffix not in cls.SUPPORTED_EXTENSIONS:
             raise ValueError(
@@ -96,37 +117,35 @@ class DocumentParser:
             raise ValueError("File exceeds the parser size limit or is not bytes.")
         if suffix == ".pdf" and not content.startswith(b"%PDF-"):
             raise ValueError("Invalid PDF signature.")
-        if suffix == ".docx":
-            try:
-                with zipfile.ZipFile(io.BytesIO(content)) as archive:
-                    entries = archive.infolist()
-                    if (len(entries) > 10000 or
-                            sum(entry.file_size for entry in entries) > cls.MAX_DOCX_UNCOMPRESSED_BYTES or
-                            "word/document.xml" not in archive.namelist() or
-                            "[Content_Types].xml" not in archive.namelist()):
-                        raise ValueError("Invalid or oversized DOCX archive.")
-            except (zipfile.BadZipFile, OSError) as exc:
-                raise ValueError("Invalid DOCX archive.") from exc
-        elif suffix in (".txt", ".md") and (b"\x00" in content or content.startswith((b"%PDF-", b"PK\x03\x04"))):
+        if suffix in (".txt", ".md") and (b"\x00" in content or content.startswith((b"%PDF-", b"PK\x03\x04"))):
             raise ValueError("File is not supported plain text.")
 
         doc_id = cls._make_doc_id(filename, content)
 
         if suffix == ".pdf":
+            budget = ExtractionBudget(cls.EXTRACTION_SECONDS, cls.MAX_OUTPUT_CHARS)
             try:
-                text, metadata = cls._parse_pdf(content)
-            except Exception as exc:
-                raise ValueError(f"Failed to parse PDF '{filename}': {exc}") from exc
+                reader = open_bounded_pdf(content, budget)
+                try:
+                    text, metadata = cls._parse_pdf(content, reader=reader, budget=budget)
+                finally:
+                    reader.stream.close()
+            except ExtractionLimit:
+                raise
+            except Exception:
+                raise ValueError("PDF could not be parsed within the supported document profile.") from None
         elif suffix == ".docx":
             text, metadata = cls._parse_docx(content)
         else:
             # .txt and .md
             text, metadata = cls._parse_text(content)
 
-        if len(text) > 10 * 1024 * 1024:
+        parts = metadata.pop("_evidence_parts", None)
+        evidence = DocumentEvidence.from_parts(filename, suffix[1:], *parts) if parts is not None else None
+        if len(text) > cls.MAX_OUTPUT_CHARS:
             raise ValueError("Extracted text exceeds the parser limit.")
-        if not text.strip():
-            raise ValueError(f"No text could be extracted from '{filename}'.")
+        if not text.strip() and not (evidence and any(w.code == "PDF_OCR_UNAVAILABLE" for w in evidence.warnings)):
+            raise ValueError("No text could be extracted from the document.")
 
         metadata["content_sha256"] = hashlib.sha256(content).hexdigest()
         return Document(
@@ -135,6 +154,7 @@ class DocumentParser:
             file_type=suffix.lstrip("."),
             text=text,
             metadata=metadata,
+            evidence=evidence,
         )
 
     # ------------------------------------------------------------------
@@ -142,173 +162,135 @@ class DocumentParser:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_pdf(content: bytes) -> tuple[str, dict]:
-        """
-        Extract text from PDF with structured table preservation.
+    def _parse_pdf(content: bytes, *, reader=None, budget=None) -> tuple[str, dict]:
+        """Preserve actual pages. Only geometry-backed grids are citation evidence."""
+        from pypdf import PdfReader
 
-        3-tier extraction hierarchy:
-          1. pdfplumber (if installed) — structured table extraction
-          2. Lightweight line-based heuristic — detect tabular patterns
-          3. pypdf extract_text() — final fallback (existing behavior)
-
-        A failure in table detection NEVER causes the entire PDF ingestion to fail.
-        """
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            raise RuntimeError("pypdf is required for PDF parsing: pip install pypdf")
-
-        reader = PdfReader(io.BytesIO(content))
+        bounded = reader is not None
+        if reader is None:
+            reader = PdfReader(io.BytesIO(content))
+        if budget is None:
+            budget = ExtractionBudget(DocumentParser.EXTRACTION_SECONDS, DocumentParser.MAX_OUTPUT_CHARS)
         page_count = len(reader.pages)
-        pages = []
-
-        # Tier 1: Try pdfplumber for structured table extraction
-        pdfplumber_available = False
+        pages, blocks, tables, warnings = [], [], [], []
+        methods = set()
+        plumber = None
         try:
-            import pdfplumber
-            pdfplumber_available = True
-        except ImportError:
-            pass
-
-        if pdfplumber_available:
             try:
-                pdf_pl = pdfplumber.open(io.BytesIO(content))
-                table_settings = {"snap_x_tolerance": 6, "join_x_tolerance": 6}
+                import pdfplumber
+                plumber = pdfplumber.open(io.BytesIO(content))
+                if bounded and len(plumber.pages) != page_count:
+                    plumber.close()
+                    plumber = None
+            except Exception:
+                plumber = None
 
-                for page_num, pl_page in enumerate(pdf_pl.pages, start=1):
-                    page_parts = []
+            for number in range(1, page_count + 1):
+                budget.check()
+                location = SourceLocation(page=number)
+                page_text = ''
+                page_tables = []
+                has_images = False
+                method = 'pypdf'
+                if plumber is not None:
                     try:
-                        found_tables = []
-                        if hasattr(pl_page, "find_tables"):
-                            try:
-                                found_tables = pl_page.find_tables(table_settings) or []
-                            except Exception:
-                                found_tables = []
-
-                        table_bboxes = [t.bbox for t in found_tables if hasattr(t, "bbox") and t.bbox]
-
-                        raw_tables = []
-                        for t in found_tables:
-                            if hasattr(t, "extract"):
-                                extr = t.extract()
-                                if extr:
-                                    raw_tables.append(extr)
-                        if not raw_tables and hasattr(pl_page, "extract_tables"):
-                            try:
-                                raw_tables = pl_page.extract_tables() or []
-                            except Exception:
-                                raw_tables = []
-                        if not raw_tables and hasattr(pl_page, "extract_tables"):
-                            try:
-                                raw_tables = pl_page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"}) or []
-                            except Exception:
-                                raw_tables = []
-
-                        # Extract tables as structured Markdown tables
-                        md_tables = []
-                        for raw_table in raw_tables:
-                            if not raw_table or len(raw_table) < 1:
-                                continue
-
-                            num_cols = max(len(r) for r in raw_table)
-                            # Identify columns that have at least one non-empty cell across rows
-                            col_has_content = [
-                                any(c_idx < len(r) and r[c_idx] is not None and str(r[c_idx]).strip() != "" for r in raw_table)
-                                for c_idx in range(num_cols)
-                            ]
-
-                            cleaned_rows = []
-                            for row in raw_table:
-                                row_padded = list(row) + [""] * (num_cols - len(row))
-                                cleaned = [
-                                    str(cell or "").strip().replace("\n", " ").replace("|", "\\|")
-                                    for i, cell in enumerate(row_padded)
-                                    if col_has_content[i]
-                                ]
-                                if any(cleaned):
-                                    cleaned_rows.append(cleaned)
-
-                            if cleaned_rows and len(cleaned_rows) >= 2:
-                                headers = cleaned_rows[0]
-                                md_lines = [
-                                    "| " + " | ".join(headers) + " |",
-                                    "| " + " | ".join(["---"] * len(headers)) + " |",
-                                ]
-                                for row_cells in cleaned_rows[1:]:
-                                    md_lines.append("| " + " | ".join(row_cells) + " |")
-                                md_tables.append("\n".join(md_lines))
-
-                        # Extract text outside tables by filtering out table bounding boxes
-                        if table_bboxes:
-                            def not_within_tables(obj):
-                                ox0 = obj.get("x0", 0)
-                                ox1 = obj.get("x1", 0)
-                                otop = obj.get("top", 0)
-                                obottom = obj.get("bottom", 0)
-                                for bx0, btop, bx1, bbottom in table_bboxes:
-                                    if (ox0 >= bx0 - 2 and ox1 <= bx1 + 2 and otop >= btop - 2 and obottom <= bbottom + 2):
-                                        return False
-                                return True
-                            try:
-                                filtered_page = pl_page.filter(not_within_tables)
-                                non_table_text = filtered_page.extract_text() or ""
-                            except Exception:
-                                non_table_text = pl_page.extract_text() or ""
-                        else:
-                            non_table_text = pl_page.extract_text() or ""
-
-                        if non_table_text.strip():
-                            # If no tables were detected by pdfplumber on this page, run table heuristic
-                            if not md_tables:
-                                non_table_text = DocumentParser._apply_table_heuristic(non_table_text)
-                            page_parts.append(non_table_text.strip())
-                        if md_tables:
-                            page_parts.extend(md_tables)
-
-                    except Exception as page_exc:
-                        # Tier 1 failed for this page — fall through to tier 3 for this page
-                        logger.debug("pdfplumber failed for page %d: %s", page_num, page_exc)
-                        fallback_text = reader.pages[page_num - 1].extract_text() or ""
-                        if fallback_text.strip():
-                            page_parts.append(fallback_text.strip())
-
-                    if page_parts:
-                        combined = "\n\n".join(page_parts)
-                        pages.append(f"[Page {page_num}]\n{combined}")
-
-                pdf_pl.close()
-
-                if pages:
-                    text = "\n\n".join(pages)
-                    metadata = {"page_count": page_count, "source_format": "pdf", "extraction_method": "pdfplumber"}
-                    logger.debug("PDF parsed (pdfplumber): %d pages, %d chars", page_count, len(text))
-                    return text, metadata
-                # If pdfplumber produced no output, fall through to tier 3
-            except Exception as exc:
-                logger.debug("pdfplumber extraction failed entirely: %s — falling back to pypdf", exc)
-
-        # Tier 2 & 3: pypdf extract_text with lightweight table heuristic
-        pages = []
-        for page_num, page in enumerate(reader.pages, start=1):
-            page_text = page.extract_text() or ""
-            if not page_text.strip():
-                continue
-
-            # Tier 2: Lightweight heuristic — detect lines with multiple whitespace-separated columns
-            enhanced_text = DocumentParser._apply_table_heuristic(page_text)
-            pages.append(f"[Page {page_num}]\n{enhanced_text.strip()}")
-
-        text = "\n\n".join(pages)
+                        page = plumber.pages[number - 1]
+                        has_images = bool(page.images) if bounded else False
+                        page_text, page_tables = DocumentParser._pdf_page(page, location, budget, warnings, bounded)
+                        if page_text.strip() or page_tables:
+                            method = 'pdfplumber'
+                    except ExtractionLimit:
+                        raise
+                    except Exception:
+                        warnings.append(ExtractionWarning('PDF_LAYOUT_UNAVAILABLE', location))
+                if method == 'pypdf':
+                    source_page = reader.pages[number - 1]
+                    if bounded:
+                        page_text = source_page.extract_text(visitor_text=lambda text, *_: budget.consume(text)) or ''
+                    else:
+                        page_text = source_page.extract_text() or ''
+                    if bounded and not has_images:
+                        resources = reader.pages[number - 1].get('/Resources')
+                        xobjects = resources.get_object().get('/XObject') if resources is not None else None
+                        if xobjects is not None:
+                            has_images = any(ref.get_object().get('/Subtype') == '/Image'
+                                             for ref in xobjects.get_object().values())
+                budget.consume(page_text)
+                entries = [text.strip() for text in re.split(r'\n[ \t]*\n', page_text) if text.strip()]
+                if bounded and entries and not page_tables:
+                    warnings.append(ExtractionWarning('PDF_NO_VERIFIED_TABLE_STRUCTURE', location))
+                blocks.extend(ExtractedBlock(location, text) for text in entries)
+                if len(tables) + len(page_tables) > 64:
+                    raise ExtractionLimit('PDF exceeds the table limit.')
+                tables.extend(page_tables)
+                entries.extend(_markdown_table(table.rows) for table in page_tables)
+                if entries:
+                    page_output = f"[Page {number}]\n" + "\n\n".join(entries)
+                    budget.check()
+                    pages.append(page_output)
+                    methods.add(method)
+                else:
+                    code = 'PDF_OCR_UNAVAILABLE' if has_images else 'PDF_EMPTY_PAGE'
+                    warnings.append(ExtractionWarning(code, location))
+        finally:
+            if plumber is not None:
+                plumber.close()
+        budget.check()
         metadata = {
-            "page_count": page_count,
-            "source_format": "pdf",
-            "extraction_method": "pypdf" + ("+heuristic" if text != "\n\n".join(
-                f"[Page {i+1}]\n{(reader.pages[i].extract_text() or '').strip()}"
-                for i in range(page_count) if (reader.pages[i].extract_text() or '').strip()
-            ) else ""),
+            'page_count': page_count, 'source_format': 'pdf',
+            'extraction_method': '+'.join(sorted(methods)) or 'pypdf',
+            '_evidence_parts': (blocks, tables, warnings),
         }
-        logger.debug("PDF parsed (pypdf): %d pages, %d chars", page_count, len(text))
-        return text, metadata
+        return "\n\n".join(pages), metadata
+
+    @staticmethod
+    def _pdf_page(page, location, budget, warnings, bounded):
+        if bounded and len(page.chars) > 30_000:
+            raise ExtractionLimit('PDF page exceeds the text object limit.')
+        tables_found = []
+        if bounded and len(page.edges) > 120:
+            warnings.append(ExtractionWarning('PDF_TABLE_GEOMETRY_LIMIT', location))
+        else:
+            tables_found = page.find_tables() or []
+        budget.check()
+        # Keep the private legacy test path compatible. The real bounded entry
+        # point does not accept text alignment as verified table geometry.
+        candidates = [table.extract() for table in tables_found]
+        if not candidates and not bounded:
+            candidates = page.extract_tables() or []
+        budget.check()
+        tables, boxes = [], []
+        for index, candidate in enumerate(candidates, 1):
+            if (not candidate or len(candidate) < 2 or not 2 <= len(candidate[0]) <= 40
+                    or len(candidate) > 250 or any(len(row) != len(candidate[0]) for row in candidate)
+                    or (bounded and any(cell is None for row in candidate for cell in row))):
+                warnings.append(ExtractionWarning('PDF_TABLE_GEOMETRY_UNVERIFIED', location))
+                continue
+            rows = tuple(tuple(cell.strip() if cell is not None else None for cell in row) for row in candidate)
+            for row in rows:
+                for cell in row:
+                    if cell is not None:
+                        budget.consume(cell)
+            budget.consume(_markdown_table(rows))
+            tables.append(ExtractedTable(SourceLocation(page=location.page, table=index), rows,
+                                         tuple(header_unit(cell) for cell in rows[0])))
+            if index <= len(tables_found):
+                boxes.append(tables_found[index - 1].bbox)
+        if boxes:
+            def outside_table(obj):
+                return not any(
+                    obj.get('x0', 0) >= x0 - 2 and obj.get('x1', 0) <= x1 + 2
+                    and obj.get('top', 0) >= top - 2 and obj.get('bottom', 0) <= bottom + 2
+                    for x0, top, x1, bottom in boxes
+                )
+
+            text = page.filter(outside_table).extract_text() or ''
+        else:
+            text = page.extract_text() or ''
+            if bounded and not tables and re.search(r'\S+[ \t]{2,}\S+', text):
+                warnings.append(ExtractionWarning('PDF_TABLE_GEOMETRY_UNVERIFIED', location))
+        budget.check()
+        return text, tables
 
     @staticmethod
     def _apply_table_heuristic(page_text: str) -> str:
@@ -415,8 +397,8 @@ class DocumentParser:
 
         return "\n".join(result_parts)
 
-    @staticmethod
-    def _parse_docx(content: bytes) -> tuple[str, dict]:
+    @classmethod
+    def _parse_docx(cls, content: bytes) -> tuple[str, dict]:
         """Extract paragraphs and tables from a DOCX file in document body order."""
         try:
             from docx import Document as DocxDocument
@@ -424,58 +406,85 @@ class DocumentParser:
             from docx.text.paragraph import Paragraph as DocxParagraph
             from docx.oxml.ns import qn
         except ImportError:
-            raise RuntimeError("python-docx is required: pip install python-docx")
-
-        doc = DocxDocument(io.BytesIO(content))
-
-        # Iterate body elements in document order to interleave paragraphs and tables
-        parts = []
-        table_count = 0
-        paragraph_count = 0
-
-        for element in doc.element.body:
-            tag = element.tag.split("}")[-1] if "}" in element.tag else element.tag
-
-            if tag == "p":
-                # Paragraph element
-                para = DocxParagraph(element, doc)
-                text = para.text.strip()
-                if text:
-                    parts.append(text)
-                    paragraph_count += 1
-
-            elif tag == "tbl":
-                # Table element — convert to Markdown table
-                table = DocxTable(element, doc)
-                table_count += 1
-                md_lines = []
-                for r_idx, row in enumerate(table.rows):
-                    cells = [cell.text.strip().replace("|", "\\|") for cell in row.cells]
-                    md_lines.append("| " + " | ".join(cells) + " |")
-                    if r_idx == 0:
-                        # Add Markdown header separator after first row
-                        md_lines.append("| " + " | ".join(["---"] * len(cells)) + " |")
-                if md_lines:
-                    parts.append("\n".join(md_lines))
-
-        text = "\n\n".join(parts)
-        metadata = {
-            "paragraph_count": paragraph_count,
-            "table_count": table_count,
-            "has_tables": table_count > 0,
-            "source_format": "docx",
-        }
-        # Extract core properties if available
+            raise RuntimeError("python-docx is required for DOCX parsing.") from None
+        budget = ExtractionBudget(cls.EXTRACTION_SECONDS, cls.MAX_OUTPUT_CHARS)
         try:
-            cp = doc.core_properties
-            if cp.title:
-                metadata["title"] = cp.title
-            if cp.author:
-                metadata["author"] = cp.author
+            if not isinstance(content, bytes) or not content or len(content) > cls.MAX_INPUT_BYTES:
+                raise ExtractionLimit('DOCX exceeds the parser size limit or is empty.')
+            validate_openxml(content, 'word/document.xml', cls.MAX_DOCX_UNCOMPRESSED_BYTES, budget)
+            doc = DocxDocument(io.BytesIO(content))
+            parts, blocks, tables, warnings = [], [], [], []
+            table_count = paragraph_index = 0
+            for body_index, element in enumerate(doc.element.body, 1):
+                budget.check()
+                if element.tag == qn('w:p'):
+                    paragraph_index += 1
+                    para = DocxParagraph(element, doc)
+                    text = para.text.strip()
+                    if text:
+                        budget.consume(text)
+                        heading = re.fullmatch(r'Heading([1-9])', para.style.style_id)
+                        blocks.append(ExtractedBlock(SourceLocation(paragraph=paragraph_index, body=body_index), text,
+                                                     int(heading[1]) if heading else None))
+                        parts.append(text)
+                elif element.tag == qn('w:tbl'):
+                    table_count += 1
+                    if table_count > 64:
+                        raise ExtractionLimit('DOCX exceeds the table limit.')
+                    location = SourceLocation(table=table_count, body=body_index)
+                    rows = cls._docx_grid(DocxTable(element, doc), location, budget, warnings)
+                    if rows:
+                        rendered = _markdown_table(rows)
+                        budget.consume(rendered)
+                        tables.append(ExtractedTable(location, rows, tuple(header_unit(cell) for cell in rows[0])))
+                        parts.append(rendered)
+            metadata = {
+                'paragraph_count': len(blocks), 'table_count': table_count,
+                'has_tables': table_count > 0, 'source_format': 'docx',
+                '_evidence_parts': (blocks, tables, warnings),
+            }
+            for name in ('title', 'author'):
+                value = getattr(doc.core_properties, name)
+                if value and len(value) <= 255 and value.isprintable():
+                    metadata[name] = value
+            budget.check()
+            return '\n\n'.join(parts), metadata
+        except ExtractionLimit:
+            raise
         except Exception:
-            pass
-        logger.debug("DOCX parsed: %d paragraphs, %d tables, %d chars", paragraph_count, table_count, len(text))
-        return text, metadata
+            raise ValueError('DOCX could not be parsed within the supported document profile.') from None
+
+    @staticmethod
+    def _docx_grid(table, location, budget, warnings):
+        from docx.table import _Cell
+
+        width = len(table.columns)
+        if width > 40 or len(table.rows) > 250:
+            raise ExtractionLimit('DOCX table exceeds the row or column limit.')
+        rows = []
+        for row in table.rows:
+            budget.check()
+            if not 0 <= row.grid_cols_before <= width or not 0 <= row.grid_cols_after <= width:
+                raise ValueError('Invalid DOCX table grid.')
+            cells = [None] * row.grid_cols_before
+            for tc in row._tr.tc_lst:
+                span = tc.grid_span
+                if not 1 <= span <= width - len(cells):
+                    raise ValueError('Invalid DOCX table span.')
+                text = None if tc.vMerge == 'continue' else _Cell(tc, table).text.strip()
+                if text is not None:
+                    budget.consume(text)
+                cells.extend([text] + [None] * (span - 1))
+                if tc.tbl_lst:
+                    warning = ExtractionWarning('DOCX_NESTED_TABLE_OMITTED', location)
+                    if warning not in warnings:
+                        warnings.append(warning)
+            cells.extend([None] * row.grid_cols_after)
+            if len(cells) != width or not width:
+                warnings.append(ExtractionWarning('DOCX_TABLE_GRID_UNVERIFIED', location))
+                return ()
+            rows.append(tuple(cells))
+        return tuple(rows)
 
     @staticmethod
     def _parse_text(content: bytes) -> tuple[str, dict]:
