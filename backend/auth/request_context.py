@@ -7,6 +7,7 @@ local_legacy_access = ContextVar('local_legacy_access', default=False)
 request_tools_enabled = ContextVar('request_tools_enabled', default=None)
 # Bound only after server authentication; never populated from tool arguments.
 dispatch_identity_resolver = ContextVar('dispatch_identity_resolver', default=None)
+http_request_active = ContextVar('http_request_active', default=False)
 
 
 class ClearanceContextMiddleware:
@@ -20,9 +21,11 @@ class ClearanceContextMiddleware:
         legacy_token = local_legacy_access.set(False)
         tools_token = request_tools_enabled.set(None)
         identity_token = dispatch_identity_resolver.set(None)
+        http_token = http_request_active.set(scope['type'] == 'http')
         try:
             await self.app(scope, receive, send)
         finally:
+            http_request_active.reset(http_token)
             dispatch_identity_resolver.reset(identity_token)
             effective_clearance.reset(token)
             effective_owner.reset(owner_token)

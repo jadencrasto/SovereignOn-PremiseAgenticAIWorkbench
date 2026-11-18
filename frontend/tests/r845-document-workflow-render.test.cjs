@@ -127,3 +127,35 @@ test('results from separate requests or a premature terminal event cannot comple
   assert.match(render(events), /Document workflow status is unavailable/);
   assert.match(render([...plan(), event('task_completed', { answer: passages() })]), /Document workflow status is unavailable/);
 });
+
+test('delivery failures replace the buffered workflow with a safe terminal state', () => {
+  for (const [code, status] of [
+    ['AUTHORIZATION_UNAVAILABLE', /Workflow failed/],
+    ['TIMEOUT', /Workflow failed/],
+    ['OPERATION_UNAVAILABLE', /Workflow failed/],
+    ['CANCELLED', /Cancelled/],
+  ]) {
+    const markup = render([event(code === 'CANCELLED' ? 'task_cancelled' : 'task_failed', {
+      error_code: code, error: 'The document workflow could not be completed safely.',
+      step_id: null, operation: null, partial: null,
+    })]);
+    assert.match(markup, status);
+    assert.doesNotMatch(markup, /Workflow completed|Workflow steps|Source evidence|Earlier verified findings/);
+  }
+});
+
+test('authorization loss or cancellation after start can finish without a plan', () => {
+  const start = event('task_started', { status: 'planning' });
+  for (const [type, error_code, message] of [
+    ['task_failed', 'AUTHORIZATION_UNAVAILABLE', /Document authorization is no longer available/],
+    ['task_cancelled', 'CANCELLED', /Cancelled/],
+  ]) {
+    const end = event(type, {
+      error_code, error: 'SECRET ERROR', step_id: null, operation: null, partial: null,
+    });
+    const markup = render([start, end]);
+    assert.match(markup, message);
+    assert.doesNotMatch(markup, /SECRET ERROR|Workflow completed|Workflow steps|Source evidence/);
+    assert.match(render([start, { ...end, partial: passages() }]), /Document workflow status is unavailable/);
+  }
+});

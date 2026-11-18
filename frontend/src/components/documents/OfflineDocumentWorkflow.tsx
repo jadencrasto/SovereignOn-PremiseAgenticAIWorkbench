@@ -42,8 +42,10 @@ function workflowState(events: readonly DocumentWorkflowEvent[]) {
   const last = events.at(-1);
   const terminal = last?.type === 'task_completed' || last?.type === 'task_failed' || last?.type === 'task_cancelled' ? last : null;
   if (steps.length < 2 || steps.length > 3) {
-    if (events.length === 0 || (events.length === 1 && (last?.type === 'task_started' ||
-        (terminal && terminal.type !== 'task_completed' && terminal.partial === null)))) return { steps: [], terminal };
+    const started = events[0]?.type === 'task_started';
+    const safeFailure = terminal && terminal.type !== 'task_completed' && terminal.partial === null;
+    if (events.length === 0 || (events.length === 1 && (started || safeFailure)) ||
+        (events.length === 2 && started && safeFailure)) return { steps: [], terminal };
     return null;
   }
   if (events[0]?.type !== 'task_started' || new Set(steps.map(step => step.id)).size !== steps.length) return null;

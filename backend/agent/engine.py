@@ -28,7 +28,7 @@ New SSE events emitted during multimodal:
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+from contextlib import aclosing, contextmanager
 import json
 import logging
 import math
@@ -36,7 +36,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -47,6 +47,9 @@ from backend.models.base import ChatRequest, Message
 from backend.models.router import ModelRouter
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from backend.multimodal.document_transport import DocumentHandle, DocumentTransport
 
 import ast
 
@@ -950,44 +953,61 @@ class AgentEngine:
                 except Exception:
                     logger.exception('Unable to record interrupted task')
 
-    async def run_document_task(
-        self, session_id: str, objective: str, files, *, user_id: str,
-        authorize_sources: Callable[[str, str, tuple[tuple[str, bytes], ...], str], bool],
-        cancelled: Callable[[], bool] | None = None,
-        present: bool = False,
-    ) -> AsyncIterator[dict]:
-        """Execute a read-only document plan from an independently authorized offline caller.
+    @contextmanager
+    def _document_task_scope(self, session_id, files, user_id, authorize_sources, cancelled, handles):
+        from backend.auth.models import Permission, has_permission, resolve_user_clearance
+        from backend.auth.request_context import cap_clearance, http_request_active, request_tools_enabled
+        from backend.multimodal.document_reasoning import ReasoningError, document_inputs, open_document_reasoning
+        from backend.multimodal.document_transport import DocumentTransport, has_active_transport
 
-        `authorize_sources(owner, conversation, files, clearance)` checks the exact
-        byte inputs under current source policy. Events are in-process and must not
-        be written to task storage, conversation history or diagnostic logs.
-        `present=True` projects terminal evidence to display data inside the live scope.
+        if type(session_id) is DocumentTransport:
+            with session_id.agent_scope(self, handles) as lease:
+                if any(value is not None for value in (files, user_id, authorize_sources, cancelled)):
+                    raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'The lease owns the document request context.')
+                yield lease.reasoning(), lease.check, lease.check_agent_release
+            return
+
+        # The previous byte contract remains exclusively for independent offline callers.
+        if http_request_active.get() or has_active_transport() or handles is not None:
+            raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'An authenticated document lease is required.')
+        try:
+            _, origin = self._current_dispatch_identity(session_id, user_id)
+        except Exception:
+            raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'Document request authorization is unavailable.') from None
+        inputs = document_inputs(files)
+
+        def allowed(owner, conversation):
+            user, current = self._current_dispatch_identity(conversation, owner)
+            return (current == origin and request_tools_enabled.get() is True
+                    and has_permission(user.role, Permission.EXECUTE_READ_TOOLS)
+                    and authorize_sources(owner, conversation, inputs, cap_clearance(resolve_user_clearance(user))) is True)
+
+        with open_document_reasoning(inputs, owner_id=user_id, conversation_id=session_id,
+                                     allowed=allowed, cancelled=cancelled) as scope:
+            yield scope, scope._check, scope._check
+
+    async def run_document_task(
+        self, session_id: str | DocumentTransport, objective: str, files=None, *, user_id: str | None = None,
+        authorize_sources: Callable[[str, str, tuple[tuple[str, bytes], ...], str], bool] | None = None,
+        cancelled: Callable[[], bool] | None = None, present: bool = False,
+        handles: tuple[DocumentHandle, ...] | None = None,
+    ) -> AsyncIterator[dict]:
+        """Consume one authenticated lease or run the separately authorized offline byte contract.
+
+        For a lease, pass just the lease and objective (optionally present and ordered handles).
+        Consume/close this in-process iterator inside the transport context in its original task.
         """
         from backend.agent.document_plan import DocumentActions
         from backend.agent.document_presentation import present_answer
         from backend.agent.planner import StepStatus
-        from backend.auth.models import Permission, has_permission, resolve_user_clearance
-        from backend.auth.request_context import cap_clearance, request_tools_enabled
-        from backend.multimodal.document_reasoning import ReasoningError, document_inputs, open_document_reasoning
+        from backend.multimodal.document_reasoning import ReasoningError
 
         task_id = uuid.uuid4().hex
         step = None
         actions = None
         try:
-            try:
-                _, origin = self._current_dispatch_identity(session_id, user_id)
-            except Exception:
-                raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'Document request authorization is unavailable.') from None
-            inputs = document_inputs(files)
-
-            def allowed(owner, conversation):
-                user, current = self._current_dispatch_identity(conversation, owner)
-                return (current == origin and request_tools_enabled.get() is True
-                        and has_permission(user.role, Permission.EXECUTE_READ_TOOLS)
-                        and authorize_sources(owner, conversation, inputs, cap_clearance(resolve_user_clearance(user))) is True)
-
-            with open_document_reasoning(inputs, owner_id=user_id, conversation_id=session_id,
-                                         allowed=allowed, cancelled=cancelled) as scope:
+            with self._document_task_scope(session_id, files, user_id, authorize_sources,
+                                           cancelled, handles) as (scope, check, check_release):
                 actions = DocumentActions(scope)
                 plan = self._planner.create_document_plan(task_id, objective).model_copy(deep=True)
                 lookup = actions.contracts.get
@@ -998,10 +1018,13 @@ class AgentEngine:
                         or self._plan_validator.validate(plan, tool_lookup=lookup)):
                     raise ReasoningError('PLAN_INVALID', 'The document plan could not be validated.')
                 expected = dict(zip(('finding', 'next_finding'), (item.id for item in plan.steps[:-1])))
-                if {name: binding.step_id for name, binding in plan.steps[-1].bindings.items()} != expected:
+                if ({name: binding.step_id for name, binding in plan.steps[-1].bindings.items()} != expected
+                        or any(binding.field != 'handle' for binding in plan.steps[-1].bindings.values())
+                        or any(item.bindings for item in plan.steps[:-1])):
                     raise ReasoningError('PLAN_INVALID', 'The document plan could not verify all findings in order.')
                 self._plan_validator.enforce_approval_requirements(plan, tool_lookup=lookup)
                 yield {'type': 'task_started', 'task_id': task_id, 'status': 'planning'}
+                check()
                 yield {'type': 'plan_created', 'task_id': task_id, 'plan': {
                     'objective': plan.objective,
                     'steps': [{'id': item.id, 'description': item.description, 'status': StepStatus.pending.value}
@@ -1009,10 +1032,11 @@ class AgentEngine:
                 }}
                 results, states, findings = [], {}, []
                 for step in plan.steps:
+                    check()
                     event = {'type': 'plan_step', 'task_id': task_id, 'step_id': step.id, 'description': step.description}
                     yield {**event, 'status': StepStatus.running.value}
                     try:
-                        scope.sources()  # Recheck identity, evidence lifetime and cancellation after yielding.
+                        check()
                         definition = lookup(step.tool_name)
                         if step.requires_approval or not definition or not definition.enabled or not definition.read_only:
                             raise ReasoningError('TOOL_UNAVAILABLE', 'The document operation is unavailable.')
@@ -1020,10 +1044,12 @@ class AgentEngine:
                             arguments = bind_verified_arguments(step, definition, results, states)
                         except ValueError:
                             raise ReasoningError('DEPENDENCY_UNAVAILABLE', 'A required document finding was unavailable.') from None
+                        if step.tool_name == 'document_synthesize' and arguments != dict(zip(expected, findings, strict=True)):
+                            raise ReasoningError('DEPENDENCY_UNAVAILABLE', 'The ordered document findings could not be verified.')
                         result, verified = await execute_plan_action(
                             step.tool_name, arguments, lambda: actions.execute(step.tool_name, arguments), lookup,
                         )
-                        scope.sources()
+                        check()
                         if not verified:
                             raise ReasoningError('CITATION_UNVERIFIED', 'The document result could not be verified.')
                     except Exception as exc:
@@ -1032,8 +1058,13 @@ class AgentEngine:
                             'OPERATION_UNAVAILABLE', 'The document operation could not be completed safely.')
                         partial = None
                         try:
-                            scope.sources()
-                            if findings:
+                            check()
+                            if findings and error.code in {
+                                'NO_MATCH', 'NO_NUMERIC_EVIDENCE', 'FORMULA_ONLY', 'AMBIGUOUS_SOURCE',
+                                'AMBIGUOUS_TABLE', 'AMBIGUOUS_IDENTIFIER', 'TABLE_UNAVAILABLE', 'COLUMN_UNAVAILABLE',
+                                'WORKSHEET_UNAVAILABLE', 'PASSAGES_UNAVAILABLE', 'IDENTIFIER_UNAVAILABLE',
+                                'HEADER_UNAVAILABLE', 'INCOMPATIBLE_UNITS', 'INVALID_SELECTION', 'INVALID_QUERY',
+                            }:
                                 answer = actions.answer(*findings)
                                 partial = present_answer(scope, answer) if present else answer
                         except ReasoningError as current_error:
@@ -1052,6 +1083,8 @@ class AgentEngine:
                     answer = actions.completed_answer(handle)
                     terminal = {'type': 'task_completed', 'task_id': task_id,
                                 'answer': present_answer(scope, answer) if present else answer}
+                if terminal.get('answer') is not None or terminal.get('partial') is not None:
+                    check_release()  # Last observation before synchronous close and terminal handoff.
         except ReasoningError as error:
             terminal = self._document_failure(task_id, error, step)
         except Exception:
@@ -1060,7 +1093,8 @@ class AgentEngine:
         finally:
             if actions is not None:
                 actions.close()
-            inputs = files = ()
+            files = ()
+            answer = partial = actions = scope = check = check_release = authorize_sources = None
         yield terminal
 
     @staticmethod

@@ -14,6 +14,16 @@ class MultipartBodyLimitMiddleware:
 
     async def __call__(self, scope, receive, send):
         path = scope.get('path')
+        if scope['type'] == 'http' and scope.get('method') == 'POST' and path == '/api/chat':
+            media = [value.partition(b';')[0].strip().lower()
+                     for key, value in scope.get('headers', ()) if key.lower() == b'content-type']
+            if media and (len(media) != 1 or not (media[0] == b'application/json'
+                          or (media[0].startswith(b'application/') and media[0].endswith(b'+json')))):
+                # Reject before FastAPI buffers the body or includes its input in validation errors.
+                await send({'type': 'http.response.start', 'status': 415,
+                            'headers': [(b'content-type', b'text/plain'), (b'cache-control', b'no-store')]})
+                await send({'type': 'http.response.body', 'body': b'Use JSON for an ordinary chat request.'})
+                return
         if (scope['type'] != 'http' or scope.get('method') != 'POST'
                 or path not in ('/api/documents', '/api/chat/multimodal', *_TEXT_FILE_PATHS)):
             return await self.app(scope, receive, send)

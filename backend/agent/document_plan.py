@@ -159,6 +159,9 @@ class DocumentActions:
 
     def __init__(self, scope):
         self.scope = scope
+        self._query_sources = ()
+        self._synthesis = None
+        self._latest_handle = None
         self._receipts = {}
         self.contracts = {
             name: ToolDefinition(name, _DESCRIPTIONS[name], schema, handler, result_schema=_Receipt,
@@ -174,14 +177,24 @@ class DocumentActions:
     def close(self):
         self._receipts.clear()
         self.contracts.clear()
+        self._synthesis = self._latest_handle = None
 
     async def execute(self, name, arguments):
         contract = self.contracts[name]
+        self._query_sources = ()
         finding = await contract.execute_fn(contract.input_schema.model_validate(arguments))
+        if name != 'document_synthesize':
+            if not isinstance(finding, _Finding):
+                raise ReasoningError('CITATION_UNVERIFIED', 'The document finding could not be verified.')
+            self.scope.consume_finding(finding.result, *self._query_sources)
+        elif self._synthesis is None or finding is not self._synthesis:
+            raise ReasoningError('CITATION_UNVERIFIED', 'The document synthesis could not be verified.')
+        self._synthesis = None
         citations = finding.citations() if isinstance(finding, _Finding) else finding.citations
         self.scope.verify_citations(*citations)
         handle = uuid4().hex
         self._receipts[handle] = (name, dict(arguments), finding)
+        self._latest_handle = handle
         return ToolResult(name, True, {'handle': handle})
 
     def _read_receipt(self, handle):
@@ -196,7 +209,7 @@ class DocumentActions:
     def _verifier(self, name):
         def verify(arguments, output):
             entry = self._receipts.get(output['handle'])
-            return entry is not None and entry[0] == name and entry[1] == arguments
+            return output['handle'] == self._latest_handle and entry is not None and entry[0] == name and entry[1] == arguments
         return verify
 
     def answer(self, *handles):
@@ -216,7 +229,8 @@ class DocumentActions:
 
     async def _synthesize(self, args):
         handles = (args.finding, args.next_finding) if args.next_finding is not None else (args.finding,)
-        return self.answer(*handles)
+        self._synthesis = self.answer(*handles)
+        return self._synthesis
 
     def _select(self, question, *, worksheet=None):
         sources = self.scope.sources()
@@ -243,6 +257,7 @@ class DocumentActions:
         terms = _PASSAGE.fullmatch(question)
         if terms is None:
             raise ReasoningError('INVALID_QUERY', 'Specify the subject of one supporting passage.')
+        self._query_sources = (source.source_id,)
         return _Finding(self.scope.find_passages(source.source_id, terms[1]))
 
     async def _table(self, args):
@@ -269,6 +284,7 @@ class DocumentActions:
                 if len(measurements) != 1:
                     raise ReasoningError('COLUMN_UNAVAILABLE', 'Name one measurement column for the requested reading.')
                 query = query[:-len('reading')] + measurements[0]
+        self._query_sources = (source.source_id,)
         return _Finding(self.scope.ask_table(selection, query))
 
     async def _compare(self, args):
@@ -295,6 +311,7 @@ class DocumentActions:
             if len(candidates) != 1:
                 raise ReasoningError('COLUMN_UNAVAILABLE', 'Specify one shared measurement column.')
             column = candidates[0]
+        self._query_sources = (left.source_id, right.source_id)
         result = self.scope.compare(left, right, identifier=identifier, column=column, name=match['name'])
         if not result.rows:
             raise ReasoningError('IDENTIFIER_UNAVAILABLE', 'No records could be aligned by the specified identifier.')

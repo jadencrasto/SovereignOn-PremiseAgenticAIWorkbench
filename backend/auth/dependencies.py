@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from typing import Callable, Optional
+from weakref import ref
 
 from fastapi import Depends, Header, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -41,17 +42,21 @@ def _bind_conversation_identity(user, active_settings):
     effective_owner.set(str(user.id))
     local_legacy_access.set(not active_settings.auth_enabled and user.id == 'user_dev_admin')
 
-def _bind_dispatch_session(session_mgr, auth_store, raw_token, user_id):
+def _bind_dispatch_session(session_mgr, auth_store, raw_token, user_id, *, created_at=None, state=None):
     """Re-resolve the same server session and account at each dispatch."""
     def resolve():
+        if state is not None and (state.session_manager is not session_mgr or state.auth_store is not auth_store):
+            return None
         session = session_mgr.validate_session(raw_token)
-        if not session or str(session.user_id) != str(user_id):
+        if (not session or str(session.user_id) != str(user_id)
+                or (created_at is not None and session.created_at != created_at)):
             return None
         user = auth_store.get_user_by_id(session.user_id)
         if not user or not user.is_active or str(user.id) != str(user_id):
             return None
         return user
     dispatch_identity_resolver.set(resolve)
+    return resolve
 
 def _bind_local_dispatch(active_settings):
     """Only the existing server-selected unauthenticated local principal."""
@@ -248,7 +253,11 @@ async def get_current_user(
         )
 
     # Attach to request state for downstream handlers
-    _bind_dispatch_session(session_mgr, auth_store, raw_token, user.id)
+    generation = getattr(session, 'created_at', None)
+    resolve = _bind_dispatch_session(
+        session_mgr, auth_store, raw_token, user.id, created_at=generation, state=request.app.state,
+    )
+    request.state.authenticated_session = (ref(request), resolve) if isinstance(generation, str) and generation else None
     request.state.user = user
     effective_clearance.set(resolve_user_clearance(user))
     _bind_conversation_identity(user, active_settings)

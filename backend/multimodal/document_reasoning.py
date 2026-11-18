@@ -230,12 +230,15 @@ class _DocumentRequest:
         self._deadline = monotonic() + 15
         self._documents: dict[str, DocumentEvidence | Spreadsheet] = {}
         self._issued: dict[int, Citation] = {}
+        self._last_finding = None
         self._closed = False
 
     def _close(self):
         self._closed = True
         self._issued.clear()
+        self._last_finding = None
         self._documents.clear()
+        self._allowed = self._cancelled = None
 
     def _check(self):
         if self._closed:
@@ -306,6 +309,17 @@ class _DocumentRequest:
         if not citations or any(id(citation) not in self._issued for citation in citations):
             raise ReasoningError('CITATION_UNVERIFIED', 'Select original citations from this document request.')
 
+    def _finding(self, sources, result):
+        self._last_finding = (sources, result)
+        return result
+
+    def consume_finding(self, result, *source_ids):
+        """Bind the immediate action receipt to the immutable result and ordered operands."""
+        issued, self._last_finding = self._last_finding, None
+        self._check()
+        if issued is None or issued[0] != source_ids or issued[1] is not result:
+            raise ReasoningError('CITATION_UNVERIFIED', 'The document finding could not be verified.')
+
     def find_passages(self, source_id: str, question: str, *, limit: int = 3) -> tuple[Citation, ...]:
         document = self._document(source_id)
         if not isinstance(document, DocumentEvidence) or not document.blocks:
@@ -328,7 +342,7 @@ class _DocumentRequest:
         if not results:
             raise ReasoningError('NO_MATCH', 'No extracted passage matches those terms.')
         self._publish(results)
-        return tuple(results)
+        return self._finding((source_id,), tuple(results))
 
     def _grid(self, selection: TableSelection) -> _Grid:
         if not isinstance(selection, TableSelection):
@@ -521,7 +535,7 @@ class _DocumentRequest:
                 group_results.append((members[0][1].value, result))
                 issued.extend(result.citations)
         self._publish((*issued, *matches))
-        return TableResult(query.operation, calculation, matches, tuple(group_results))
+        return self._finding((table.source.source_id,), TableResult(query.operation, calculation, matches, tuple(group_results)))
 
     def ask_table(self, selection: TableSelection, question: str) -> TableResult:
         """Translate a small set of deterministic questions into explicit table operations."""
@@ -599,7 +613,7 @@ class _DocumentRequest:
             rows.append((row_a, Comparison(label_cite_a.value, tuple(citations), difference)))
         result = tuple(comparison for _, comparison in sorted(rows))
         self._publish((*headers, *(cite for comparison in result for cite in comparison.citations)))
-        return ComparisonResult(result, unit_a, tuple(headers))
+        return self._finding((left.source_id, right.source_id), ComparisonResult(result, unit_a, tuple(headers)))
 
 
 @contextmanager
