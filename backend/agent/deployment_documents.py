@@ -65,6 +65,7 @@ class DeploymentDocumentWorkflow:
             request.app is not self._app or authenticated_dispatch_request() is not request
         )):
             raise _error('AUTHORIZATION_UNAVAILABLE')
+        self._approvals._restore.check()
 
     def approve(
         self, request: Request, *, reference: str, owner_id: str, conversation_id: str,

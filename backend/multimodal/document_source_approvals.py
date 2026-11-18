@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePath
 from uuid import uuid4
 
@@ -22,7 +22,9 @@ from backend.auth.request_context import (
 )
 from backend.multimodal.document_evidence import valid_source_filename
 from backend.multimodal.document_source_authority import ApprovedLocalSource, valid_source_reference
+from backend.multimodal.document_source_policy import LocalSourceRecord
 from backend.multimodal.document_source_provider import DeploymentSourceProvider
+from backend.multimodal.document_source_recovery import SourceRestoreBinding
 from backend.multimodal.document_transport import DocumentGrant, _TYPES, _error
 
 _USE = 'verified_document_workflow'
@@ -79,17 +81,63 @@ class DeploymentSourceApprovals:
         self._app = app
         try:
             self._db = Path(app.state.settings.tasks_db_path).resolve(strict=True)
+            self._restore = SourceRestoreBinding(app, self._db)
             self._read_uri = f'{self._db.as_uri()}?mode=ro'
             with immediate_transaction(self._db, require_existing=True) as connection:
+                self._restore.check()
                 connection.execute(_CREATE)
         except (AttributeError, OSError, TypeError, ValueError, sqlite3.Error):
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
 
     def source_provider(self) -> DeploymentSourceProvider:
         """Compose the existing source catalog with this live approval authority."""
-        return DeploymentSourceProvider(self._app, approval_lookup=self.lookup)
+        self._restore.check()
+        return DeploymentSourceProvider(self._app, approval_lookup=self.lookup, release_check=self._release_current)
+
+    def _release_current(self, records: tuple[LocalSourceRecord, ...]) -> bool:
+        """Read every source and approval together from one fresh SQLite snapshot."""
+        self._restore.check()
+        first = records[0]
+        placeholders = ', '.join('?' for _ in records)
+        with closing(sqlite3.connect(self._read_uri, timeout=1.0, uri=True)) as connection:
+            rows = connection.execute(
+                f"""SELECT s.reference, s.revision, s.filename, s.byte_length, s.sha256, s.clearance,
+                           s.registered_us, s.expires_us, a.approved_at, a.expires_at,
+                           reviewer.role, reviewer.clearance
+                    FROM approved_document_sources s
+                    JOIN document_source_approvals a
+                      USING (reference, owner_id, conversation_id, generation, revision,
+                             filename, byte_length, sha256, clearance)
+                    JOIN users reviewer ON reviewer.id = a.approver_id AND reviewer.is_active = 1
+                    WHERE s.owner_id = ? AND s.conversation_id = ? AND s.generation = ?
+                      AND s.withdrawn_us IS NULL AND a.withdrawn_at IS NULL AND a.permitted_use = ?
+                      AND s.reference IN ({placeholders})""",
+                (first.approval.owner_id, first.conversation_id, first.generation, _USE,
+                 *(record.reference for record in records)),
+            ).fetchall()
+        if len(rows) != len(records):
+            return False
+        by_reference = {row[0]: row[1:] for row in rows}
+        now = datetime.now(UTC)
+        now_us = (now - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+        for item in records:
+            (revision, name, size, digest, clearance, registered, expires, issued, valid_until,
+             reviewer_role, reviewer_clearance) = by_reference[item.reference]
+            approval = item.approval
+            grant = approval.grant
+            reviewer = User.model_construct(role=reviewer_role, clearance=reviewer_clearance, is_active=True)
+            approval_expiry = datetime.fromisoformat(valid_until)
+            if ((revision, name, size, digest, clearance) !=
+                    (approval.revision, grant.filename, grant.size, grant.sha256, grant.clearance.value)
+                    or not registered <= now_us < expires
+                    or not datetime.fromisoformat(issued) <= now < approval_expiry
+                    or approval_expiry != approval.expires_at or not _can_review(reviewer, grant.clearance)):
+                return False
+        self._restore.check()
+        return True
 
     def _reviewer(self, request: Request) -> User:
+        self._restore.check()
         try:
             if (request.app is not self._app or self._app.state.settings.auth_enabled is not True
                     or authenticated_dispatch_request() is not request):
@@ -127,6 +175,7 @@ class DeploymentSourceApprovals:
                     or self._reviewer(request) != reviewer):
                 raise _error('AUTHORIZATION_UNAVAILABLE')
             with immediate_transaction(self._db, require_existing=True) as connection:
+                self._restore.check()
                 now = datetime.now(UTC)
                 if expires_at <= now:
                     raise _error('AUTHORIZATION_UNAVAILABLE')
@@ -139,6 +188,7 @@ class DeploymentSourceApprovals:
                      grant.filename, grant.size, grant.sha256, grant.clearance.value,
                      now.isoformat(), expires_at.isoformat()),
                 )
+                self._restore.check()
         except sqlite3.IntegrityError:
             raise _error('SOURCE_UNAVAILABLE') from None
         except (AttributeError, OSError, sqlite3.Error):
@@ -150,6 +200,7 @@ class DeploymentSourceApprovals:
                 or request_tools_enabled.get() is not True):
             return None
         try:
+            self._restore.check()
             state = self._app.state
             request = authenticated_dispatch_request()
             if request is None or request.app is not self._app or state.settings.auth_enabled is not True:
@@ -171,6 +222,7 @@ class DeploymentSourceApprovals:
                     or not is_clearance_sufficient(cap_clearance(resolve_user_clearance(owner)), grant.clearance)
                     or not _can_review(state.auth_store.get_user_by_id(approver), grant.clearance)):
                 return None
+            self._restore.check()
             return ApprovedLocalSource(owner_id, revision, grant, expires_at)
         except (AttributeError, OSError, PermissionError, TypeError, ValueError, sqlite3.Error):
             return None
@@ -182,6 +234,7 @@ class DeploymentSourceApprovals:
             return False
         try:
             with immediate_transaction(self._db, require_existing=True) as connection:
+                self._restore.check()
                 row = connection.execute(
                     'SELECT clearance FROM document_source_approvals WHERE reference = ? AND withdrawn_at IS NULL',
                     (reference,),
@@ -195,6 +248,7 @@ class DeploymentSourceApprovals:
                     'UPDATE document_source_approvals SET withdrawn_at = ? WHERE reference = ? AND withdrawn_at IS NULL',
                     (datetime.now(UTC).isoformat(), reference),
                 )
+                self._restore.check()
         except (AttributeError, OSError, ValueError, sqlite3.Error):
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
         return True

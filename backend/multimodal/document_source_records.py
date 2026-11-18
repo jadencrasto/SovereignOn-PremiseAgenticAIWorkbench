@@ -94,8 +94,21 @@ def open_server_source_policy(
             return (access is not None and active_request is access.request
                     and _read_record(provider, access, record.reference) == selected[record.reference])
 
+        def check_release(active_request: Request) -> None:
+            if access is None or active_request is not access.request:
+                raise _error('AUTHORIZATION_UNAVAILABLE')
+            access.check()
+            check_batch = getattr(provider, '_check_release', None)
+            if check_batch is not None:
+                check_batch(tuple(selected.values()))
+            elif any(_read_record(provider, access, reference) != original
+                     for reference, original in selected.items()):
+                raise _error('AUTHORIZATION_UNAVAILABLE')
+            access.lifetime()
+
         yield LocalSourcePolicy(
-            request.app, tuple(item.record for item in selected.values()), record_is_current=record_is_current,
+            request.app, tuple(item.record for item in selected.values()),
+            record_is_current=record_is_current, release_check=check_release,
         )
     finally:
         access.closed = True

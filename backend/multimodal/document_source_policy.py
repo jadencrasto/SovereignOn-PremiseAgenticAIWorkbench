@@ -42,12 +42,14 @@ class LocalSourcePolicy:
     def __init__(
         self, app: Starlette, records: tuple[LocalSourceRecord, ...], *,
         record_is_current: Callable[[Request, LocalSourceRecord], bool] | None = None,
+        release_check: Callable[[Request], None] | None = None,
     ):
         if type(records) is not tuple:
             raise ValueError('Local source policy requires approved records.')
         self._app = app
         self._loop = asyncio.get_running_loop()
         self._record_is_current = record_is_current
+        self._release_check = release_check
         self._records: dict[str, LocalSourceRecord] = {}
         for record in records:
             if (type(record) is not LocalSourceRecord or not valid_source_reference(record.reference)
@@ -60,6 +62,10 @@ class LocalSourcePolicy:
                     or type(record.approval.grant) is not DocumentGrant):
                 raise ValueError('Invalid or duplicate local source policy record.')
             self._records[record.reference] = record
+
+    def check_release(self, request: Request) -> None:
+        if self._release_check is not None:
+            self._release_check(request)
 
     def _request_access(self, request, conversation_id, cancelled, deadline):
         if asyncio.get_running_loop() is not self._loop or request.app is not self._app:

@@ -54,10 +54,13 @@ def _delivery_failure(code: str, task_id: str) -> tuple[dict, ...]:
     },)
 
 
-def _check_delivery_deadline(events: tuple[dict, ...], deadline: float) -> None:
+def _has_evidence(events: tuple[dict, ...]) -> bool:
     terminal = events[-1]
-    if ((terminal['type'] == 'task_completed' or terminal.get('partial') is not None)
-            and asyncio.get_running_loop().time() >= deadline):
+    return terminal['type'] == 'task_completed' or terminal.get('partial') is not None
+
+
+def _check_delivery_deadline(events: tuple[dict, ...], deadline: float) -> None:
+    if _has_evidence(events) and asyncio.get_running_loop().time() >= deadline:
         raise _error('TIMEOUT')
 
 
@@ -191,6 +194,10 @@ async def run_server_source_document_workflow(
                 request, conversation_id, objective, source_policy=policy, sources=sources,
                 cancelled=cancelled, deadline=deadline,
             )
+            # The transport and issuer have closed. Re-read committed authority
+            # before handing the buffered evidence back to the deployment.
+            if _has_evidence(events):
+                policy.check_release(request)
         _check_delivery_deadline(events, deadline)
         return events
     except ReasoningError as exc:

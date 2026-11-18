@@ -22,6 +22,7 @@ from backend.multimodal.document_source_authority import (
 )
 from backend.multimodal.document_source_policy import LocalSourceRecord, _source_request_access
 from backend.multimodal.document_source_records import ServerSourceProvider, ServerSourceRecord
+from backend.multimodal.document_source_recovery import SourceRestoreBinding
 from backend.multimodal.document_transport import (
     DocumentGrant, _DocumentRequestAccess, _TYPES, _error, _preflight,
 )
@@ -72,6 +73,30 @@ class _RequestSources:
             self._access, self._clock_origin, reference, (owner_id, conversation_id, generation),
         )
 
+    def _check_release(self, records: tuple[ServerSourceRecord, ...]) -> None:
+        access = self._access
+        if access is None:
+            raise _error('REQUEST_CLOSED')
+        self._provider._restore.check()
+        access.lifetime()
+        scope = self._provider._scope(access)
+        if any((item.record.approval.owner_id, item.record.conversation_id, item.record.generation) != scope
+               for item in records):
+            raise _error('AUTHORIZATION_UNAVAILABLE')
+        check_batch = self._provider._release_check
+        if check_batch is None:
+            current = all(self.get_approved_source(item.record.reference, *scope) == item for item in records)
+        else:
+            try:
+                current = check_batch(tuple(item.record for item in records))
+            except Exception:
+                access.lifetime()
+                raise _error('AUTHORIZATION_UNAVAILABLE') from None
+        access.lifetime()
+        self._provider._restore.check()
+        if current is not True or any(item.expires_at <= asyncio.get_running_loop().time() for item in records):
+            raise _error('AUTHORIZATION_UNAVAILABLE')
+
 
 class DeploymentSourceProvider:
     """Catalog independently approved sources in the existing local application DB.
@@ -80,18 +105,24 @@ class DeploymentSourceProvider:
     from that authority. Catalog mutations never create or replace an approval.
     """
 
-    def __init__(self, app: Starlette, *, approval_lookup: LocalSourceLookup):
+    def __init__(
+        self, app: Starlette, *, approval_lookup: LocalSourceLookup,
+        release_check: Callable[[tuple[LocalSourceRecord, ...]], bool] | None = None,
+    ):
         if not callable(approval_lookup):
             raise _error('AUTHORIZATION_UNAVAILABLE')
         try:
             self._app = app
             self._db = Path(app.state.settings.tasks_db_path).resolve(strict=True)
+            self._restore = SourceRestoreBinding(app, self._db)
             self._read_uri = f'{self._db.as_uri()}?mode=ro'
             with immediate_transaction(self._db, require_existing=True) as connection:
+                self._restore.check()
                 connection.execute(_CREATE_CATALOG)
         except (AttributeError, OSError, TypeError, ValueError, sqlite3.Error):
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
         self._approval_lookup = approval_lookup
+        self._release_check = release_check
 
     @contextmanager
     def open_provider(
@@ -110,6 +141,7 @@ class DeploymentSourceProvider:
 
     @contextmanager
     def _access(self, request, conversation_id, cancelled, deadline):
+        self._restore.check()
         if request.app is not self._app:
             raise _error('AUTHORIZATION_UNAVAILABLE')
         access = _source_request_access(request, conversation_id, cancelled, deadline)
@@ -162,6 +194,7 @@ class DeploymentSourceProvider:
         self, access: _DocumentRequestAccess, clock_origin: tuple[float, int],
         reference: str, scope: tuple[str, str, str],
     ) -> ServerSourceRecord | None:
+        self._restore.check()
         access.check()
         if scope != self._scope(access) or not valid_source_reference(reference):
             return None
@@ -190,6 +223,7 @@ class DeploymentSourceProvider:
         expires = self._active_expiration(clock_origin, registered_us, expires_us)
         if expires is None:
             return None
+        self._restore.check()
         return ServerSourceRecord(LocalSourceRecord(reference, scope[1], scope[2], approval), expires, False)
 
     def register(
@@ -232,6 +266,7 @@ class DeploymentSourceProvider:
                 with immediate_transaction(self._db, require_existing=True) as connection:
                     # Session revalidation writes its sliding expiry to this same
                     # database. Only check the request lifetime while holding its lock.
+                    self._restore.check()
                     access.lifetime()
                     registered_us = _utc_us()
                     if self._active_expiration(clock_origin, registered_us, expires_us) is None:
@@ -244,6 +279,7 @@ class DeploymentSourceProvider:
                         (reference, *scope, approval.revision, grant.filename, grant.size, grant.sha256,
                          grant.clearance.value, registered_us, expires_us),
                     )
+                    self._restore.check()
             except sqlite3.IntegrityError:
                 raise _error('SOURCE_UNAVAILABLE') from None
             except sqlite3.Error:
@@ -261,6 +297,7 @@ class DeploymentSourceProvider:
             key = reference, *self._scope(access)
             try:
                 with immediate_transaction(self._db, require_existing=True) as connection:
+                    self._restore.check()
                     access.lifetime()
                     row = connection.execute(_SELECT_SOURCE, key).fetchone()
                     if row is None or not is_clearance_sufficient(clearance, row[4]):
@@ -271,6 +308,7 @@ class DeploymentSourceProvider:
                              AND withdrawn_us IS NULL""",
                         (_utc_us(), *key),
                     )
+                    self._restore.check()
             except sqlite3.Error:
                 raise _error('AUTHORIZATION_UNAVAILABLE') from None
             return True
