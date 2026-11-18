@@ -166,6 +166,7 @@ class _DocumentRequestAccess:
                 raise PermissionError
             self.identity, self.account, self.engine = identity, account, state.engine
         except Exception:
+            self.lifetime()
             self.closed = True
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
         self.lifetime()
@@ -204,6 +205,7 @@ class _Access(_DocumentRequestAccess):
                 raise PermissionError
             self.grants = grants
         except Exception:
+            self.lifetime()
             self.closed = True
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
         self.lifetime()
@@ -364,7 +366,9 @@ def _preflight(files, access):
             # not carry the third-party diagnostic across the transport boundary.
             pass
         else:
+            access.lifetime()
             continue
+        access.lifetime()
         raise _error('EXTRACTION_FAILED')
 
 
@@ -434,9 +438,6 @@ class DocumentTransport:
             if self._scope is None:
                 self._access.check()
             else:
-                # Recheck the transport deadline before the reasoner's own guard,
-                # which intentionally collapses authorization callback failures.
-                self._access.lifetime()
                 self._scope._check()
         except ReasoningError:
             self._close()
@@ -498,7 +499,7 @@ class DocumentTransport:
             with _private_decoder():
                 return self._stack.enter_context(open_document_reasoning(
                     self._files, owner_id=access.owner, conversation_id=access.conversation,
-                    allowed=allowed, cancelled=access.cancelled,
+                    allowed=allowed, lifetime=access.lifetime,
                 ))
         except ReasoningError as exc:
             code = exc.code
@@ -557,6 +558,8 @@ async def open_document_transport(request: Request, conversation_id: str, *, sou
 
         async with _open_transport(request, conversation_id, source_authority, cancelled, deadline, issuer) as lease:
             yield lease
+    if lease._evidence_released and asyncio.get_running_loop().time() >= deadline:
+        raise _error('TIMEOUT')
 
 
 @asynccontextmanager

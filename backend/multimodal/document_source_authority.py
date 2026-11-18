@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import PurePath
 from uuid import uuid4
 
@@ -28,6 +29,13 @@ class ApprovedLocalSource:
     owner_id: str
     revision: str
     grant: DocumentGrant
+    expires_at: datetime | None = None
+
+    def is_unexpired(self) -> bool:
+        expiry = self.expires_at
+        return expiry is None or (
+            type(expiry) is datetime and expiry.utcoffset() is not None and expiry > datetime.now(UTC)
+        )
 
 
 # Lookup by server reference, principal, conversation and conversation generation.
@@ -69,12 +77,14 @@ class LocalSourceAuthority:
         try:
             approval = self._lookup(reference, access.owner, access.conversation, access.identity[1])
         except Exception:
+            access.lifetime()
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
+        access.lifetime()
         if (type(approval) is not ApprovedLocalSource or type(approval.owner_id) is not str
                 or approval.owner_id != access.owner
                 or type(approval.revision) is not str or not 1 <= len(approval.revision) <= 128
                 or type(approval.grant) is not DocumentGrant or approval.grant._issuer is not None
-                or approval.grant._handle is not None):
+                or approval.grant._handle is not None or not approval.is_unexpired()):
             raise _error('AUTHORIZATION_UNAVAILABLE')
         return approval
 

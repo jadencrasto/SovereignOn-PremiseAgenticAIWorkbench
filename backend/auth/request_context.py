@@ -10,6 +10,17 @@ dispatch_identity_resolver = ContextVar('dispatch_identity_resolver', default=No
 http_request_active = ContextVar('http_request_active', default=False)
 
 
+def authenticated_dispatch_request():
+    """Get the original authenticated Request for the current dispatch resolver."""
+    resolver = dispatch_identity_resolver.get()
+    reference = getattr(resolver, 'authenticated_request', None)
+    request = reference() if callable(reference) else None
+    binding = getattr(request.state, 'authenticated_session', None) if request is not None else None
+    if isinstance(binding, tuple) and len(binding) == 2 and binding[0] is reference and binding[1] is resolver:
+        return request
+    return None
+
+
 class ClearanceContextMiddleware:
     """Isolate caller context across HTTP requests and streaming responses."""
     def __init__(self, app):

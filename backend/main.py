@@ -726,6 +726,15 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     app.state.brute_force_protector = brute_force_protector
     app.state.audit_logger = audit_logger
 
+    if active_settings.auth_enabled is True:
+        from backend.agent.deployment_documents import install_deployment_documents
+        from backend.multimodal.document_reasoning import ReasoningError
+
+        try:
+            stack.enter_context(install_deployment_documents(app))
+        except ReasoningError:
+            logger.warning("Internal document workflow unavailable: deployment authority could not be initialized.")
+
     logger.info("Application startup complete | configured bind=%s:%d", active_settings.backend_host, active_settings.backend_port)
 
     app.state.startup_complete = True

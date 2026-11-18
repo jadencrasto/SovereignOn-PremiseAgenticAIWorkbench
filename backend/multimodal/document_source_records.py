@@ -41,6 +41,7 @@ def _read_record(provider: ServerSourceProvider, access: _DocumentRequestAccess,
     try:
         result = provider.get_approved_source(reference, owner, access.conversation, generation)
     except Exception:
+        access.lifetime()
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
     access.lifetime()
     if (type(result) is not ServerSourceRecord or result.revoked is not False

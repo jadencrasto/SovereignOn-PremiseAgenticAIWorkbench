@@ -1,5 +1,6 @@
 """Request-scoped document presentation for trusted in-process application callers."""
 
+import asyncio
 from collections.abc import Callable
 from contextlib import aclosing
 from uuid import uuid4
@@ -10,7 +11,7 @@ from backend.auth.request_context import request_tools_enabled
 from backend.multimodal.document_reasoning import ReasoningError
 from backend.multimodal.document_source_policy import LocalSourcePolicy
 from backend.multimodal.document_source_records import ServerSourceProvider, open_server_source_policy
-from backend.multimodal.document_transport import SourceAuthority, _document_deadline, open_document_transport
+from backend.multimodal.document_transport import SourceAuthority, _document_deadline, _error, open_document_transport
 from backend.multimodal.workflow import MAX_INPUTS
 
 
@@ -51,6 +52,13 @@ def _delivery_failure(code: str, task_id: str) -> tuple[dict, ...]:
         'operation': None,
         'partial': None,
     },)
+
+
+def _check_delivery_deadline(events: tuple[dict, ...], deadline: float) -> None:
+    terminal = events[-1]
+    if ((terminal['type'] == 'task_completed' or terminal.get('partial') is not None)
+            and asyncio.get_running_loop().time() >= deadline):
+        raise _error('TIMEOUT')
 
 
 def _presentation_event(event: dict) -> dict:
@@ -137,13 +145,16 @@ async def run_local_document_workflow(
         if type(source_policy) is not LocalSourcePolicy:
             raise ReasoningError('AUTHORIZATION_UNAVAILABLE', _DELIVERY_ERRORS['AUTHORIZATION_UNAVAILABLE'])
         _validate_source_batch(sources)
+        deadline = _document_deadline(conversation_id, deadline)
         with source_policy.open_authority(request, conversation_id, cancelled=cancelled, deadline=deadline) as authority:
             for source in sources:
                 authority.register(*source)
-            return await run_document_workflow(
+            events = await run_document_workflow(
                 request, conversation_id, objective, source_authority=authority,
                 cancelled=cancelled, deadline=deadline,
             )
+        _check_delivery_deadline(events, deadline)
+        return events
     except ReasoningError as exc:
         code = exc.code
     except Exception:
@@ -176,10 +187,12 @@ async def run_server_source_document_workflow(
             request, conversation_id, tuple(reference for reference, _ in sources),
             provider=provider, cancelled=cancelled, deadline=deadline,
         ) as policy:
-            return await run_local_document_workflow(
+            events = await run_local_document_workflow(
                 request, conversation_id, objective, source_policy=policy, sources=sources,
                 cancelled=cancelled, deadline=deadline,
             )
+        _check_delivery_deadline(events, deadline)
+        return events
     except ReasoningError as exc:
         code = exc.code
     except Exception:

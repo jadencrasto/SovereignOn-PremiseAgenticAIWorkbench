@@ -257,7 +257,10 @@ async def get_current_user(
     resolve = _bind_dispatch_session(
         session_mgr, auth_store, raw_token, user.id, created_at=generation, state=request.app.state,
     )
-    request.state.authenticated_session = (ref(request), resolve) if isinstance(generation, str) and generation else None
+    request.state.authenticated_session = None
+    if isinstance(generation, str) and generation:
+        resolve.authenticated_request = ref(request)
+        request.state.authenticated_session = (resolve.authenticated_request, resolve)
     request.state.user = user
     effective_clearance.set(resolve_user_clearance(user))
     _bind_conversation_identity(user, active_settings)

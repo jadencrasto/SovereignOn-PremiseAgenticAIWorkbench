@@ -223,11 +223,12 @@ def _matching_excerpt(text: str, terms: set[str], check) -> str | None:
 
 
 class _DocumentRequest:
-    def __init__(self, owner, conversation, allowed, cancelled):
+    def __init__(self, owner, conversation, allowed, cancelled, lifetime):
         self._scope = (owner, conversation)
         self._allowed = allowed
         self._cancelled = cancelled
-        self._deadline = monotonic() + 15
+        self._lifetime = lifetime
+        self._deadline = monotonic() + 15 if lifetime is None else None
         self._documents: dict[str, DocumentEvidence | Spreadsheet] = {}
         self._issued: dict[int, Citation] = {}
         self._last_finding = None
@@ -238,11 +239,18 @@ class _DocumentRequest:
         self._issued.clear()
         self._last_finding = None
         self._documents.clear()
-        self._allowed = self._cancelled = None
+        self._allowed = self._cancelled = self._lifetime = None
 
-    def _check(self):
+    def _check_lifetime(self):
         if self._closed:
             raise ReasoningError('REQUEST_CLOSED', 'The document request has closed.')
+        if self._lifetime is not None:
+            try:
+                self._lifetime()
+            except ReasoningError:
+                self._close()
+                raise
+            return
         if self._cancelled is not None:
             try:
                 cancelled = self._cancelled()
@@ -254,13 +262,22 @@ class _DocumentRequest:
         if monotonic() >= self._deadline:
             self._close()
             raise ReasoningError('TIMEOUT', 'Document analysis exceeded its time budget.')
+
+    def _check(self):
+        self._check_lifetime()
         try:
             allowed = self._allowed(*self._scope)
+        except ReasoningError as exc:
+            if self._lifetime is not None and exc.code in {'TIMEOUT', 'CANCELLED'}:
+                self._close()
+                raise
+            allowed = False
         except Exception:
             allowed = False
         if allowed is not True:
             self._close()
             raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'Document request authorization is unavailable.')
+        self._check_lifetime()
 
     def _load(self, files):
         for filename, content in document_inputs(files):
@@ -272,8 +289,10 @@ class _DocumentRequest:
                 document = (parse_spreadsheet(filename, content) if suffix == '.xlsx'
                             else DocumentParser.parse(filename, content).evidence)
             except ExtractionLimit:
+                self._check_lifetime()
                 raise ReasoningError('EXTRACTION_LIMIT', 'The document exceeded an extraction limit.') from None
             except (ValueError, RuntimeError):
+                self._check_lifetime()
                 raise ReasoningError('EXTRACTION_FAILED', 'The document could not be extracted safely.') from None
             self._check()
             if document is None or document.source_id in self._documents:
@@ -618,12 +637,14 @@ class _DocumentRequest:
 
 @contextmanager
 def open_document_reasoning(files, *, owner_id: str, conversation_id: str,
-                            allowed: Callable[[str, str], bool], cancelled: Callable[[], bool] | None = None):
+                            allowed: Callable[[str, str], bool], cancelled: Callable[[], bool] | None = None,
+                            lifetime: Callable[[], None] | None = None):
     """Open an isolated byte-only request under the caller's authoritative scope check."""
     if (not all(isinstance(value, str) and value.strip() for value in (owner_id, conversation_id))
-            or not callable(allowed) or (cancelled is not None and not callable(cancelled))):
+            or not callable(allowed) or (cancelled is not None and not callable(cancelled))
+            or (lifetime is not None and (not callable(lifetime) or cancelled is not None))):
         raise ReasoningError('AUTHORIZATION_UNAVAILABLE', 'Document request authorization is unavailable.')
-    request = _DocumentRequest(owner_id, conversation_id, allowed, cancelled)
+    request = _DocumentRequest(owner_id, conversation_id, allowed, cancelled, lifetime)
     try:
         request._check()
         request._load(files)
