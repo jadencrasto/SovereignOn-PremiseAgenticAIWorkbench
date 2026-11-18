@@ -51,6 +51,8 @@ class DocumentGrant:
     size: int
     sha256: str = field(repr=False)
     clearance: ClearanceLevel
+    _issuer: object | None = field(default=None, repr=False)
+    _handle: DocumentHandle | None = field(default=None, repr=False)
 
 
 SourceAuthority = Callable[[str, str], tuple[DocumentGrant, ...]]
@@ -102,11 +104,20 @@ def _private_decoder():
         yield
 
 
-class _Access:
-    def __init__(self, request, conversation, authority, cancelled, deadline):
+def _document_deadline(conversation_id, deadline):
+    if not isinstance(conversation_id, str) or not 1 <= len(conversation_id) <= 128:
+        raise _error('AUTHORIZATION_UNAVAILABLE')
+    maximum = asyncio.get_running_loop().time() + _SECONDS
+    if deadline is not None and (type(deadline) not in (float, int)
+                                 or (type(deadline) is float and not math.isfinite(deadline))):
+        raise _error('TIMEOUT')
+    return maximum if deadline is None else min(maximum, deadline)
+
+
+class _DocumentRequestAccess:
+    def __init__(self, request, conversation, cancelled, deadline):
         self.request = request
         self.conversation = conversation
-        self.authority = authority
         self.cancelled = cancelled
         self.deadline = deadline
         self.task = asyncio.current_task()
@@ -116,9 +127,7 @@ class _Access:
         self.engine = None
         self.account = None
         self.agent_engine = None
-        self.grants = ()
         self.closed = False
-        self.check()
 
     def lifetime(self):
         if self.closed or asyncio.current_task() is not self.task:
@@ -127,6 +136,8 @@ class _Access:
             cancelled = self.task.cancelling() or self.cancelled() is not False
         except Exception:
             cancelled = True
+        if self.closed:
+            raise _error('REQUEST_CLOSED')
         if cancelled or asyncio.get_running_loop().time() >= self.deadline:
             self.closed = True
             raise _error('CANCELLED' if cancelled else 'TIMEOUT')
@@ -145,19 +156,41 @@ class _Access:
                     or not state.engine._memory.persistence_configured):
                 raise PermissionError
             user, identity = state.engine._current_dispatch_identity(self.conversation, self.owner)
-            if (not has_permission(user.role, Permission.EXECUTE_READ_TOOLS) or not parse_clearance(user.clearance)
+            declared = parse_clearance(user.clearance)
+            if (not has_permission(user.role, Permission.EXECUTE_READ_TOOLS) or not declared
                     or (self.identity is not None and identity != self.identity)):
                 raise PermissionError
+            clearance = cap_clearance(resolve_user_clearance(user))
+            account = (user.role, declared, clearance)
+            if self.account is not None and self.account != account:
+                raise PermissionError
+            self.identity, self.account, self.engine = identity, account, state.engine
+        except Exception:
+            self.closed = True
+            raise _error('AUTHORIZATION_UNAVAILABLE') from None
+        self.lifetime()
+        return clearance
+
+
+class _Access(_DocumentRequestAccess):
+    def __init__(self, request, conversation, authority, cancelled, deadline, issuer=None):
+        super().__init__(request, conversation, cancelled, deadline)
+        self.authority = authority
+        self.issuer = issuer
+        self.grants = ()
+        self.check()
+
+    def check(self):
+        clearance = super().check()
+        try:
             grants = self.authority(self.owner, self.conversation)
             if type(grants) is not tuple or not 1 <= len(grants) <= MAX_INPUTS:
-                raise PermissionError
-            clearance = cap_clearance(resolve_user_clearance(user))
-            account = (user.role, parse_clearance(user.clearance), clearance)
-            if self.account is not None and self.account != account:
                 raise PermissionError
             total = 0
             for grant in grants:
                 if (type(grant) is not DocumentGrant or not valid_source_filename(grant.filename)
+                        or grant._issuer is not self.issuer
+                        or (grant._handle is None) != (self.issuer is None)
                         or not isinstance(grant.clearance, ClearanceLevel)
                         or not is_clearance_sufficient(clearance, grant.clearance)
                         or not isinstance(grant.sha256, str) or not re.fullmatch('[0-9a-f]{64}', grant.sha256)
@@ -169,8 +202,7 @@ class _Access:
                 total += grant.size
             if total > MAX_TOTAL_BYTES or (self.grants and self.grants != grants):
                 raise PermissionError
-            self.identity, self.grants, self.account = identity, grants, account
-            self.engine = state.engine
+            self.grants = grants
         except Exception:
             self.closed = True
             raise _error('AUTHORIZATION_UNAVAILABLE') from None
@@ -224,10 +256,15 @@ class _Parts(MultiPartParser):
         self.complete = True
 
     def close(self):
-        for upload in self._files_to_close_on_error:
-            upload.close()
-        self.items.clear()
-        self._file_parts_to_write.clear()
+        try:
+            with ExitStack() as spools:
+                for upload in reversed(self._files_to_close_on_error):
+                    spools.callback(upload.close)
+        finally:
+            self._files_to_close_on_error.clear()
+            self.items.clear()
+            self._file_parts_to_write.clear()
+            self._file_parts_to_finish.clear()
 
 
 async def _read(request, access):
@@ -342,15 +379,17 @@ class DocumentHandle:
 class DocumentTransport:
     """A single-task lease. Ingress and decoder activation have separate lifetimes."""
     def __init__(self, access, files):
-        self.request_id = uuid4().hex
+        handles = tuple(grant._handle for grant in access.grants) if access.issuer is not None else ()
+        self.request_id = handles[0].request_id if handles else uuid4().hex
         self._access = access
         self._files = files
         self._stack = ExitStack()
         self._scope = None
         self._agent_claimed = False
         self._evidence_released = False
-        self._sources = tuple(DocumentHandle(self.request_id, uuid4().hex, name, PurePath(name).suffix[1:].lower())
-                              for name, _ in files)
+        self._sources = handles or tuple(
+            DocumentHandle(self.request_id, uuid4().hex, name, PurePath(name).suffix[1:].lower()) for name, _ in files
+        )
         self._extracted = {}
         if len({s.source_id for s in self._sources}) != len(files):
             raise _error('SOURCE_UNAVAILABLE')
@@ -499,14 +538,30 @@ async def open_document_transport(request: Request, conversation_id: str, *, sou
     source_authority is trusted server policy for the owner and conversation, independent of this
     upload. An absent authority, changed grant or mismatched byte sequence never admits a source.
     """
-    if not isinstance(conversation_id, str) or not 1 <= len(conversation_id) <= 128:
-        raise _error('AUTHORIZATION_UNAVAILABLE')
-    maximum = asyncio.get_running_loop().time() + _SECONDS
-    if deadline is not None and (type(deadline) not in (float, int)
-                                 or (type(deadline) is float and not math.isfinite(deadline))):
-        raise _error('TIMEOUT')
-    deadline = maximum if deadline is None else min(maximum, deadline)
-    access = _Access(request, conversation_id, source_authority, cancelled, deadline)
+    from backend.multimodal.document_source_authority import LocalSourceAuthority
+
+    with ExitStack() as cleanup:
+        issuer = None
+        deadline = _document_deadline(conversation_id, deadline)
+        if type(source_authority) is LocalSourceAuthority:
+            issuer, authority_deadline, authority_cancelled = source_authority._claim(request, conversation_id)
+            cleanup.callback(source_authority.close)
+            deadline = min(deadline, authority_deadline)
+            transport_cancelled = cancelled
+
+            def cancelled():
+                return transport_cancelled() is not False or authority_cancelled() is not False
+
+        elif getattr(request.state, 'local_source_authority_used', False):
+            raise _error('AUTHORIZATION_UNAVAILABLE')
+
+        async with _open_transport(request, conversation_id, source_authority, cancelled, deadline, issuer) as lease:
+            yield lease
+
+
+@asynccontextmanager
+async def _open_transport(request, conversation_id, source_authority, cancelled, deadline, issuer):
+    access = _Access(request, conversation_id, source_authority, cancelled, deadline, issuer)
     if getattr(request.state, 'document_transport_used', False):
         raise _error('REQUEST_CLOSED')
     request.state.document_transport_used = True

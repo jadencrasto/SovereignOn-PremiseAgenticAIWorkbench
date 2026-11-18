@@ -8,7 +8,10 @@ from starlette.requests import Request
 
 from backend.auth.request_context import request_tools_enabled
 from backend.multimodal.document_reasoning import ReasoningError
-from backend.multimodal.document_transport import SourceAuthority, open_document_transport
+from backend.multimodal.document_source_policy import LocalSourcePolicy
+from backend.multimodal.document_source_records import ServerSourceProvider, open_server_source_policy
+from backend.multimodal.document_transport import SourceAuthority, _document_deadline, open_document_transport
+from backend.multimodal.workflow import MAX_INPUTS
 
 
 # Match the R8.45 presentation contract. A plan has at most three steps,
@@ -34,6 +37,20 @@ _DELIVERY_ERRORS = {
     'TIMEOUT': 'The document request exceeded its deadline.',
     'OPERATION_UNAVAILABLE': 'The document workflow could not be completed safely.',
 }
+
+
+def _delivery_failure(code: str, task_id: str) -> tuple[dict, ...]:
+    if code not in _DELIVERY_ERRORS:
+        code = 'OPERATION_UNAVAILABLE'
+    return ({
+        'type': 'task_cancelled' if code == 'CANCELLED' else 'task_failed',
+        'task_id': task_id,
+        'error_code': code,
+        'error': _DELIVERY_ERRORS[code],
+        'step_id': None,
+        'operation': None,
+        'partial': None,
+    },)
 
 
 def _presentation_event(event: dict) -> dict:
@@ -96,18 +113,75 @@ async def run_document_workflow(
                     raise ValueError('Cancelled document presentation contains evidence')
                 lease.require_buffered_agent_result()
     except ReasoningError as exc:
-        code = exc.code if exc.code in _DELIVERY_ERRORS else 'OPERATION_UNAVAILABLE'
+        code = exc.code
     except Exception:
         code = 'OPERATION_UNAVAILABLE'
     else:
         return tuple(buffered)
 
-    return ({
-        'type': 'task_cancelled' if code == 'CANCELLED' else 'task_failed',
-        'task_id': task_id,
-        'error_code': code,
-        'error': _DELIVERY_ERRORS[code],
-        'step_id': None,
-        'operation': None,
-        'partial': None,
-    },)
+    return _delivery_failure(code, task_id)
+
+
+async def run_local_document_workflow(
+    request: Request,
+    conversation_id: str,
+    objective: str,
+    *,
+    source_policy: LocalSourcePolicy,
+    sources: tuple[tuple[str, bytes], ...],
+    cancelled: Callable[[], bool] = lambda: False,
+    deadline: float | None = None,
+) -> tuple[dict, ...]:
+    """Register independently approved bytes and use the existing buffered workflow."""
+    try:
+        if type(source_policy) is not LocalSourcePolicy:
+            raise ReasoningError('AUTHORIZATION_UNAVAILABLE', _DELIVERY_ERRORS['AUTHORIZATION_UNAVAILABLE'])
+        _validate_source_batch(sources)
+        with source_policy.open_authority(request, conversation_id, cancelled=cancelled, deadline=deadline) as authority:
+            for source in sources:
+                authority.register(*source)
+            return await run_document_workflow(
+                request, conversation_id, objective, source_authority=authority,
+                cancelled=cancelled, deadline=deadline,
+            )
+    except ReasoningError as exc:
+        code = exc.code
+    except Exception:
+        code = 'OPERATION_UNAVAILABLE'
+    return _delivery_failure(code, uuid4().hex)
+
+
+def _validate_source_batch(sources: tuple[tuple[str, bytes], ...]) -> None:
+    if type(sources) is not tuple or not 1 <= len(sources) <= MAX_INPUTS:
+        raise ReasoningError('INPUT_LIMIT', _DELIVERY_ERRORS['INPUT_LIMIT'])
+    if any(type(source) is not tuple or len(source) != 2 for source in sources):
+        raise ReasoningError('SOURCE_UNAVAILABLE', _DELIVERY_ERRORS['SOURCE_UNAVAILABLE'])
+
+
+async def run_server_source_document_workflow(
+    request: Request,
+    conversation_id: str,
+    objective: str,
+    *,
+    sources: tuple[tuple[str, bytes], ...],
+    provider: ServerSourceProvider | None = None,
+    cancelled: Callable[[], bool] = lambda: False,
+    deadline: float | None = None,
+) -> tuple[dict, ...]:
+    """Compose approved server metadata with the existing internal document workflow."""
+    try:
+        _validate_source_batch(sources)
+        deadline = _document_deadline(conversation_id, deadline)
+        with open_server_source_policy(
+            request, conversation_id, tuple(reference for reference, _ in sources),
+            provider=provider, cancelled=cancelled, deadline=deadline,
+        ) as policy:
+            return await run_local_document_workflow(
+                request, conversation_id, objective, source_policy=policy, sources=sources,
+                cancelled=cancelled, deadline=deadline,
+            )
+    except ReasoningError as exc:
+        code = exc.code
+    except Exception:
+        code = 'OPERATION_UNAVAILABLE'
+    return _delivery_failure(code, uuid4().hex)
