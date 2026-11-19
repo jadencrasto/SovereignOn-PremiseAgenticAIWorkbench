@@ -2,6 +2,7 @@ import { apiRequest, streamSSE, streamSSEFromFormData } from './client';
 import type {
   ChatRequestPayload,
   ChatResponsePayload,
+  LocalTurnState,
   MultimodalChatRequestPayload,
   SourceReference,
   StreamChunkPayload,
@@ -25,6 +26,7 @@ export async function streamChat(
     onSources: (sources: SourceReference[]) => void;
     onDone: (sessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'], fileSources?: StreamChunkPayload['file_sources']) => void;
     onError: (error: string, info?: StreamErrorInfo) => void;
+    onAccepted?: () => void;
     onToolEvent?: (event: ToolEvent) => void;
     onAgentStatus?: (status: string) => void;
     onPlanCreated?: (planData: any) => void;
@@ -212,9 +214,16 @@ interface SessionMessage {
   content: string;
   created_at?: string | null;
   withheld?: boolean;
+  turn?: LocalTurnState;
   response_state?: 'interrupted' | 'failed' | null;
   tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[];
   attachments?: {attachment_id: string; filename: string; mime_type: string; size_bytes: number}[];
+}
+
+export async function cancelLocalTurn(sessionId: string, turnId: string, attempt: number): Promise<LocalTurnState> {
+  return apiRequest(`/api/chat/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/attempts/${attempt}/cancel`, {
+    method: 'POST',
+  });
 }
 
 export async function fetchSession(sessionId: string): Promise<{session_id: string; title?: string | null; created_at?: string | null; updated_at?: string | null; tasks?: {task_id: string; status: string; approval_statuses: string[]}[]; messages: SessionMessage[]}> {

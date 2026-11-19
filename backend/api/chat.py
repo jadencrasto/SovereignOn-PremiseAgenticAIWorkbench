@@ -152,6 +152,11 @@ async def chat(
     - If `stream=false`: returns JSON with message + sources list.
     - If `tools_enabled=true` (default): agent may use local tools.
     """
+    state = request.app.state
+    if getattr(getattr(state, "settings", None), "is_local_dev", False):
+        from backend.api.local_chat import submit_local_chat
+
+        return await submit_local_chat(body, request, engine, model_router)
     session_id = body.session_id or str(uuid.uuid4())
     from backend.auth.request_context import request_tools_enabled
     request_tools_enabled.set(bool(body.tools_enabled))
@@ -166,7 +171,7 @@ async def chat(
     provider_name, model_name = model_router.resolve_model(body.model)
     model_used = f"{provider_name}/{model_name}"
 
-    if getattr(request.app.state, 'enforce_model_readiness', False):
+    if getattr(state, 'enforce_model_readiness', False):
         from backend.health.routes import _report
         if _report(request.app.state, model_used)['selected_chat_model']['state'] != 'available':
             raise HTTPException(status_code=503, detail='Selected model is not ready for chat')
@@ -174,7 +179,7 @@ async def chat(
     def guarded_response(content, **options):
         async def guarded():
             async with aclosing(content) as stream:
-                if getattr(request.app.state, 'enforce_model_readiness', False):
+                if getattr(state, 'enforce_model_readiness', False):
                     from backend.health.routes import _report
                     if _report(request.app.state, model_used)['selected_chat_model']['state'] != 'available':
                         yield 'data: {"type":"error","content":"Selected model is not ready for chat","error_code":"MODEL_NOT_READY"}\n\n'
@@ -1952,6 +1957,7 @@ async def read_session(
     session_id: str,
     engine=Depends(get_engine),
     current_user: User = Depends(require_permission(Permission.VIEW_DATA)),
+    request: Request = None,
 ):
     try:
         if session_id not in engine._memory.list_sessions():
@@ -1962,7 +1968,7 @@ async def read_session(
         created_at, updated_at = engine._memory.get_timestamps(session_id)
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    from backend.agent.memory import safe_image_attachment, safe_tool_history
+    from backend.agent.memory import LOCAL_TURN_FIELD, safe_image_attachment, safe_tool_history
     from backend.multimodal.text_file import safe_text_attachment
     from backend.security.conversation_access import may_read_assistant
     # Only server-owned task records can contribute read-only recovery state.
@@ -1992,6 +1998,7 @@ async def read_session(
     clearance = resolve_user_clearance(current_user)
     doc_service = getattr(engine, '_doc_service', None)
     visible_messages = []
+    local_runs = getattr(request.app.state, 'local_chat_runs', None) if request is not None else None
     for message in messages:
         if message.role == 'system':
             continue
@@ -2005,6 +2012,12 @@ async def read_session(
                       if message.role == 'user' and isinstance(attachments, list) and len(attachments) == 1 else None)
         if message.role == 'user' and attachment is None:
             attachment = safe_text_attachment(message.extra_fields.get('text_attachment_v1'))
+        turn = message.extra_fields.get(LOCAL_TURN_FIELD) if local_runs is not None and allowed and message.role == 'user' else None
+        if turn:
+            try:
+                turn = local_runs.reconcile(engine._memory, session_id, identity, message.id, turn)
+            except (PermissionError, KeyError):
+                raise HTTPException(404, 'Conversation not found') from None
         visible_messages.append({
             "id": message.id, "role": message.role,
             "content": message.content if allowed else '[Response withheld: source access cannot be verified.]',
@@ -2014,6 +2027,8 @@ async def read_session(
             if message.role == 'assistant' and allowed else [],
             "withheld": not allowed,
             **({"attachments": [attachment]} if attachment else {}),
+            **({"turn": {key: turn[key] for key in ('attempt', 'state', 'model', 'error_code', 'assistant_id')
+                         if key in turn}} if turn else {}),
         })
     try:
         if engine._memory.stream_identity(session_id) != identity:
@@ -2050,4 +2065,7 @@ async def clear_session(
         raise HTTPException(status_code=404, detail="Conversation not found")
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    local_runs = getattr(request.app.state, 'local_chat_runs', None)
+    if local_runs is not None:
+        local_runs.stop_session(session_id)
     return {"deleted": session_id}

@@ -65,7 +65,10 @@ class ModelRouter:
         Full 'provider/model' identifier for the default model.
         Reads from models.yaml first, falls back to settings.
         """
-        return self._config.get("default_model", f"ollama/{self._settings.ollama_default_model}")
+        fallback = f"ollama/{self._settings.ollama_default_model}"
+        if getattr(self._settings, "is_local_dev", False):
+            return fallback
+        return self._config.get("default_model", fallback)
 
     def resolve_model(self, model_id: Optional[str] = None) -> Tuple[str, str]:
         """
@@ -316,6 +319,8 @@ class ModelRouter:
                 base_url = loopback_tags_url(self._settings.ollama_base_url).removesuffix('/api/tags')
             except ValueError:
                 base_url = self._settings.ollama_base_url
+            if getattr(self._settings, "is_local_dev", False):
+                return OllamaProvider(base_url=base_url, timeout=self._settings.model_timeout_seconds)
             return OllamaProvider(base_url=base_url)
 
         # Future providers will be added here without touching agent code:

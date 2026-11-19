@@ -12,7 +12,7 @@ import { ChatInput } from './ChatInput';
 import { useWorkbench } from '../../context/WorkbenchContext';
 import {
   createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, streamChatTextFiles,
-  guardChatCallbacks, type TextFileBatch, type TextFileLineRange,
+  cancelLocalTurn, guardChatCallbacks, type TextFileBatch, type TextFileLineRange,
 } from '../../api/chat';
 import { useAuth } from '../../context/AuthContext';
 import { capabilityFor, chatDisabled, describeCapability, permitsCapability, modelInInventory } from '../../api/capabilities';
@@ -21,6 +21,7 @@ import {
   ChatHistorySidebar, loadSession,
   type ChatSession,
 } from './ChatHistorySidebar';
+import { latestLocalUser, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
 import {
   Clock,
   Plus,
@@ -115,6 +116,12 @@ export const ChatView: React.FC = () => {
   const [historyRevision, setHistoryRevision] = useState(0);
   const [draftRevision, setDraftRevision] = useState(0);
   const [restoring, setRestoring] = useState(false);
+  const [localNotice, setLocalNotice] = useState('');
+  const [localAccepted, setLocalAccepted] = useState(false);
+  const [localStopping, setLocalStopping] = useState(false);
+  const pendingLocal = useRef<LocalSubmission | null>(null);
+  const sendingLocal = useRef<LocalSubmission | null>(null);
+  const historyRequest = useRef(0);
   const attachmentUrls = useRef<Set<string>>(new Set());
   const releaseAttachmentUrls = useCallback(() => {
     for (const url of attachmentUrls.current) URL.revokeObjectURL(url);
@@ -123,7 +130,10 @@ export const ChatView: React.FC = () => {
   useEffect(() => releaseAttachmentUrls, [releaseAttachmentUrls]);
   const { user, refreshUser } = useAuth();
   const selectionKey = `sovereign-active-conversation:${user?.id || ''}`;
-  const { selectedModel, selectedVisionModel, addToast, capabilities, isCheckingHealth } = useWorkbench();
+  const { selectedModel, selectedVisionModel, addToast, capabilities, runProfile, isCheckingHealth, refreshCapabilities } = useWorkbench();
+  const local = (runProfile ?? capabilities?.run_profile) === 'local_dev';
+  const lastLocalUser = local ? latestLocalUser(messages) : undefined;
+  const localRunning = lastLocalUser?.localTurn?.state === 'running';
   const modelSelection = useRef({ selectedModel, selectedVisionModel, capabilities });
   const approvalsAllowed = permitsCapability(capabilities, 'approval_resume');
   const textDisabled = chatDisabled(capabilities, false, selectedModel);
@@ -140,6 +150,14 @@ export const ChatView: React.FC = () => {
     setHistoryRevision(value => value + 1);
     void fetchSessions().then(result => setSessionCount(result.count)).catch(() => {});
   }, []);
+  const clearLocalObservation = useCallback(() => {
+    historyRequest.current++;
+    pendingLocal.current = null;
+    sendingLocal.current = null;
+    setLocalNotice('');
+    setLocalAccepted(false);
+    setLocalStopping(false);
+  }, []);
   const clearConversation = useCallback(() => {
     selectionVersion.current++;
     restorePending.current = false;
@@ -147,6 +165,7 @@ export const ChatView: React.FC = () => {
     creating.current = null;
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
+    clearLocalObservation();
     releaseAttachmentUrls();
     setDraftRevision(revision => revision + 1);
     setRestoring(false);
@@ -156,12 +175,88 @@ export const ChatView: React.FC = () => {
     setMessages([]);
     sessionStorage.removeItem(selectionKey);
     setIsStreaming(false);
-  }, [releaseAttachmentUrls, selectionKey]);
+  }, [clearLocalObservation, releaseAttachmentUrls, selectionKey]);
   const handleSessionExpired = useCallback(() => {
     clearConversation();
     addToast('info', 'Your session has expired. Sign in again to continue.');
     void refreshUser();
   }, [clearConversation, addToast, refreshUser]);
+
+  const refreshLocalHistory = useCallback(async (id: string, version = selectionVersion.current) => {
+    const request = ++historyRequest.current;
+    const isCurrent = () => selectionVersion.current === version && historyRequest.current === request;
+    try {
+      const session = await loadSession(id);
+      if (!isCurrent()) return;
+      pendingLocal.current = reconcileLocalSubmission(session.messages, pendingLocal.current);
+      setMessages(session.messages);
+      setSessionTitle(session.title);
+      setLocalNotice(pendingLocal.current ? 'The server has not confirmed this submission. You can resend the same attempt.' : '');
+    } catch (error) {
+      if (!isCurrent()) return;
+      const status = (error as {status?: number})?.status;
+      if (status === 401) {
+        handleSessionExpired();
+      } else if (status === 404) {
+        clearConversation();
+        updateSessionCount();
+        addToast('info', 'This conversation is no longer available.');
+      } else {
+        setLocalNotice('Conversation history is unavailable. Refresh it when the connection returns.');
+        // A preview from a broken stream cannot be treated as a final message.
+        setMessages(previous => previous.filter(message => !message.isStreaming));
+      }
+    }
+  }, [addToast, clearConversation, handleSessionExpired, updateSessionCount]);
+
+  const runLocalSubmission = useCallback(async (command: LocalSubmission) => {
+    if (abortControllerRef.current) return;
+    const version = selectionVersion.current;
+    const controller = new AbortController();
+    const previewId = `preview-${command.turn_id}`;
+    const current = () => version === selectionVersion.current && abortControllerRef.current === controller;
+    historyRequest.current++;
+    abortControllerRef.current = controller;
+    sendingLocal.current = command;
+    pendingLocal.current = command;
+    setLocalNotice('');
+    setLocalAccepted(false);
+    setIsStreaming(true);
+    setMessages(previous => [
+      ...previous.filter(message => message.id !== command.turn_id && message.id !== previewId),
+      { id: command.turn_id, role: 'user', content: command.message, timestamp: new Date().toLocaleTimeString() },
+      { id: previewId, role: 'assistant', content: '', timestamp: '', model_used: command.model,
+        isStreaming: true, localPreview: true },
+    ]);
+    try {
+      await streamChat({ ...command, tools_enabled: false }, guardChatCallbacks({
+        onAccepted: () => setLocalAccepted(true),
+        onDelta: (delta: string) => setMessages(previous => previous.map(message =>
+          message.id === previewId ? { ...message, content: message.content + delta } : message)),
+        onSources: () => {},
+        onDone: () => {},
+        onError: (_message: string, info?: StreamErrorInfo) => {
+          if (info?.status === 401) handleSessionExpired();
+          // Even an error can race a completed write. History decides the outcome.
+        },
+      }, current), controller.signal);
+    } catch {
+      // Network errors are reconciled by the same read-only history request.
+    } finally {
+      if (current()) {
+        setLocalNotice('Checking server-owned conversation history…');
+        await refreshLocalHistory(command.session_id, version);
+        if (current()) {
+          abortControllerRef.current = null;
+          sendingLocal.current = null;
+          setLocalAccepted(false);
+          setIsStreaming(false);
+          updateSessionCount();
+        }
+      }
+    }
+  }, [handleSessionExpired, refreshLocalHistory, updateSessionCount]);
+
   useEffect(() => {
     updateSessionCount();
     return () => {
@@ -182,10 +277,16 @@ export const ChatView: React.FC = () => {
       setActiveSessionId(session.id);
       setSessionTitle(session.title);
       setMessages(session.messages);
-    }).catch(() => {
+    }).catch((error) => {
       if (selectionVersion.current !== version) return;
-      sessionStorage.removeItem(selectionKey);
-      addToast('info', 'The previous conversation is unavailable.');
+      const status = (error as {status?: number})?.status;
+      if (status === 401 || status === 403 || status === 404) {
+        sessionStorage.removeItem(selectionKey);
+        addToast('info', 'The previous conversation is unavailable.');
+      } else {
+        setActiveSessionId(saved);
+        setLocalNotice('Conversation history is unavailable. Refresh it when the connection returns.');
+      }
     }).finally(() => { if (selectionVersion.current === version) { restorePending.current = false; setRestoring(false); } });
     return () => { selectionVersion.current++; };
   }, [selectionKey, user?.id]);
@@ -207,7 +308,8 @@ export const ChatView: React.FC = () => {
    */
   const handleSendMessage = useCallback(
     async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange, batch?: TextFileBatch) => {
-      if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current) return;
+      if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current ||
+          (local && (localRunning || localNotice || pendingLocal.current || localStopping))) return;
       if (textFile && capabilities?.text_file_understanding !== true) {
         addToast('info', 'Text-file questions require the authenticated local chat-only profile.');
         return;
@@ -291,6 +393,12 @@ export const ChatView: React.FC = () => {
         } finally {
           if (creating.current === creation) creating.current = null;
         }
+      }
+      if (local) {
+        await runLocalSubmission({
+          session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: text, model: selectedModel,
+        });
+        return;
       }
       const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -609,7 +717,7 @@ export const ChatView: React.FC = () => {
         if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired]
+    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, localNotice, localStopping, runLocalSubmission]
   );
 
   /**
@@ -804,7 +912,46 @@ export const ChatView: React.FC = () => {
   handleApproveRef.current = handleApprove;
   handleRejectRef.current = handleReject;
 
+  const stopLocalResponse = async () => {
+    const live = sendingLocal.current;
+    const attempt = live && localAccepted ? live :
+      localRunning && lastLocalUser?.localTurn && {
+        session_id: activeSessionId, turn_id: lastLocalUser.id, attempt: lastLocalUser.localTurn.attempt,
+      };
+    if (!attempt || localStopping) return;
+    const version = selectionVersion.current;
+    const observer = abortControllerRef.current;
+    setLocalStopping(true);
+    try {
+      await cancelLocalTurn(attempt.session_id, attempt.turn_id, attempt.attempt);
+      if (version !== selectionVersion.current) return;
+      if (abortControllerRef.current === observer) {
+        observer?.abort();
+        abortControllerRef.current = null;
+        sendingLocal.current = null;
+        setLocalAccepted(false);
+        setIsStreaming(false);
+      }
+    } catch (error) {
+      if (version !== selectionVersion.current) return;
+      if ((error as {status?: number})?.status === 401) {
+        handleSessionExpired();
+        return;
+      }
+      addToast('error', 'The server did not confirm cancellation.');
+    } finally {
+      if (version === selectionVersion.current) {
+        if (!abortControllerRef.current) await refreshLocalHistory(attempt.session_id, version);
+        if (version === selectionVersion.current) setLocalStopping(false);
+      }
+    }
+  };
+
   const handleStopStream = () => {
+    if (local) {
+      void stopLocalResponse();
+      return;
+    }
     if (creating.current) {
       selectionVersion.current++;
       creating.current.abort();
@@ -824,9 +971,22 @@ export const ChatView: React.FC = () => {
     }
   };
 
+  const leaveConversation = () => {
+    if (!local) {
+      handleStopStream();
+      return;
+    }
+    creating.current?.abort();
+    creating.current = null;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    clearLocalObservation();
+    setIsStreaming(false);
+  };
+
   // Start a fresh, clean conversation session
   const handleStartNewChat = () => {
-    handleStopStream();
+    leaveConversation();
     selectionVersion.current++;
     releaseAttachmentUrls();
     restorePending.current = false;
@@ -840,7 +1000,7 @@ export const ChatView: React.FC = () => {
 
   // Switch to a previous conversation session from history
   const handleSelectSession = (session: ChatSession) => {
-    handleStopStream();
+    leaveConversation();
     selectionVersion.current++;
     releaseAttachmentUrls();
     restorePending.current = false;
@@ -901,6 +1061,23 @@ export const ChatView: React.FC = () => {
     };
   }, [handleSendMessage, imageDisabled, addToast]);
 
+  useEffect(() => {
+    if (!local || !activeSessionId || isStreaming || localStopping) return;
+    let checking = false;
+    const version = selectionVersion.current;
+    const refresh = () => {
+      if (checking || abortControllerRef.current || selectionVersion.current !== version) return;
+      checking = true;
+      void refreshLocalHistory(activeSessionId, version).finally(() => { checking = false; });
+    };
+    window.addEventListener('online', refresh);
+    const timer = localRunning ? window.setInterval(refresh, 1500) : undefined;
+    return () => {
+      window.removeEventListener('online', refresh);
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [local, activeSessionId, isStreaming, localStopping, localRunning, refreshLocalHistory]);
+
   return (
     <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-white relative font-sans">
       {/* 1. Main Workspace Top Header */}
@@ -948,6 +1125,10 @@ export const ChatView: React.FC = () => {
 
         {/* Right Status */}
         <div className="flex items-center gap-3 text-xs">
+          {local && <button type="button" disabled={isCheckingHealth} onClick={() => void refreshCapabilities(true)}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-slate-700 disabled:opacity-50">
+            Check Ollama
+          </button>}
           <span className="text-xs text-slate-500 hidden md:inline">
             Model: <strong className="text-blue-600">{selectedModel}</strong>
           </span>
@@ -979,12 +1160,29 @@ export const ChatView: React.FC = () => {
         <p className="px-6 py-2 text-xs text-slate-700" role="status">
           {describeCapability(capabilityFor(capabilities, 'approval_resume', !isCheckingHealth))}
         </p>}
+      {local && activeSessionId && (localNotice || localStopping || localRunning ||
+        (!isStreaming && retryLocalSubmission(activeSessionId, lastLocalUser))) && (
+        <div className="flex flex-wrap items-center gap-3 border-t border-slate-200 px-5 py-2 text-xs text-slate-700">
+          <span role="status">{localStopping ? 'Stopping response…' : localNotice ||
+            (localRunning && !isStreaming ? 'Reconnecting to conversation history…' : '')}</span>
+          {!isStreaming && !localStopping && <button type="button" className="underline"
+            onClick={() => void refreshLocalHistory(activeSessionId)}>Refresh conversation</button>}
+          {!isStreaming && !localStopping && !localRunning && (pendingLocal.current ||
+            (!localNotice && retryLocalSubmission(activeSessionId, lastLocalUser))) && (
+            <button type="button" className="underline" onClick={() => {
+              const command = pendingLocal.current || retryLocalSubmission(activeSessionId, lastLocalUser);
+              if (command) void runLocalSubmission(command);
+            }}>{pendingLocal.current ? 'Resend same attempt' : 'Retry response'}</button>
+          )}
+        </div>
+      )}
       {/* 4. Input Composer */}
       <ChatInput
         key={activeSessionId ? activeSessionId + ':' + draftRevision : 'new-draft-' + draftRevision}
         onSendMessage={handleSendMessage}
-        sendBlocked={textDisabled || restoring}
+        sendBlocked={textDisabled || restoring || (local && Boolean(localNotice || localStopping))}
         imageBlocked={imageDisabled || restoring}
+        textOnly={local}
         hasEarlierImage={messages.some(message => message.attachments?.some(file => file.mimeType.startsWith('image/')))}
         hasEarlierTextFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/plain'))}
         hasEarlierCsvFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/csv'))}
@@ -1005,7 +1203,8 @@ export const ChatView: React.FC = () => {
             : textDisabled || chatStatus.state === 'unknown' ? describeCapability(chatStatus) : undefined}
         imageStatus={imageDisabled ? (textDisabled ? 'The selected chat model is unavailable. Choose an available model before sending an image.' : describeCapability(imageStatus)) : undefined}
         onStopStream={handleStopStream}
-        isStreaming={isStreaming}
+        stopDisabled={local && (localStopping || (!localAccepted && !localRunning))}
+        isStreaming={isStreaming || localRunning}
         onClearSession={handleStartNewChat}
       />
     </div>

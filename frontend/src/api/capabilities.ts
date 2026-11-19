@@ -29,6 +29,8 @@ interface DocumentIntelligenceReport {
 export interface CapabilityReport {
   schema_version: 1;
   environment: string;
+  run_profile?: 'local_dev';
+  history_retention?: 'disposable' | 'durable';
   deployment_verified: false;
   capabilities: Record<CapabilityName, Capability>;
   models: Record<string, Capability & { id: string | null }>;
@@ -55,6 +57,7 @@ const reasons: Record<string, string> = {
   ollama_check_failed: 'Could not read the local Ollama inventory.',
   configured_model_missing: 'The configured model was not listed by Ollama.',
   model_listed: 'The configured model was listed by Ollama.',
+  local_text_chat_only: 'This profile supports text chat only.',
   component_not_initialized: 'A required backend component is not initialized.',
   prerequisites_observed: 'Required models were listed. Inference was not checked.',
   inference_not_checked: 'This installed model has not been checked for chat inference.',
@@ -104,6 +107,10 @@ export function chatDisabled(report: CapabilityReport | null, image = false, sel
   if (capability.state !== 'available') return true;
   if (!selectedModel || !report || !modelInInventory(report, selectedModel)) return true;
   const checked = image ? report.selected_vision_model : report.selected_chat_model;
+  if (report.run_profile === 'local_dev' && !image) {
+    return checked?.id !== selectedModel || checked.state !== 'available' ||
+      checked.reason !== 'model_listed' || checked.identity_evidence !== 'provider_digest';
+  }
   return !checked || checked.id !== selectedModel || checked.state !== 'available' ||
     (image && (!report.vision_models?.includes(selectedModel) || checked.identity_evidence !== 'provider_digest')) ||
     typeof checked.expires_at !== 'number' || !Number.isFinite(checked.expires_at) ||
@@ -126,6 +133,9 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
   const report = value as Partial<CapabilityReport>;
   if (report.schema_version !== 1 || report.deployment_verified !== false ||
       typeof report.environment !== 'string' ||
+      (report.run_profile !== undefined && report.run_profile !== 'local_dev') ||
+      (report.history_retention !== undefined && (report.run_profile !== 'local_dev' ||
+        !['disposable', 'durable'].includes(report.history_retention))) ||
       !report.capabilities || !Object.keys(capabilityLabels).every(key =>
         isCapability(report.capabilities?.[key as CapabilityName])) ||
       !report.models || !['default_chat', 'image_chat', 'vision', 'embedding'].every(key => {

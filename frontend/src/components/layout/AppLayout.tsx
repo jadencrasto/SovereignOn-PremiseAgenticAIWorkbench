@@ -11,6 +11,7 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 import { useAuth } from '../../context/AuthContext';
 import { ToastContainer } from '../common/ToastContainer';
 import { ChatView } from '../chat/ChatView';
+import { LocalHistorySettings } from '../chat/LocalHistorySettings';
 import { DocumentsView } from '../documents/DocumentsView';
 import { ModelScanner } from '../models/ModelScanner';
 import { CompanyKnowledgeGraph } from '../graph/CompanyKnowledgeGraph';
@@ -55,7 +56,10 @@ interface TabItem {
 }
 
 export const AppLayout: React.FC = () => {
-  const { activeTab, setActiveTab, isBackendConnected, documents, selectedModel } = useWorkbench();
+  const { activeTab, setActiveTab, isBackendConnected, documents, selectedModel, capabilities, runProfile,
+    historyRetention } = useWorkbench();
+  const local = (runProfile ?? capabilities?.run_profile) === 'local_dev';
+  const visibleTab = local ? 'chat' : activeTab;
   const { user, isLoading } = useAuth();
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
@@ -123,13 +127,13 @@ export const AppLayout: React.FC = () => {
                 Sovereign Dashboard
               </div>
               <div className="text-[10px] text-slate-500 font-medium tracking-wide mt-1 uppercase">
-                Local development workbench
+                {local ? 'Local development · Non-production · Text chat only' : 'On-premise workbench'}
               </div>
             </div>
           </div>
 
           {/* Quick Role View Direct Links (/admin, /manager, /user) */}
-          <div className="flex items-center gap-1.5 bg-slate-50 p-1.5 border border-slate-200 rounded-lg">
+          {!local && <div className="flex items-center gap-1.5 bg-slate-50 p-1.5 border border-slate-200 rounded-lg">
             <span className="text-[10px] font-medium text-slate-500 px-1 uppercase">Roles:</span>
             <button
               onClick={() => handleNavigateToRole('/admin')}
@@ -152,7 +156,7 @@ export const AppLayout: React.FC = () => {
             >
               👤 User
             </button>
-          </div>
+          </div>}
 
           {/* Active Model Indicator Chip */}
           <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-100 rounded-full text-xs font-medium text-blue-700">
@@ -172,15 +176,15 @@ export const AppLayout: React.FC = () => {
               className="px-3 py-1.5 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 rounded-full text-slate-700 font-medium text-xs flex items-center gap-1.5 transition-colors shadow-sm"
             >
               <UserIcon className="w-3.5 h-3.5 text-blue-500" />
-              <span>{user ? user.username : 'Operator'}</span>
+              <span>{user?.username ?? (local ? 'Sign In' : 'Operator')}</span>
             </button>
           </div>
         </div>
 
         {/* Navigation Tabs Strip */}
         <nav className="flex items-center flex-wrap gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1.5">
-          {allTabs.map((tab) => {
-            const isActive = activeTab === tab.id;
+          {allTabs.filter(tab => !local || tab.id === 'chat').map((tab) => {
+            const isActive = visibleTab === tab.id;
             const Icon = tab.icon;
             return (
               <button
@@ -204,29 +208,35 @@ export const AppLayout: React.FC = () => {
             );
           })}
         </nav>
+        {local && user && <LocalHistorySettings key={user.id} currentMode={historyRetention} />}
       </header>
 
       {/* Main Full-Screen Native Studio Workspace */}
       <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[#f0f7ff]">
-        {activeTab === 'demo' && <DemoScenarioLauncher />}
-        {activeTab === 'chat' && !isLoading && user && <ChatView key={user.id} />}
-        {activeTab === 'tasks' && <TaskHistoryView />}
-        {activeTab === 'artifacts' && <CapabilityView name="artifact_access" allowed={<ArtifactViewer />} />}
-        {activeTab === 'documents' && <CapabilityView name="document_rag" allowed={<DocumentsView />} />}
-        {activeTab === 'graph' && <CompanyKnowledgeGraph />}
-        {activeTab === 'models' && <ModelScanner />}
-        {activeTab === 'tools' && <ToolsView />}
-        {activeTab === 'roles' && <RolePortalView />}
-        {activeTab === 'audit' && <AuditDashboard />}
-        {activeTab === 'health' && <SystemHealth />}
-        {activeTab === 'security' && <SecurityDiagnostics />}
-        {activeTab === 'settings' && <SettingsView />}
+        {visibleTab === 'demo' && <DemoScenarioLauncher />}
+        {visibleTab === 'chat' && !isLoading && user && <ChatView key={user.id} />}
+        {local && !isLoading && !user && <p className="m-6 text-sm text-slate-700">
+          Sign in as local_dev with the password printed in the backend terminal.
+          {historyRetention === 'durable' ? ' Saved conversations are available after sign-in.' :
+            historyRetention === 'disposable' ? ' Chat history lasts for this run.' : ''}
+        </p>}
+        {visibleTab === 'tasks' && <TaskHistoryView />}
+        {visibleTab === 'artifacts' && <CapabilityView name="artifact_access" allowed={<ArtifactViewer />} />}
+        {visibleTab === 'documents' && <CapabilityView name="document_rag" allowed={<DocumentsView />} />}
+        {visibleTab === 'graph' && <CompanyKnowledgeGraph />}
+        {visibleTab === 'models' && <ModelScanner />}
+        {visibleTab === 'tools' && <ToolsView />}
+        {visibleTab === 'roles' && <RolePortalView />}
+        {visibleTab === 'audit' && <AuditDashboard />}
+        {visibleTab === 'health' && <SystemHealth />}
+        {visibleTab === 'security' && <SecurityDiagnostics />}
+        {visibleTab === 'settings' && <SettingsView />}
       </main>
 
       {/* Persistent Bottom Status Telemetry Bar */}
       <StatusBar />
 
-      <LoginModal isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} />
+      <LoginModal isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} localDev={local} />
     </div>
   );
 };

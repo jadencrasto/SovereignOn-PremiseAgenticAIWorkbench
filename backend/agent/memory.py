@@ -39,6 +39,11 @@ MEMORY_FILE = PROJECT_ROOT / "data" / "memory.json"
 _PLAIN_CHAT = 'independent_plain_chat'
 _CALCULATION = 'deterministic_calculation'
 _PROVENANCE_VERSION = 3
+LOCAL_TURN_FIELD = 'local_turn_v1'
+
+
+class LocalTurnConflict(Exception):
+    """The turn ID, attempt, or conversation state does not permit submission."""
 
 
 def safe_tool_history(events):
@@ -79,8 +84,11 @@ def _synchronized(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with self._lock:
-            if self._storage_file is None or self._lock_depth:
+            if not self._has_storage or self._lock_depth:
                 return method(self, *args, **kwargs)
+            if self._sqlite_store is not None:
+                with self._sqlite_store.transaction():
+                    return self._locked_call(method, args, kwargs)
             self._storage_file.parent.mkdir(parents=True, exist_ok=True)
             lock_path = self._storage_file.with_name(self._storage_file.name + '.lock')
             with open(lock_path, 'a+b') as lock_file:
@@ -94,15 +102,9 @@ def _synchronized(method):
                 else:
                     import fcntl
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                self._lock_depth += 1
-                self._lifecycle_lock_owner = threading.get_ident()
                 try:
-                    self._store.clear()
-                    self._lifecycle_load()
-                    return method(self, *args, **kwargs)
+                    return self._locked_call(method, args, kwargs)
                 finally:
-                    self._lock_depth -= 1
-                    self._lifecycle_lock_owner = None
                     lock_file.seek(0)
                     if os.name == 'nt':
                         msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
@@ -160,6 +162,7 @@ class ConversationMemory:
         security_registry=None,
         *,
         provenance_keys: ProvenanceKeyRing | None = None,
+        sqlite_store=None,
     ) -> None:
         self._provenance_keys = provenance_keys
         self._provenance_key = (provenance_keys.signing_key() if provenance_keys is not None
@@ -170,12 +173,17 @@ class ConversationMemory:
         self._lock_depth = 0
         self._lifecycle_lock_owner = None
         self._security_registry = security_registry
+        self._sqlite_store = sqlite_store
         # Isolate tests: in test environments (e.g. pytest), do not load/save disk state unless explicitly requested
         is_test_env = "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("ENVIRONMENT") == "test"
         if persist is None:
             persist = not is_test_env or storage_file is not None
 
-        if storage_file is not None:
+        if sqlite_store is not None:
+            if storage_file is not None or security_registry is None:
+                raise ValueError('SQLite history requires its own conversation registry')
+            self._storage_file = None
+        elif storage_file is not None:
             self._storage_file = Path(storage_file)
         elif persist:
             self._storage_file = MEMORY_FILE
@@ -186,6 +194,72 @@ class ConversationMemory:
             self._lifecycle_load()
         if self._security_registry is not None and self._storage_file:
             self._reconcile_security_registry()
+
+    @property
+    def _has_storage(self):
+        return self._storage_file is not None or self._sqlite_store is not None
+
+    def _locked_call(self, method, args, kwargs):
+        self._lock_depth += 1
+        self._lifecycle_lock_owner = threading.get_ident()
+        try:
+            self._store.clear()
+            self._lifecycle_load()
+            return method(self, *args, **kwargs)
+        finally:
+            self._lock_depth -= 1
+            self._lifecycle_lock_owner = None
+
+    @_synchronized
+    def recover_local_history(self, owner):
+        """Validate a dedicated local store and interrupt abandoned attempts without executing them."""
+        if self._sqlite_store is None or self._current_owner() != owner:
+            raise PermissionError('Local history recovery is unavailable')
+        rows = self._security_registry.rows()
+        if any(row['owner_id'] != owner or row['state'] not in ('active', 'revoked') for row in rows):
+            raise ValueError('Invalid local conversation ownership')
+        active = {row['conversation_id']: row['generation'] for row in rows if row['state'] == 'active'}
+        if active.keys() != self._store.keys():
+            raise ValueError('Local history does not match its ownership registry')
+        changed = False
+        for sid, conv in self._store.items():
+            if (conv.owner_id != owner or conv.extra_fields.get('schema_version') != 2
+                    or conv.extra_fields.get('conversation_generation') != active[sid]):
+                raise ValueError('Invalid local conversation binding')
+            expected_assistant = None
+            for index, message in enumerate(conv.messages):
+                if message.images:
+                    raise ValueError('Local history contains unexpected attachments')
+                if expected_assistant:
+                    if message.id != expected_assistant or not self.verify_independent_plain_chat(sid, message):
+                        raise ValueError('Invalid completed local reply')
+                    expected_assistant = None
+                    continue
+                if index == 0 and message.role == 'system' and not message.extra_fields:
+                    continue
+                turn = message.extra_fields.get(LOCAL_TURN_FIELD)
+                if (message.role != 'user' or set(message.extra_fields) != {LOCAL_TURN_FIELD}
+                        or not isinstance(turn, dict) or type(turn.get('attempt')) is not int
+                        or not 1 <= turn['attempt'] <= 2_147_483_647
+                        or not isinstance(turn.get('model'), str) or not turn['model']):
+                    raise ValueError('Invalid local turn metadata')
+                state = turn.get('state')
+                fields = {'attempt', 'model', 'state'}
+                if state == 'completed' and set(turn) == fields | {'assistant_id'}:
+                    expected_assistant = turn['assistant_id']
+                    if not isinstance(expected_assistant, str) or not expected_assistant:
+                        raise ValueError('Invalid local reply reference')
+                elif state == 'running' and set(turn) == fields and index == len(conv.messages) - 1:
+                    turn.update(state='interrupted', error_code='TURN_INTERRUPTED')
+                    conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
+                    changed = True
+                elif (state not in ('failed', 'cancelled', 'interrupted') or set(turn) != fields | {'error_code'}
+                      or not isinstance(turn['error_code'], str) or not re.fullmatch(r'[A-Z_]{1,50}', turn['error_code'])):
+                    raise ValueError('Invalid local attempt state')
+            if expected_assistant:
+                raise ValueError('Completed local turn is missing its reply')
+        if changed:
+            self._save()
 
     @_synchronized
     def _reconcile_security_registry(self) -> None:
@@ -200,7 +274,7 @@ class ConversationMemory:
 
     @property
     def persistence_configured(self) -> bool:
-        return self._storage_file is not None and self._security_registry is not None
+        return self._has_storage and self._security_registry is not None
 
     def attach_security_registry(self, registry) -> None:
         """Attach once at startup; persistent memory is required for reconciliation."""
@@ -211,25 +285,26 @@ class ConversationMemory:
         self._security_registry = registry
         self._reconcile_security_registry()
 
+    def _encode_conversation(self, conv):
+        messages = [
+            {**msg.extra_fields, "role": msg.role, "content": msg.content,
+             "images": getattr(msg, "images", []), "id": msg.id, "created_at": msg.created_at}
+            for msg in conv.messages
+        ]
+        if conv.owner_id or conv.stored_as_object:
+            return {**conv.extra_fields, 'owner_id': conv.owner_id, 'messages': messages}
+        return messages
+
     def _save(self) -> None:
-        if not self._storage_file:
+        if not self._has_storage:
+            return
+        data = {sid: self._encode_conversation(conv) for sid, conv in self._store.items()}
+        if self._sqlite_store is not None:
+            self._sqlite_store.save(data)
             return
         tmp_name = None
         try:
             self._storage_file.parent.mkdir(parents=True, exist_ok=True)
-            data = {}
-            for sid, conv in self._store.items():
-                messages = [
-                    {**msg.extra_fields,
-                        "role": msg.role,
-                        "content": msg.content,
-                        "images": getattr(msg, "images", []),
-                        "id": msg.id,
-                        "created_at": msg.created_at,
-                    }
-                    for msg in conv.messages
-                ]
-                data[sid] = {**conv.extra_fields, 'owner_id': conv.owner_id, 'messages': messages} if conv.owner_id or conv.stored_as_object else messages
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self._storage_file.parent,
                                              prefix=".memory-", suffix=".tmp", delete=False) as f:
                 tmp_name = f.name
@@ -245,11 +320,14 @@ class ConversationMemory:
                 os.unlink(tmp_name)
 
     def _lifecycle_load(self) -> None:
-        if not self._storage_file or not self._storage_file.exists():
+        if self._sqlite_store is None and (not self._storage_file or not self._storage_file.exists()):
             return
         try:
-            with open(self._storage_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if self._sqlite_store is not None:
+                data = self._sqlite_store.load()
+            else:
+                with open(self._storage_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError('Invalid conversation storage')
             for sid, msg_dicts in data.items():
@@ -269,6 +347,8 @@ class ConversationMemory:
                         raise ValueError('Invalid conversation message')
                     known = {k: msg_dict[k] for k in ('role', 'content', 'images', 'id', 'created_at') if k in msg_dict}
                     if not known.get('id'):
+                        if self._sqlite_store is not None:
+                            raise ValueError('Invalid durable conversation message ID')
                         known['id'] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"sovereign-conversation:{sid}:{index}"))
                     if not isinstance(known['id'], str) or known['id'] in seen_ids:
                         raise ValueError('Invalid or duplicate message ID')
@@ -276,9 +356,11 @@ class ConversationMemory:
                     known['extra_fields'] = {k: v for k, v in msg_dict.items() if k not in {'role', 'content', 'images', 'id', 'created_at'}}
                     conv.messages.append(Message(**known))
                 self._store[sid] = conv
-            logger.info(f"Loaded {len(self._store)} sessions from {self._storage_file}")
+            if self._sqlite_store is None:
+                logger.info(f"Loaded {len(self._store)} sessions from {self._storage_file}")
         except Exception as e:
-            logger.error(f"Failed to load memory: {e}")
+            if self._sqlite_store is None:
+                logger.error(f"Failed to load memory: {e}")
             raise
 
     # ------------------------------------------------------------------
@@ -355,7 +437,7 @@ class ConversationMemory:
     @_synchronized
     def prepare_new_chat(self, session_id: str, owner_id: str, system_prompt: Optional[str] = None):
         """Create a registered new session and capture its binding before work."""
-        if (not self._storage_file or self._security_registry is None or not owner_id
+        if (not self._has_storage or self._security_registry is None or not owner_id
                 or self._current_owner() != owner_id):
             raise PermissionError('Conversation unavailable')
         self._authorize(session_id)
@@ -474,9 +556,62 @@ class ConversationMemory:
         return msg
 
     @_synchronized
+    def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model):
+        """Atomically persist admission or return the existing attempt's state."""
+        if self.stream_identity(session_id) != identity:
+            raise PermissionError('Conversation unavailable')
+        conv = self._store[session_id]
+        turn = next((message for message in conv.messages if message.id == turn_id), None)
+        if turn is not None:
+            record = turn.extra_fields.get(LOCAL_TURN_FIELD)
+            if not record or turn.role != 'user' or turn.content != content or record['model'] != model:
+                raise LocalTurnConflict('Turn ID is already bound to a different submission.')
+            if attempt == record['attempt']:
+                return dict(record), False
+            if (attempt != record['attempt'] + 1 or record['state'] not in {'failed', 'cancelled', 'interrupted'}
+                    or turn is not conv.messages[-1]):
+                raise LocalTurnConflict('Only the latest unsuccessful turn can be retried with the next attempt.')
+        else:
+            if attempt != 1:
+                raise LocalTurnConflict('A new turn must start at attempt 1.')
+            if any(message.extra_fields.get(LOCAL_TURN_FIELD, {}).get('state') == 'running'
+                   for message in conv.messages):
+                raise LocalTurnConflict('A response is already running in this conversation.')
+            turn = conv.add_message('user', content)
+            turn.id = turn_id
+        record = {'attempt': attempt, 'model': model, 'state': 'running'}
+        turn.extra_fields[LOCAL_TURN_FIELD] = record
+        conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
+        self._save()
+        return dict(record), True
+
+    @_synchronized
+    def read_local_turn(self, session_id, identity, turn_id):
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        return dict(turn.extra_fields[LOCAL_TURN_FIELD])
+
+    @_synchronized
+    def end_local_turn(self, session_id, identity, turn_id, attempt, state, error_code):
+        """Store an unsuccessful terminal state without inserting an assistant message."""
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if record['attempt'] == attempt and record['state'] == 'running':
+            record.update(state=state, error_code=error_code)
+            self._store[session_id].extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
+            self._save()
+
+    def _owned_local_turn(self, session_id, identity, turn_id):
+        if self.stream_identity(session_id) != identity:
+            raise PermissionError('Conversation unavailable')
+        for message in self._store[session_id].messages:
+            if message.id == turn_id and message.role == 'user' and LOCAL_TURN_FIELD in message.extra_fields:
+                return message
+        raise KeyError(turn_id)
+
+    @_synchronized
     def record_plain_response(
         self, session_id, identity, content, *, status=None, producer=None,
-        access_provenance=None, calculation=False,
+        access_provenance=None, calculation=False, local_turn=None,
     ):
         """Finalize the original live conversation and authenticate only eligible output."""
         if (status not in (None, 'interrupted', 'failed') or not isinstance(content, str)
@@ -489,6 +624,13 @@ class ConversationMemory:
         if producer is not None and (not owner or owner != self._current_owner() or not generation):
             raise PermissionError('Conversation unavailable')
         conv = self._store[session_id]
+        if local_turn is not None:
+            turn_id, attempt = local_turn
+            turn = self._owned_local_turn(session_id, identity, turn_id)
+            record = turn.extra_fields[LOCAL_TURN_FIELD]
+            if (turn is not conv.messages[-1] or record['attempt'] != attempt or record['state'] != 'running'
+                    or not producer or status is not None or not content.strip()):
+                raise LocalTurnConflict('Turn is no longer eligible to complete.')
         msg = conv.add_message('assistant', content)
         if status is not None:
             msg.extra_fields['response_state_v1'] = status
@@ -505,6 +647,8 @@ class ConversationMemory:
             msg.extra_fields['access_provenance_v1'] = proof
         elif access_provenance is not None:
             msg.extra_fields['access_provenance_v1'] = access_provenance
+        if local_turn is not None:
+            record.update(state='completed', assistant_id=msg.id)
         conv.extra_fields['updated_at'] = msg.created_at
         self._save()
         return msg
@@ -613,7 +757,7 @@ class ConversationMemory:
         if session_id not in self._store:
             owner = self._current_owner()
             generation = (self._lifecycle_registry_mutation('begin', session_id, owner)
-                          if self._security_registry is not None and owner and self._storage_file
+                          if self._security_registry is not None and owner and self._has_storage
                           else str(uuid.uuid4()))
             now = datetime.now(timezone.utc).isoformat()
             conv = Conversation(session_id=session_id, owner_id=owner,
@@ -624,9 +768,12 @@ class ConversationMemory:
                 conv.add_message('system', system_prompt)
             self._store[session_id] = conv
             self._save()
-            if self._security_registry is not None and owner and self._storage_file:
-                with self._storage_file.open('r', encoding='utf-8') as stored:
-                    persisted = json.load(stored).get(session_id)
+            if self._security_registry is not None and owner and self._has_storage:
+                if self._sqlite_store is not None:
+                    persisted = self._sqlite_store.load().get(session_id)
+                else:
+                    with self._storage_file.open('r', encoding='utf-8') as stored:
+                        persisted = json.load(stored).get(session_id)
                 if (not isinstance(persisted, dict) or persisted.get('owner_id') != owner or
                         persisted.get('conversation_generation') != generation):
                     raise RuntimeError('Conversation persistence could not be confirmed')
@@ -659,7 +806,7 @@ class ConversationMemory:
         Direct registry calls do not participate in this protocol and are not
         supported as an authorization or conversation-lifecycle boundary.
         """
-        if (not self._storage_file or not self._lock_depth or self._security_registry is None
+        if (not self._has_storage or not self._lock_depth or self._security_registry is None
                 or self._lifecycle_lock_owner != threading.get_ident()):
             raise RuntimeError('Registry lifecycle mutation requires the conversation lock')
         if operation not in ('begin', 'activate', 'revoke'):

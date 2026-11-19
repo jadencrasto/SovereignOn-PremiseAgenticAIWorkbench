@@ -58,7 +58,8 @@ def read_only_connection(path: Path) -> AbstractContextManager[sqlite3.Connectio
 
 
 @contextmanager
-def immediate_transaction(db_path: Path, *, timeout_seconds: float = 1.0, require_existing: bool = False) -> Iterator[sqlite3.Connection]:
+def immediate_transaction(db_path: Path, *, timeout_seconds: float = 1.0, require_existing: bool = False,
+                          full_sync: bool = False) -> Iterator[sqlite3.Connection]:
     """Open one bounded-wait write transaction and roll back on failure.
 
     Use a dedicated connection so a caller cannot accidentally commit an
@@ -71,6 +72,8 @@ def immediate_transaction(db_path: Path, *, timeout_seconds: float = 1.0, requir
     target = f'{Path(db_path).resolve().as_uri()}?mode=rw' if require_existing else str(db_path)
     with _managed_connection(target, timeout=timeout_seconds, isolation_level=None, uri=require_existing) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
+        if full_sync:
+            connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
             yield connection

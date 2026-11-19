@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager, AsyncExitStack
+from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -97,7 +98,7 @@ from backend.audit.logger import AuditLogger
 # ---------------------------------------------------------------------------
 setup_logging(
     log_level=settings.get_log_level(),
-    log_dir=settings.log_dir,
+    log_dir=None if settings.is_local_dev else settings.log_dir,
     app_env=settings.app_env,
 )
 
@@ -489,6 +490,10 @@ async def lifespan(app: FastAPI):
     app.state.document_recovery_worker = None
     async with AsyncExitStack() as stack:
         try:
+            if getattr(app.state.settings, "is_local_dev", False):
+                await _start_local_chat(app, stack)
+                yield
+                return
             async with _lifespan_body(app, stack):
                 yield
         finally:
@@ -496,6 +501,82 @@ async def lifespan(app: FastAPI):
     from backend.multimodal.document_source_recovery import acknowledge_recovery_worker_shutdown
 
     acknowledge_recovery_worker_shutdown(app, app.state.source_recovery_registration)
+
+
+async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
+    from asyncio import Lock
+    from tempfile import TemporaryDirectory
+
+    from backend.agent.conversation_registry import ConversationRegistry
+    from backend.api.local_chat import LocalChatRuns
+    from backend.auth.request_context import effective_owner
+    from backend.health.routes import refresh_local_inventory
+    from backend.local_dev import announce_viewer, new_viewer, runtime_settings, validate_profile
+    from backend.local_history import LocalHistoryStore, LocalRetention, exclusive_history
+
+    requested = app.state.settings
+    validate_profile(requested)
+    if getattr(app.state, "source_supervisor_admission", None) is not None:
+        raise RuntimeError("Supervised deployment cannot start the local_dev profile.")
+    root = Path(stack.enter_context(TemporaryDirectory(prefix="sovereign-local-dev-")))
+    retention = LocalRetention(requested)
+    app.state.local_retention = retention
+    viewer, password = new_viewer()
+    if retention.mode == "durable":
+        retention.ensure_root()
+        stack.enter_context(exclusive_history(retention.root))
+        history = LocalHistoryStore(retention, viewer)
+        cfg = runtime_settings(requested, root, history_db=history.path)
+        registry = ConversationRegistry(history.path, transaction_connection=history.borrow_connection)
+        memory = ConversationMemory(sqlite_store=history, security_registry=registry, provenance_keys=history.keys)
+        token = effective_owner.set(history.owner)
+        try:
+            memory.recover_local_history(history.owner)
+        finally:
+            effective_owner.reset(token)
+        history.renew_login(viewer.password_hash)
+        store = AuthStore(history.path, initialize=False)
+        app.state.local_viewer_id = history.owner
+    else:
+        cfg = runtime_settings(requested, root)
+        store = AuthStore(cfg.tasks_db_path)
+        store.create_user(viewer)
+        app.state.local_viewer_id = viewer.id
+        keys = startup_provenance_keys(cfg.provenance_key_mode)
+        registry = ConversationRegistry(cfg.tasks_db_path)
+        memory = ConversationMemory(storage_file=cfg.conversation_memory_path, provenance_keys=keys)
+        memory.attach_security_registry(registry)
+    app.state.settings = cfg
+    stack.callback(setattr, app.state, "settings", requested)
+
+    app.state.auth_store = store
+    app.state.session_manager = SessionManager(
+        store=store, idle_timeout_seconds=cfg.auth_idle_timeout_seconds,
+        absolute_timeout_seconds=cfg.auth_max_session_seconds,
+    )
+    app.state.brute_force_protector = BruteForceProtector(
+        store=store, max_attempts=cfg.auth_lockout_attempts,
+        lockout_window_seconds=cfg.auth_lockout_window_seconds,
+    )
+    model_router = ModelRouter(cfg)
+    stack.push_async_callback(_close_owned, model_router, "model router")
+    app.state.model_router = model_router
+    app.state.conversation_registry = registry
+    app.state.conversation_persistence_initialized = memory.persistence_configured
+    app.state.engine = AgentEngine(
+        settings=cfg, router=model_router, memory=memory,
+        system_prompt=(
+            "You are Sovereign Assistant in local development. Answer in plain conversation. "
+            "You can use the conversation history and your general knowledge. "
+            "If asked to perform an action or consult a source, explain that this profile supports text chat only."
+        ),
+    )
+    app.state.local_inventory_lock = Lock()
+    app.state.local_chat_runs = local_runs = LocalChatRuns()
+    stack.push_async_callback(local_runs.close)
+    await refresh_local_inventory(app.state)
+    app.state.startup_complete = True
+    announce_viewer(password, retention.mode)
 
 
 @asynccontextmanager
@@ -761,13 +842,20 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
 
 
 # ---------------------------------------------------------------------------
-def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
+def create_app(custom_settings: Optional[Settings] = None, *, local_frontend: Path | None = None) -> FastAPI:
     import uuid
     from fastapi import Request
 
     active_settings = custom_settings or settings
+    local = getattr(active_settings, "is_local_dev", False)
+    if local:
+        from backend.local_dev import validate_profile
+
+        validate_profile(active_settings)
+        if local_frontend is None or not (local_frontend / "index.html").is_file():
+            raise ValueError("local_dev requires the built frontend. Build it and launch with python -m backend.")
     is_prod = active_settings.app_env.lower() in ("production", "prod")
-    show_docs = (not is_prod) or getattr(active_settings, "enable_docs_in_prod", False)
+    show_docs = not local and (not is_prod or getattr(active_settings, "enable_docs_in_prod", False))
 
     docs_url = "/docs" if show_docs else None
     redoc_url = "/redoc" if show_docs else None
@@ -926,21 +1014,41 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
             )
 
     # ---- CORS ----
-    cors_origins = active_settings.cors_origins_list
-    allow_creds = "*" not in cors_origins
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=allow_creds,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    if not local:
+        cors_origins = active_settings.cors_origins_list
+        allow_creds = "*" not in cors_origins
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=allow_creds,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     from backend.auth.request_context import ClearanceContextMiddleware
     app.add_middleware(ClearanceContextMiddleware)
     from backend.security.request_limits import MultipartBodyLimitMiddleware
     app.add_middleware(MultipartBodyLimitMiddleware, max_file_bytes=active_settings.max_file_size_mb * 1024 * 1024)
 
     # ---- Routes ----
+    if local:
+        from backend.api.local_chat import router as local_chat_router
+        from backend.local_dev import install_http_boundary
+
+        local_paths = {
+            "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/auth/me/permissions",
+            "/api/chat", "/api/chat/sessions", "/api/chat/sessions/{session_id}",
+            "/api/chat/sessions/{session_id}/title",
+            "/api/health", "/api/health/ready", "/api/health/live",
+            "/api/health/capabilities", "/api/health/capabilities/ollama-check",
+        }
+        app.include_router(APIRouter(routes=[
+            route for router in (chat_router, auth_router, health_router)
+            for route in router.routes if route.path in local_paths
+        ]))
+        app.include_router(local_chat_router)
+        install_http_boundary(app, active_settings, local_frontend)
+        return app
+
     app.include_router(chat_router)
     app.include_router(models_router)
     app.include_router(documents_router)
@@ -958,4 +1066,5 @@ def create_app(custom_settings: Optional[Settings] = None) -> FastAPI:
     return app
 
 
-app = create_app()
+if not settings.is_local_dev:
+    app = create_app()

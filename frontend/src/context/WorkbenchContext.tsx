@@ -20,6 +20,8 @@ interface WorkbenchContextType {
   setActiveTab: (tab: ActiveTab) => void;
   health: HealthResponse | null;
   capabilities: CapabilityReport | null;
+  runProfile?: CapabilityReport['run_profile'];
+  historyRetention?: CapabilityReport['history_retention'];
   isBackendConnected: boolean;
   refreshCapabilities: (checkOllama?: boolean) => Promise<void>;
   isCheckingHealth: boolean;
@@ -78,6 +80,8 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
   const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [capabilities, setCapabilities] = useState<CapabilityReport | null>(null);
+  const [runProfile, setRunProfile] = useState<CapabilityReport['run_profile']>();
+  const [historyRetention, setHistoryRetention] = useState<CapabilityReport['history_retention']>();
   const isBackendConnected = permitsCapability(capabilities, "backend");
   const healthRequest = useRef(false);
   const [isCheckingHealth, setIsCheckingHealth] = useState<boolean>(true);
@@ -134,7 +138,10 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
     healthRequest.current = true;
     setIsCheckingHealth(true);
     try {
-      setCapabilities(await fetchCapabilities(checkOllama, selectedModel, visionSelection));
+      const report = await fetchCapabilities(checkOllama, selectedModel, visionSelection);
+      setRunProfile(report.run_profile);
+      setHistoryRetention(report.history_retention);
+      setCapabilities(report);
     } catch {
       setCapabilities(null);
       if (checkOllama) addToast('error', 'The Ollama check could not be completed. Retry when the backend is ready.');
@@ -227,6 +234,8 @@ export const WorkbenchProvider: React.FC<{ children: ReactNode }> = ({ children 
         setActiveTab,
         health,
         capabilities: presentedCapabilities,
+        runProfile,
+        historyRetention,
         refreshCapabilities,
         isBackendConnected,
         isCheckingHealth,

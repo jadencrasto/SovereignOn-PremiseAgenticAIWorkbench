@@ -206,6 +206,18 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
           <div className="p-4 rounded-2xl rounded-tr-sm bg-blue-500 text-white font-sans text-sm leading-relaxed shadow-sm">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
+          {message.localTurn && message.localTurn.state !== 'completed' && (
+            <p role="status" className="mt-1 text-xs text-slate-600">
+              {message.localTurn.state === 'failed' ? ({
+                OLLAMA_UNAVAILABLE: 'Ollama is unavailable. Start it and retry.',
+                MODEL_UNAVAILABLE: 'The selected local model is unavailable.',
+                MODEL_TIMEOUT: 'Ollama timed out.',
+                MODEL_INCOMPLETE: 'Ollama returned an incomplete or invalid response.',
+              } as Record<string, string>)[message.localTurn.error_code || ''] || 'The response could not be completed.'
+                : { running: 'Response running', cancelled: 'Response cancelled',
+                    interrupted: 'Response interrupted' }[message.localTurn.state]}
+            </p>
+          )}
         </div>
       </div>
     );
@@ -339,6 +351,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             {message.isStreaming && message.content && (
               <span className="inline-block w-2 h-4 ml-1 bg-blue-500 animate-pulse align-middle rounded-sm" />
             )}
+          {message.localPreview && message.content && <p className="mt-2 text-xs text-slate-600">Streaming preview</p>}
           </>
         )}
 

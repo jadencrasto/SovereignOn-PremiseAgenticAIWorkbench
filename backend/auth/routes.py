@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
-from backend.auth.dependencies import bearer_scheme, get_current_user, request_session_credentials, require_role
+from backend.auth.dependencies import bearer_scheme, get_current_user, request_session_credentials, require_role, session_cookie_name
 from backend.auth.models import (
     AuthStore,
     ClearanceLevel,
@@ -171,7 +171,7 @@ async def login(
         cookie_secure = True
 
     response.set_cookie(
-        key="session_token",
+        key=session_cookie_name(request),
         value=raw_token,
         httponly=True,
         samesite=active_settings.auth_cookie_samesite.lower(),
@@ -210,7 +210,8 @@ async def logout(
     if session_mgr and raw_token:
         session_mgr.revoke_session(raw_token)
 
-    cookie_token = request.cookies.get("session_token")
+    cookie_name = session_cookie_name(request)
+    cookie_token = request.cookies.get(cookie_name)
     if not cookie_token or cookie_token == raw_token:
         active_settings = getattr(request.app.state, "settings", settings)
         cookie_secure = active_settings.auth_cookie_secure
@@ -218,7 +219,7 @@ async def logout(
             cookie_secure = True
 
         response.delete_cookie(
-            key="session_token",
+            key=cookie_name,
             path="/",
             domain=active_settings.auth_cookie_domain,
             httponly=True,

@@ -100,6 +100,8 @@ class ChatRequest(BaseModel):
         default=True,
         description="Phase 6: Enable agent planning for complex multi-step requests.",
     )
+    turn_id: Optional[str] = Field(default=None, description="Client UUIDv4 required by local_dev.")
+    attempt: Optional[int] = Field(default=None, strict=True, ge=1, le=2_147_483_647)
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,8 @@ export interface ChatMessage {
   error?: boolean;
   errorMessage?: string;
   withheld?: boolean;
+  localTurn?: LocalTurnState;
+  localPreview?: boolean;
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   // Request-scoped image previews and metadata for both attachment types.
   attachments?: ImageAttachment[];
@@ -71,6 +73,14 @@ export interface ChatMessage {
   pendingApproval?: ApprovalRequest;
 }
 
+export interface LocalTurnState {
+  attempt: number;
+  model: string;
+  state: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  error_code?: string;
+  assistant_id?: string;
+}
+
 export type FileComparisonSource = {
   attachment_id: string;
   filename: string;
@@ -79,6 +89,8 @@ export type FileComparisonSource = {
 
 export interface ChatRequestPayload {
   session_id?: string;
+  turn_id?: string;
+  attempt?: number;
   message: string;
   model?: string;
   stream?: boolean;
@@ -107,12 +119,15 @@ export interface ChatResponsePayload {
 }
 
 export interface StreamChunkPayload {
-  type: 'delta' | 'sources' | 'done' | 'error' | 'tool_start' | 'tool_result' | 'agent_status'
+  type: 'accepted' | 'delta' | 'sources' | 'done' | 'error' | 'tool_start' | 'tool_result' | 'agent_status'
     | 'plan_created' | 'plan_step' | 'approval_required' | 'approval_granted'
     | 'approval_rejected' | 'task_started' | 'task_completed' | 'task_failed' | 'task_cancelled';
   content: string;
   error_code?: string;
   session_id?: string;
+  turn_id?: string;
+  attempt?: number;
+  sequence?: number;
   model_used?: string;
   sources?: SourceReference[];
   // Tool event fields

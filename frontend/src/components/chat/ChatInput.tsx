@@ -18,9 +18,11 @@ import {
 interface ChatInputProps {
   onSendMessage: (text: string, image?: File) => void;
   onStopStream: () => void;
+  stopDisabled?: boolean;
   isStreaming: boolean;
   sendBlocked: boolean;
   imageBlocked: boolean;
+  textOnly?: boolean;
   hasEarlierImage?: boolean;
   hasEarlierTextFile?: boolean;
   hasEarlierCsvFile?: boolean;
@@ -60,9 +62,11 @@ function previewError(csv: boolean, range: TextFileLineRange | undefined, status
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
   onStopStream,
+  stopDisabled = false,
   isStreaming,
   sendBlocked,
   imageBlocked,
+  textOnly,
   hasEarlierImage,
   hasEarlierTextFile,
   hasEarlierCsvFile,
@@ -474,6 +478,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* Input row */}
       <div className="flex items-end gap-3">
+        {!textOnly && <>
         <input
           ref={fileInputRef}
           type="file"
@@ -508,6 +513,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           className="h-11 shrink-0 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-600 hover:bg-blue-50 disabled:opacity-50">
           {onSendTextFiles ? 'TXT / CSV / JSON' : 'TXT / CSV'}
         </button>
+        </>}
 
         {/* Text Area */}
         <div className="relative min-w-0 flex-1">
@@ -542,6 +548,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <button
               id="stop-stream-btn"
               onClick={onStopStream}
+              disabled={stopDisabled}
               className="px-5 h-11 rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-semibold text-sm transition-colors flex items-center gap-2 shadow-sm"
             >
               <Square className="w-4 h-4 fill-current" />
@@ -574,13 +581,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
         <span>Enter to send, Shift + Enter for new line</span>
-        <span id="chat-file-support" className="text-slate-600">
+        {!textOnly && <span id="chat-file-support" className="text-slate-600">
           {textFileSupported ? (onSendTextFiles
             ? 'Pick up to three TXT, CSV or JSON files, 2 KiB each and 4 KiB total. A new pick replaces the set.'
             : 'One UTF-8 TXT or CSV per request, up to 2 KiB.') :
             'TXT, CSV and JSON require authenticated local chat mode.'}{' '}
           PDF, DOCX and XLSX chat attachments are unavailable.
-        </span>
+        </span>}
       </div>
     </div>
   );

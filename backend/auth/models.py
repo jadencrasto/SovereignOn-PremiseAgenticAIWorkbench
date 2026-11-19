@@ -307,10 +307,18 @@ CREATE TABLE IF NOT EXISTS failed_logins (
 class AuthStore:
     """SQLite data access for users and sessions."""
 
-    def __init__(self, db_path: Path, lock: Optional[threading.Lock] = None) -> None:
+    def __init__(self, db_path: Path, lock: Optional[threading.Lock] = None, *, initialize=True) -> None:
         self._db_path = db_path
         self._lock = lock or threading.Lock()
-        self._init_db()
+        self._require_existing = not initialize
+        if initialize:
+            self._init_db()
+
+    @staticmethod
+    def initialize_schema(conn: sqlite3.Connection) -> None:
+        conn.execute(_CREATE_USERS_TABLE)
+        conn.execute(_CREATE_SESSIONS_TABLE)
+        conn.execute(_CREATE_FAILED_LOGINS_TABLE)
 
     def _init_db(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,9 +327,7 @@ class AuthStore:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA foreign_keys=ON")
-                conn.execute(_CREATE_USERS_TABLE)
-                conn.execute(_CREATE_SESSIONS_TABLE)
-                conn.execute(_CREATE_FAILED_LOGINS_TABLE)
+                self.initialize_schema(conn)
                 cursor = conn.execute("PRAGMA table_info(users)")
                 columns = {row[1] for row in cursor.fetchall()}
                 if "clearance" not in columns:
@@ -335,7 +341,8 @@ class AuthStore:
                 conn.close()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
+        target = self._db_path.resolve().as_uri() + "?mode=rw" if self._require_existing else str(self._db_path)
+        conn = sqlite3.connect(target, uri=self._require_existing)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
@@ -345,29 +352,24 @@ class AuthStore:
     # ------------------------------------------------------------------
 
     def create_user(self, user: User) -> None:
-        clearance = user.clearance or DEFAULT_CLEARANCE_MAP.get(UserRole(user.role), ClearanceLevel.L1).value
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    """INSERT INTO users
-                       (id, username, password_hash, role, clearance, is_active, must_change_password, created_at, last_login_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        user.id,
-                        user.username,
-                        user.password_hash,
-                        user.role,
-                        clearance,
-                        1 if user.is_active else 0,
-                        1 if user.must_change_password else 0,
-                        user.created_at,
-                        user.last_login_at,
-                    ),
-                )
+                self.insert_user(conn, user)
                 conn.commit()
             finally:
                 conn.close()
+
+    @staticmethod
+    def insert_user(conn: sqlite3.Connection, user: User) -> None:
+        clearance = user.clearance or DEFAULT_CLEARANCE_MAP.get(UserRole(user.role), ClearanceLevel.L1).value
+        conn.execute(
+            """INSERT INTO users
+               (id, username, password_hash, role, clearance, is_active, must_change_password, created_at, last_login_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user.id, user.username, user.password_hash, user.role, clearance, int(user.is_active),
+             int(user.must_change_password), user.created_at, user.last_login_at),
+        )
 
     def get_user_by_username(self, username: str) -> Optional[User]:
         with self._lock:

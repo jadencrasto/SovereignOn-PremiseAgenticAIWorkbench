@@ -76,7 +76,8 @@ def _observed_digest(observation, key):
 
 def _current_inventory(state):
     recorded = getattr(state, "model_observation", None)
-    if recorded and recorded[0] == _tags_url(state) and time.monotonic() - recorded[1] < MODEL_CHECK_TTL:
+    if recorded and recorded[0] == _tags_url(state) and (
+            getattr(_settings(state), 'is_local_dev', False) or time.monotonic() - recorded[1] < MODEL_CHECK_TTL):
         return recorded
     return None
 
@@ -87,7 +88,20 @@ def model_readiness(state, selected: str, capability: str = 'chat') -> dict:
     identity = _identity(state, selected, capability)
     digest = _observed_digest(observation, identity[1]) if identity else None
     status = {'state': 'unknown', 'reason': 'inference_not_checked'}
-    if identity is None:
+    if getattr(_settings(state), 'is_local_dev', False):
+        if capability != 'chat':
+            status = {'state': 'blocked', 'reason': 'local_text_chat_only'}
+        elif identity is None:
+            status = {'state': 'unavailable', 'reason': 'unsupported_chat_model'}
+        elif observation is None:
+            status = {'state': 'unknown', 'reason': 'model_check_required'}
+        elif observation.state != 'available':
+            status = {'state': 'unavailable', 'reason': observation.reason}
+        elif not digest:
+            status = {'state': 'unavailable', 'reason': 'configured_model_missing'}
+        else:
+            status = {'state': 'available', 'reason': 'model_listed'}
+    elif identity is None:
         status = {'state': 'unavailable', 'reason': f'unsupported_{capability}_model'}
     elif observation is None or observation.state != 'available':
         status = {'state': 'unknown', 'reason': 'model_check_required'}
@@ -156,6 +170,12 @@ def _report(state, selected_model: str | None = None, vision_model: str | None =
         'state': 'unavailable', 'reason': 'component_not_initialized'}
     image_stage = chat if vision['state'] == 'available' else vision
     report['capabilities']['multimodal'] = {'state': image_stage['state'], 'reason': image_stage['reason']}
+    if getattr(cfg, 'is_local_dev', False):
+        report['run_profile'] = 'local_dev'
+        report['history_retention'] = getattr(getattr(state, 'local_retention', None), 'mode', 'disposable')
+        report['vision_models'] = []
+        del report['document_intelligence']
+        report['text_file_understanding'] = False
     return report
 
 
@@ -205,7 +225,7 @@ async def probe_inference(target: str, model: str, *, vision: bool = False) -> b
         return False
 
 
-async def observe_ollama(target: str) -> ModelObservation:
+async def observe_ollama(target: str, *, local_only: bool = False) -> ModelObservation:
     """Fetch a bounded inventory without redirects, proxies, DNS or inference."""
     try:
         async with asyncio.timeout(MODEL_CHECK_TIMEOUT):
@@ -221,11 +241,29 @@ async def observe_ollama(target: str) -> ModelObservation:
                                 raise ValueError("inventory too large")
                             body.extend(chunk)
                     payload = json.loads(body)
+                    if local_only:
+                        # Discard cloud entries and require a locally stored model
+                        # reported by the bounded inventory before accepting a prompt.
+                        parse_tag_digests(payload)
+                        payload = {'models': [
+                            item for item in payload['models']
+                            if not (item.get('remote_host') or item.get('remote_model'))
+                            and not item['name'].lower().endswith('-cloud')
+                            and type(item.get('size')) is int and item['size'] > 0
+                            and item.get('digest')
+                        ]}
                     return ModelObservation("available", "inventory_observed", parse_tags(payload), parse_tag_digests(payload))
     except (ValueError, RecursionError):
         return ModelObservation("unavailable", "invalid_model_inventory")
     except (TimeoutError, httpx.HTTPError):
         return ModelObservation("unavailable", "ollama_check_failed")
+
+
+async def refresh_local_inventory(state) -> None:
+    async with state.local_inventory_lock:
+        target = _tags_url(state)
+        observation = await observe_ollama(target, local_only=True)
+        state.model_observation = (target, time.monotonic(), observation)
 
 
 @router.get("/live", summary="Liveness probe")
@@ -300,6 +338,9 @@ async def check_ollama(
 ):
     state = request.app.state
     response.headers["Cache-Control"] = "no-store"
+    if getattr(_settings(state), 'is_local_dev', False):
+        await refresh_local_inventory(state)
+        return _report(state, model, vision_model)
     target = _tags_url(state)
     if target and getattr(state, "startup_complete", False):
         if getattr(state, "model_check_in_progress", False):

@@ -40,6 +40,7 @@ export async function loadSession(id: string): Promise<ChatSession> {
     timestamp: m.created_at ? new Date(m.created_at).toLocaleString() : '',
     toolEvents: m.tool_events || [], withheld: m.withheld === true,
     workflowStatus: m.response_state || undefined,
+    localTurn: m.turn,
     attachments: m.attachments?.map(attachment => ({
       id: attachment.attachment_id, filename: attachment.filename,
       mimeType: attachment.mime_type, sizeBytes: attachment.size_bytes,

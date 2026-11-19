@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, model_validator
@@ -51,6 +51,12 @@ class Settings(BaseSettings):
         description="Expose /docs, /redoc, /openapi.json in production when True.",
     )
     log_level: str = Field(default="INFO")
+    run_profile: Literal["local_dev"] | None = Field(
+        default=None, validation_alias="SOVEREIGNAI_RUN_PROFILE",
+    )
+    local_history_mode: Literal["disposable", "durable"] | None = Field(
+        default=None, validation_alias="SOVEREIGNAI_LOCAL_HISTORY",
+    )
 
     # ------------------------------------------------------------------
     # Backend server
@@ -188,6 +194,10 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return not self.is_production
+
+    @property
+    def is_local_dev(self) -> bool:
+        return self.run_profile == "local_dev"
 
     def ensure_dirs(self) -> None:
         """Create all runtime directories that must exist before startup."""

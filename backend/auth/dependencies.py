@@ -70,11 +70,16 @@ def _bind_local_dispatch(active_settings):
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+def session_cookie_name(request: Request) -> str:
+    cfg = getattr(request.app.state, "settings", settings)
+    return "sovereign_local_dev_session" if getattr(cfg, "is_local_dev", False) else "session_token"
+
+
 def request_session_credentials(request: Request, bearer: HTTPAuthorizationCredentials | None) -> tuple[str | None, bool]:
     """Resolve the token and whether cookie authentication applies."""
     if bearer and bearer.credentials:
         return bearer.credentials, False
-    token = request.cookies.get('session_token')
+    token = request.cookies.get(session_cookie_name(request))
     return token, bool(token)
 
 

@@ -112,14 +112,17 @@ class AgentEngine:
         memory: ConversationMemory,
         doc_service=None,   # Optional DocumentService — injected after startup
         tool_registry=None,  # Optional ToolRegistry — injected at startup
+        *,
+        system_prompt: str | None = None,
     ) -> None:
         self._settings = settings
         self._router = router
         self._memory = memory
         self._doc_service = doc_service   # may be None if RAG not initialised
         self._tool_registry = tool_registry  # may be None if tools not initialised
-        self._system_prompt = self._load_system_prompt(
-            settings.agents_dir / "default" / "system_prompt.md"
+        self._system_prompt = (
+            system_prompt if system_prompt is not None
+            else self._load_system_prompt(settings.agents_dir / "default" / "system_prompt.md")
         )
         self._agent_config = self._load_agent_config(
             settings.agents_dir / "default" / "agent.yaml"
@@ -252,6 +255,8 @@ class AgentEngine:
         user_message: str,
         model_id: Optional[str] = None,
         user_clearance: str = "viewer",
+        *,
+        local_turn=None,
     ) -> AsyncIterator:
         """
         Streaming chat (no tools).
@@ -261,8 +266,11 @@ class AgentEngine:
         """
         t0 = time.monotonic()
 
-        self._ensure_session(session_id)
-        self._memory.add_user_message(session_id, user_message)
+        if local_turn is None:
+            self._ensure_session(session_id)
+            self._memory.add_user_message(session_id, user_message)
+        else:
+            local_turn.check_access()
         origin_identity = self._memory.stream_identity(session_id)
 
         provider, model_name = self._router.get_provider_for_model(model_id)
@@ -272,6 +280,12 @@ class AgentEngine:
 
         # Build messages for this turn
         messages = self._build_messages(session_id, user_message, sources)
+        if local_turn is not None:
+            from backend.agent.memory import LOCAL_TURN_FIELD
+
+            messages = [message for message in messages if
+                        message.id == local_turn.turn_id or
+                        message.extra_fields.get(LOCAL_TURN_FIELD, {}).get('state', 'completed') == 'completed']
 
         independent = self._independent_plain_input(session_id, messages, sources)
         request = ChatRequest(
@@ -308,24 +322,30 @@ class AgentEngine:
                         break
             if not completed or not "".join(accumulated).strip():
                 raise RuntimeError("Model response interrupted")
-            if pending:
+            if pending and local_turn is None:
                 emitted.append(pending)
                 yield pending
         except BaseException as exc:
             # Do not persist the withheld detection buffer or mask the original failure.
-            try:
-                partial = ''.join(emitted)
-                self._record_plain_response(
-                    session_id, origin_identity, partial, sources, independent,
-                    provider.provider_name, model_name,
-                    status='failed' if isinstance(exc, Exception) else 'interrupted')
-            except Exception:
-                logger.warning('Could not persist incomplete response', exc_info=True)
+            if local_turn is None:
+                try:
+                    partial = ''.join(emitted)
+                    self._record_plain_response(
+                        session_id, origin_identity, partial, sources, independent,
+                        provider.provider_name, model_name,
+                        status='failed' if isinstance(exc, Exception) else 'interrupted')
+                except Exception:
+                    logger.warning('Could not persist incomplete response', exc_info=True)
             raise
 
         full_response = "".join(accumulated)
+        if local_turn is not None:
+            local_turn.check_access()
         self._record_plain_response(session_id, origin_identity, full_response, sources,
-                                    independent, provider.provider_name, model_name)
+                                    independent, provider.provider_name, model_name,
+                                    **({'local_turn': (local_turn.turn_id, local_turn.attempt)} if local_turn else {}))
+        if local_turn is not None and pending:
+            yield pending
 
         elapsed = time.monotonic() - t0
         logger.info(
@@ -6193,13 +6213,14 @@ class AgentEngine:
             return None
 
     def _record_plain_response(self, session_id, identity, content, sources, independent,
-                               provider_name, model_name, *, status=None):
+                               provider_name, model_name, *, status=None, local_turn=None):
         from backend.security.conversation_access import source_provenance
         from backend.security.provenance_foundation import document_content_allowed
         producer = (f'{provider_name}/{model_name}'
                     if independent is not None and independent == identity and not document_content_allowed() else None)
         self._memory.record_plain_response(session_id, identity, content, status=status,
-                                           producer=producer, access_provenance=source_provenance(sources))
+                                           producer=producer, access_provenance=source_provenance(sources),
+                                           **({'local_turn': local_turn} if local_turn else {}))
 
     def _build_messages(
         self,

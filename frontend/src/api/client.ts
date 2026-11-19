@@ -74,6 +74,7 @@ export async function streamSSE(
     onSources: (sources: any[]) => void;
     onDone: (sessionId: string, modelUsed: string, attachment?: StreamChunkPayload['attachment'], fileSources?: StreamChunkPayload['file_sources']) => void;
     onError: (error: string, info?: StreamErrorInfo) => void;
+    onAccepted?: () => void;
     onToolEvent?: (event: ToolEvent) => void;
     // Phase 5: vision status events
     onAgentStatus?: (status: string) => void;
@@ -114,6 +115,8 @@ export async function streamSSE(
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let terminal = false;
+  let sequence = 0;
+  const identified = typeof payload.turn_id === 'string';
 
   try {
     while (true) {
@@ -133,7 +136,23 @@ export async function streamSSE(
           const chunk: StreamChunkPayload = JSON.parse(jsonStr);
           if (terminal) continue;
 
-          if (chunk.type === 'delta') {
+          if (identified) {
+            if (chunk.session_id !== payload.session_id || chunk.turn_id !== payload.turn_id ||
+                chunk.attempt !== payload.attempt || typeof chunk.sequence !== 'number' ||
+                !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
+                typeof chunk.content !== 'string') throw new Error('Invalid turn event');
+            if (chunk.sequence <= sequence) continue;
+            if (chunk.sequence !== sequence + 1 ||
+                !(chunk.type === 'done' || chunk.type === 'error' ||
+                  (sequence === 0 ? chunk.type === 'accepted' : chunk.type === 'delta'))) {
+              throw new Error('Out-of-order turn event');
+            }
+            sequence = chunk.sequence;
+          }
+
+          if (chunk.type === 'accepted') {
+            if (identified) callbacks.onAccepted?.();
+          } else if (chunk.type === 'delta') {
             if (chunk.content) {
               callbacks.onDelta(chunk.content);
             }

@@ -5,6 +5,9 @@ const React={createElement:(type,props,...children)=>({type,props:{...props,chil
 function MessageList(){} function ChatInput(){} function ChatHistorySidebar(){}
 let createImpl=async()=>({session_id:'created-server-id'});
 let visionModel = 'ollama/vision:7b';
+let localMode = false;
+let localOffline = false;
+let historyImpl = async () => ({id:'server-session',title:'Conversation',messages:[]});
 const api={createSession:signal=>createImpl(signal),fetchSessions:async()=>({count:0}),streamChat(payload,callbacks,signal){let resolve;let p=new Promise(r=>resolve=r);requests.push({payload,callbacks,signal,resolve});return p},guardChatCallbacks(callbacks,active){return new Proxy(callbacks,{get:(t,p)=>(...a)=>{if(active())t[p](...a)}})}};
 api.streamChatMultimodal = api.streamChat;
 api.streamChatTextFile = (file, session_id, model, message, callbacks, signal, range) =>
@@ -15,7 +18,20 @@ const chatFile=path.resolve(__dirname,'../src/api/chat.ts');
 const chatOut=ts.transpileModule(fs.readFileSync(chatFile,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
 const chatMod=new Module(chatFile,module);chatMod.filename=chatFile;chatMod.paths=Module._nodeModulePaths(path.dirname(chatFile));const chatRequire=chatMod.require.bind(chatMod);chatMod.require=n=>n==='./client'?{}:chatRequire(n);chatMod._compile(chatOut,chatFile);
 api.guardChatCallbacks=chatMod.exports.guardChatCallbacks;
+const localTurnsFile=path.resolve(__dirname,'../src/components/chat/localTurns.ts');
+const localTurnsMod=new Module(localTurnsFile,module);
+localTurnsMod._compile(ts.transpileModule(fs.readFileSync(localTurnsFile,'utf8'),{
+  compilerOptions:{module:ts.ModuleKind.CommonJS},
+}).outputText,localTurnsFile);
 const mocks={react:React,'./MessageList':{MessageList},'./ChatInput':{ChatInput},'./ChatHistorySidebar':{ChatHistorySidebar,loadSession:async()=>({id:'server-session',title:'Conversation',messages:[]})},'../../context/AuthContext':{useAuth:()=>({user:{id:'a'},refreshUser:async()=>{authRefreshes++;}})},'../../api/chat':api,'../../context/WorkbenchContext':{useWorkbench:()=>({selectedModel:textModel,selectedVisionModel:visionModel,addToast(){},capabilities:{text_file_understanding:true},isCheckingHealth:false})},'../../api/capabilities':{capabilityFor:()=>({state:'available'}),chatDisabled:(_report,image)=>image?false:textBlocked,describeCapability:()=>'',permitsCapability:()=>false},'../../api/tasks':{},'lucide-react':{Clock:()=>null,Plus:()=>null}};
+mocks['./localTurns']=localTurnsMod.exports;
+mocks['./ChatHistorySidebar'].loadSession = id => historyImpl(id);
+const mockWorkbench = mocks['../../context/WorkbenchContext'].useWorkbench;
+mocks['../../context/WorkbenchContext'].useWorkbench = () => {
+  const state = mockWorkbench();
+  return localMode ? { ...state, runProfile: 'local_dev',
+    capabilities: localOffline ? null : { run_profile: 'local_dev' } } : state;
+};
 const file=path.resolve(__dirname,'../src/components/chat/ChatView.tsx');const out=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;const mod=new Module(file,module);mod.filename=file;mod.paths=Module._nodeModulePaths(path.dirname(file));let orig=mod.require.bind(mod);mod.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);mod._compile(out,file);
 function render(){cursor=0;effects=[];return mod.exports.ChatView()} function find(n,t){if(!n||typeof n!=='object')return;if(n.type===t)return n;for(let c of n.props?.children||[]){let x=find(c,t);if(x)return x}} function parts(){let tree=render();return {tree,input:find(tree,ChatInput).props,list:find(tree,MessageList).props,sidebar:find(tree,ChatHistorySidebar)?.props}} function setup(){slots=[];requests=[];parts();slots[3]='server-session';return parts()}
 test('a second submission from the same render cannot replace the active stream', async () => {
@@ -481,7 +497,7 @@ test('switching vision models while the draft opens discards the pending image r
   const pending = parts().input.onSendMessage('Describe', syntheticImage());
   visionModel = 'ollama/other-vision:7b';
   parts();
-  effects.at(-2)();
+  effects[4]();
   finishCreating({ session_id: 'new-server-session' });
   await pending;
   assert.equal(requests.length, 0);
@@ -558,7 +574,7 @@ test('changing the text model while a plain draft opens prevents dispatch on the
   const pending = parts().input.onSendMessage('Explain pumps');
   textModel = 'ollama/new-text';
   parts();
-  effects.at(-2)();
+  effects[4]();
   finish({ session_id: 'created-server-id' });
   await pending;
   assert.equal(requests.length, 0);
@@ -596,7 +612,7 @@ test('a failed demo image download leaves its prompt unsent', async (t) => {
   };
   global.fetch = async () => ({ ok: false });
   setup();
-  const cleanup = effects.at(-1)();
+  const cleanup = effects[5]();
   try {
     await launch({ detail: { prompt: 'Describe this image', isMultimodal: true, imageFile: 'sample.png' } });
     assert.equal(requests.length, 0);
@@ -621,7 +637,7 @@ test('a demo download that finishes after a conversation switch cannot send', as
     return { ok: true, blob: () => new Promise(resolve => { finishBlob = resolve; }) };
   };
   const view = setup();
-  const cleanup = effects.at(-1)();
+  const cleanup = effects[5]();
   try {
     const pending = launch({ detail: { prompt: 'Describe', isMultimodal: true, imageFile: 'sample.png' } });
     await Promise.resolve();
@@ -667,6 +683,126 @@ test('verified unit conversion result and workflow failure are shown separately'
 
 test('new draft obtains a server ID before sending',async()=>{let v=setup();slots[3]='';v=parts();let pending=v.input.onSendMessage('hello');await Promise.resolve();assert.equal(requests[0].payload.session_id,'created-server-id');requests[0].callbacks.onDone('created-server-id','fake');requests[0].resolve();await pending;assert.equal(slots[3],'created-server-id')});
 test('a stale create response cannot switch the active conversation',async()=>{let resolveCreate;createImpl=()=>new Promise(r=>resolveCreate=r);let v=setup();slots[3]='';v=parts();let pending=v.input.onSendMessage('hello');v=parts();v.tree.props.children[0].props.children[0].props.children[1].props.onClick();resolveCreate({session_id:'stale'});await pending;assert.equal(requests.length,0);assert.equal(slots[3],'');createImpl=async()=>({session_id:'created-server-id'})});
+
+function localHarness(t) {
+  const oldHistory = historyImpl;
+  const oldWindow = global.window;
+  const oldStorage = global.sessionStorage;
+  localMode = true;
+  t.after(() => {
+    localMode = false;
+    localOffline = false;
+    historyImpl = oldHistory;
+    global.window = oldWindow;
+    global.sessionStorage = oldStorage;
+    delete api.cancelLocalTurn;
+  });
+  return setup();
+}
+
+function snapshot(userId, state, attempt=1) {
+  const user = { id: userId, role:'user', content:'Remember Cedar.', timestamp:'',
+    localTurn:{ attempt, state, model:textModel } };
+  return { id:'server-session', title:'Conversation', messages: state === 'completed' ?
+    [user, {id:'reply-from-server', role:'assistant', content:'Cedar.', timestamp:''}] : [user] };
+}
+
+function buttonWithText(tree, label) {
+  if (Array.isArray(tree)) return tree.map(child => buttonWithText(child, label)).find(Boolean);
+  if (!tree || typeof tree !== 'object') return;
+  if (tree.type === 'button' && tree.props.children.includes(label)) return tree;
+  return buttonWithText(tree.props?.children, label);
+}
+
+test('local stream with lost completion displays only the reconciled server reply', async (t) => {
+  const view = localHarness(t);
+  const finishing = view.input.onSendMessage('Remember Cedar.');
+  const request = requests[0];
+  assert.match(request.payload.turn_id, /^[0-9a-f-]{36}$/);
+  assert.equal(request.payload.attempt, 1);
+  assert.equal(request.payload.tools_enabled, false);
+  request.callbacks.onAccepted();
+  request.callbacks.onDelta('Provisional output.');
+  assert.equal(parts().list.messages.at(-1).localPreview, true);
+  localOffline = true;
+  assert.equal(parts().input.textOnly, true);
+  historyImpl = async () => snapshot(request.payload.turn_id, 'completed');
+  request.callbacks.onError('Connection interrupted');
+  request.resolve();
+  await finishing;
+  assert.deepEqual(parts().list.messages.map(message => message.id), [request.payload.turn_id, 'reply-from-server']);
+  assert.equal(parts().list.messages.at(-1).content, 'Cedar.');
+  assert.equal(requests.length, 1);
+});
+
+test('refresh during a local stream polls history without posting the turn', async (t) => {
+  localHarness(t);
+  const foreignPreview = 'turn-already-admitted';
+  global.sessionStorage = { getItem: () => 'server-session', setItem() {}, removeItem() {} };
+  historyImpl = async () => snapshot(foreignPreview, 'running');
+  let poll;
+  global.window = { addEventListener() {}, removeEventListener() {},
+    setInterval(callback) { poll = callback; return 9; }, clearInterval() {} };
+  parts();
+  const endRestore = effects[2]();
+  await new Promise(setImmediate);
+  assert.equal(parts().input.isStreaming, true);
+  const stopPolling = effects.at(-1)();
+  historyImpl = async () => snapshot(foreignPreview, 'completed');
+  poll();
+  await new Promise(setImmediate);
+  assert.equal(parts().input.isStreaming, false);
+  assert.equal(parts().list.messages.at(-1).id, 'reply-from-server');
+  assert.equal(requests.length, 0);
+  stopPolling();
+  endRestore();
+});
+
+test('local stop targets the admitted attempt and retries only with the next attempt number', async (t) => {
+  const view = localHarness(t);
+  const finishing = view.input.onSendMessage('Remember Cedar.');
+  const first = requests[0];
+  assert.equal(parts().input.stopDisabled, true);
+  first.callbacks.onAccepted();
+  assert.equal(parts().input.stopDisabled, false);
+  let cancelled;
+  api.cancelLocalTurn = async (...args) => {
+    cancelled = args;
+    historyImpl = async () => snapshot(first.payload.turn_id, 'cancelled');
+  };
+  parts().input.onStopStream();
+  await new Promise(setImmediate);
+  assert.deepEqual(cancelled, ['server-session', first.payload.turn_id, 1]);
+  assert.equal(first.signal.aborted, true);
+  first.callbacks.onDelta('Late output cannot appear');
+  first.resolve();
+  await finishing;
+  assert.equal(parts().list.messages.length, 1);
+  const retry = buttonWithText(parts().tree, 'Retry response');
+  retry.props.onClick();
+  assert.equal(requests[1].payload.turn_id, first.payload.turn_id);
+  assert.equal(requests[1].payload.attempt, 2);
+  historyImpl = async () => snapshot(first.payload.turn_id, 'completed', 2);
+  requests[1].resolve();
+  await new Promise(setImmediate);
+  assert.deepEqual(parts().list.messages.map(message => message.id), [first.payload.turn_id, 'reply-from-server']);
+});
+
+test('ambiguous submission exposes an explicit resend of the same attempt', async (t) => {
+  const view = localHarness(t);
+  const firstSend = view.input.onSendMessage('Remember Cedar.');
+  const first = requests[0];
+  historyImpl = async () => ({id:'server-session', title:'Conversation', messages:[]});
+  first.resolve();
+  await firstSend;
+  assert.equal(parts().input.sendBlocked, true);
+  buttonWithText(parts().tree, 'Resend same attempt').props.onClick();
+  assert.deepEqual(requests[1].payload, first.payload);
+  historyImpl = async () => snapshot(first.payload.turn_id, 'completed');
+  requests[1].resolve();
+  await new Promise(setImmediate);
+  assert.equal(parts().list.messages.length, 2);
+});
 test('confirmed deletion of active chat aborts and ignores stale stream',async()=>{let v=setup();let pending=v.input.onSendMessage('Old');requests[0].callbacks.onDelta('partial');v=parts();v.tree.props.children[0].props.children[0].props.children[0].props.onClick();v=parts();v.sidebar.onNewChat();assert.equal(requests[0].signal.aborted,true);requests[0].callbacks.onDelta('late');requests[0].resolve();await pending;v=parts();assert.deepEqual(v.list.messages,[]);assert.equal(v.input.isStreaming,false)});
 
 test('approval event keeps composer locked until stream terminal event',async()=>{let v=setup();let pending=v.input.onSendMessage('work');let c=requests[0].callbacks;c.onApprovalRequired({task_id:'t',approval_id:'a',step_id:'s',tool_name:'write'});v=parts();assert.equal(v.input.isStreaming,true);assert.equal(v.list.messages[1].pendingApproval.status,'pending');await v.input.onSendMessage('another message');assert.equal(requests.length,1);c.onDone('server-session','fake');requests[0].resolve();await pending;v=parts();assert.equal(v.input.isStreaming,false);assert.equal(v.list.messages[1].workflowStatus,'awaiting_approval')});

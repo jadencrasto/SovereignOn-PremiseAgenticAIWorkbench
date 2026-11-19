@@ -46,7 +46,8 @@ def _require_supervised_profile(settings) -> None:
     # not initialize the document vector store or its embedding service.
     from backend.health.capabilities import loopback_tags_url
 
-    if (not _loopback(settings.backend_host) or settings.auth_enabled is not True
+    if (getattr(settings, 'is_local_dev', False)
+            or not _loopback(settings.backend_host) or settings.auth_enabled is not True
             or settings.auth_dev_override is not False or settings.local_chat_only is not True
             or settings.app_env.lower() not in ('development', 'dev')):
         raise RuntimeError('Supervised startup requires the authenticated loopback chat-only profile')

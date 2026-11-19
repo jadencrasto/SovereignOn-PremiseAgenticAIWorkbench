@@ -41,6 +41,20 @@ function fixture() {
   return { schema_version: 1, environment: 'development', deployment_verified: false,
     capabilities, models: { default_chat: model }, installed_models: [] };
 }
+
+test('only the explicit local profile permits chat from a local inventory observation', () => {
+  const report = fixture();
+  const model = report.models.default_chat.id;
+  report.installed_models = ['qwen:7b'];
+  report.capabilities.chat = { state: 'available', reason: 'model_listed' };
+  report.selected_chat_model = { id: model, state: 'available', reason: 'model_listed', identity_evidence: 'provider_digest' };
+  assert.equal(helpers.chatDisabled(report, false, model), true);
+  report.run_profile = 'local_dev';
+  assert.equal(helpers.chatDisabled(report, false, model), false);
+  assert.equal(helpers.chatDisabled(report, true, model), true);
+  report.selected_chat_model.identity_evidence = 'unavailable';
+  assert.equal(helpers.chatDisabled(report, false, model), true);
+});
 test('unavailable backend renders actionable status', () => {
   const html = render(null);
   assert.match(html, /unavailable/i);

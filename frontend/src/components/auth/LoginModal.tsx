@@ -11,9 +11,10 @@ import { changePasswordApi } from '../../api/auth';
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
+  localDev?: boolean;
 }
 
-export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
+export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, localDev }) => {
   const { user, login, logout, isAuthenticated } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -107,7 +108,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full px-3 py-2 bg-zinc-800/80 border border-zinc-700 rounded-lg text-zinc-100 text-sm focus:outline-none focus:border-emerald-500 transition"
-                  placeholder="admin"
+                  placeholder={localDev ? 'local_dev' : 'admin'}
                 />
               </div>
 
@@ -200,12 +201,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               </div>
 
               <div className="flex gap-2 pt-2">
-                <button
+                {!localDev && <button
                   onClick={() => setIsChangingPassword(true)}
                   className="flex-1 py-2 px-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium rounded-lg transition"
                 >
                   Change Password
-                </button>
+                </button>}
                 <button
                   onClick={async () => {
                     setError(null);

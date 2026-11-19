@@ -38,11 +38,14 @@ export const StatusBar: React.FC = () => {
     health,
     selectedModel,
     capabilities,
+    runProfile,
   } = useWorkbench();
+  const local = (runProfile ?? capabilities?.run_profile) === 'local_dev';
 
   const [hw, setHw] = useState<HardwareTelemetry | null>(null);
 
   const fetchHardware = async () => {
+    if (local) return;
     try {
       const res = await fetch('/api/hardware/status');
       if (res.ok) {
@@ -56,7 +59,7 @@ export const StatusBar: React.FC = () => {
     fetchHardware();
     const timer = setInterval(fetchHardware, 4000);
     return () => clearInterval(timer);
-  }, []);
+  }, [local]);
 
   return (
     <footer className="h-10 bg-white border-t-2 border-[#cbd5e1] px-5 flex items-center justify-between text-[11px] font-mono select-none shrink-0 overflow-x-auto text-[#0f172a]">
@@ -121,7 +124,7 @@ export const StatusBar: React.FC = () => {
       {/* Right Block */}
       <div className="flex items-center gap-2 shrink-0 font-bold text-[10px]">
         <div className="px-2 py-0.5 bg-blue-600 text-white border border-blue-700 rounded-sm shadow-sm uppercase">
-          DEVELOPMENT &bull; DEPLOYMENT UNVERIFIED
+          {local ? 'LOCAL DEV · NON-PRODUCTION' : 'DEVELOPMENT · DEPLOYMENT UNVERIFIED'}
         </div>
       </div>
     </footer>

@@ -47,14 +47,12 @@ class StructuredJsonFormatter(logging.Formatter):
         return json.dumps(log_obj)
 
 
-def setup_logging(log_level: int, log_dir: Path, app_env: str = "development") -> None:
+def setup_logging(log_level: int, log_dir: Path | None, app_env: str = "development") -> None:
     """Configure root logger. Safe to call multiple times (idempotent)."""
     global _CONFIGURED
     if _CONFIGURED:
         return
     _CONFIGURED = True
-
-    log_dir.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()
     root.setLevel(log_level)
@@ -74,16 +72,17 @@ def setup_logging(log_level: int, log_dir: Path, app_env: str = "development") -
     # ------------------------------------------------------------------
     # Rotating file handler  →  data/logs/app.log (always JSON formatted)
     # ------------------------------------------------------------------
-    log_file = log_dir / "app.log"
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(StructuredJsonFormatter())
-    root.addHandler(file_handler)
+    if log_dir is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_dir / "app.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(StructuredJsonFormatter())
+        root.addHandler(file_handler)
 
     # Quieten noisy third-party loggers
     for noisy in ("httpx", "httpcore", "uvicorn.access", "chromadb"):

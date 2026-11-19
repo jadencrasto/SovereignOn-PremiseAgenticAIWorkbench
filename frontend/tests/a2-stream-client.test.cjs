@@ -56,6 +56,31 @@ test('interrupted and invalid streams are errors, not completion', async () => {
  }
 });
 
+test('identified streams ignore duplicates and reject gaps or another attempt', async (t) => {
+ const originalFetch = global.fetch;
+ t.after(() => { global.fetch = originalFetch; });
+ const key = {session_id: 's', turn_id: 'turn-id', attempt: 2};
+ const event = (sequence, type, content = '', overrides = {}) =>
+  'data: ' + JSON.stringify({...key, sequence, type, content, ...overrides}) + '\n\n';
+ const accepted = event(1, 'accepted');
+ const delta = event(2, 'delta', 'Hello');
+ const done = event(3, 'done');
+ global.fetch = async () => response([accepted, delta, delta, done, done]);
+ const events = [];
+ await streamSSE('/api/chat', key, {...callbacks(events), onAccepted: () => events.push(['accepted'])});
+ assert.deepEqual(events, [['accepted'], ['delta', 'Hello'], ['done', 's']]);
+ for (const invalid of [event(3, 'delta', 'out of order'), event(2, 'done', '', {attempt: 1})]) {
+  const before = [];
+  global.fetch = async () => response([accepted, invalid, delta, done]);
+  await streamSSE('/api/chat', key, callbacks(before));
+  assert.deepEqual(before, [['error', 'Invalid stream response']]);
+ }
+ const replay = [];
+ global.fetch = async () => response([event(1, 'done')]);
+ await streamSSE('/api/chat', key, callbacks(replay));
+ assert.deepEqual(replay, [['done', 's']]);
+});
+
 test('chat clients turn FastAPI validation details into a displayable error', async (t) => {
  const originalFetch = global.fetch;
  t.after(() => { global.fetch = originalFetch; });
