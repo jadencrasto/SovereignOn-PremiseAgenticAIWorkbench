@@ -30,3 +30,14 @@ test('failed stream renders partial text and an error without offering retry', (
  assert.match(html, /Outcome uncertain/);
  assert.doesNotMatch(html, />Retry</);
 });
+
+test('persisted local clarification tells the user how to name a result or supply units', () => {
+ const message = { id: 'turn', role: 'user', content: 'Subtract 5 from the conversion result.', timestamp: '',
+   localTurn: { state: 'failed', error_code: 'LOCAL_TOOL_REFERENCE_UNIT' } };
+ let html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /addition or subtraction in the same unit/);
+ message.localTurn.error_code = 'LOCAL_TOOL_CONTEXT';
+ html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /result from the first calculation/);
+ assert.doesNotMatch(html, /tool_start|numeric_tool|invocation_id/);
+});

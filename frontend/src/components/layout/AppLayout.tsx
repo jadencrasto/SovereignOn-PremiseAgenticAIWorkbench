@@ -25,7 +25,7 @@ import { DemoScenarioLauncher } from '../demo/DemoScenarioLauncher';
 import { ArtifactViewer } from '../artifacts/ArtifactViewer';
 import { RolePortalView } from '../auth/RolePortalView';
 import { StatusBar } from './StatusBar';
-import { capabilityFor, describeCapability, permitsCapability, type CapabilityName } from '../../api/capabilities';
+import { capabilityFor, describeCapability, localToolLabels, localToolReasons, permitsCapability, type CapabilityName } from '../../api/capabilities';
 import type { ActiveTab } from '../../types';
 import {
   Zap,
@@ -61,6 +61,7 @@ export const AppLayout: React.FC = () => {
   const local = (runProfile ?? capabilities?.run_profile) === 'local_dev';
   const visibleTab = local ? 'chat' : activeTab;
   const { user, isLoading } = useAuth();
+  const localTools = capabilities?.local_tools;
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
   // Check URL pathname on mount and on history changes (/admin, /manager, /user)
@@ -209,6 +210,17 @@ export const AppLayout: React.FC = () => {
           })}
         </nav>
         {local && user && <LocalHistorySettings key={user.id} currentMode={historyRetention} />}
+        {local && user && <section className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-700"
+          aria-label="Local tool availability">
+          {localTools ? <>
+            {!localTools.enabled && <span>Local tools are unavailable in this session.</span>}
+            {Object.entries(localToolLabels).map(([name, label]) => {
+              const tool = localTools.tools[name as keyof typeof localToolLabels];
+              return <span key={name}>{label} · {localToolReasons[tool.reason]}
+                {tool.requires_approval && tool.reason !== 'approval_required' ? ' · approval required' : ''}</span>;
+            })}
+          </> : <span>Local tool availability is pending.</span>}
+        </section>}
       </header>
 
       {/* Main Full-Screen Native Studio Workspace */}

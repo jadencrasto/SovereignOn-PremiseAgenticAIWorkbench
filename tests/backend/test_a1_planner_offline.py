@@ -46,6 +46,7 @@ def test_basic_chat_fake_provider(failure):
     engine = AgentEngine.__new__(AgentEngine)
     engine._ensure_session = MagicMock()
     engine._memory = MagicMock()
+    engine._memory.stream_identity.return_value = ('owner', 'generation')
     engine._router = MagicMock()
     engine._agent_config = {}
     engine._retrieve_context = AsyncMock(return_value=[])
@@ -58,10 +59,13 @@ def test_basic_chat_fake_provider(failure):
     if failure:
         with pytest.raises(RuntimeError, match='fake failure'):
             immediate(engine.chat('s', 'hello'))
-        engine._memory.add_assistant_message.assert_not_called()
+        engine._memory.record_plain_response.assert_not_called()
     else:
         assert immediate(engine.chat('s', 'hello')) == ('Hello', [])
-        engine._memory.add_assistant_message.assert_called_once()
+        engine._memory.record_plain_response.assert_called_once_with(
+            's', ('owner', 'generation'), 'Hello', status=None, producer=None, access_provenance=None,
+        )
+    engine._memory.add_assistant_message.assert_not_called()
     provider.chat.assert_awaited_once()
 
 

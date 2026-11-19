@@ -288,3 +288,51 @@ test('terminal event cancels an otherwise open response body', async () => {
  await streamSSE('/api/chat',{},callbacks(events));
  assert.equal(cancelled,true); assert.deepEqual(events,[['done','s']]);
 });
+
+test('identified local tool events expose only calculator status for the current attempt', async () => {
+ const turn = {session_id:'s', turn_id:'local-turn', attempt:2};
+ const frame = (event, index) => 'data: ' + JSON.stringify({ ...turn, sequence:index + 1, content:'', ...event }) + '\n\n';
+ for (const invalid of [false, true]) {
+  const activity = [];
+  const events = [];
+  global.fetch = async () => response([[
+   {type:'accepted'},
+   {type:'agent_status', content:'planning'},
+   {type:'agent_status', content:'tool_selected'},
+   {type:'tool_start', tool:'calculator'},
+   {type:'tool_result', tool:'calculator', success:true, ...(invalid ? {tool_args:{expression:'private'}} : {})},
+   {type:'done'},
+  ].map(frame).join('')]);
+  await streamSSE('/api/chat', turn, {
+   ...callbacks(events),
+   onAgentStatus: status => activity.push(status),
+   onToolEvent: event => activity.push([event.type,event.tool,event.success]),
+  });
+  assert.deepEqual(activity, ['planning', 'tool_selected', ['tool_start','calculator',undefined],
+   ...(invalid ? [] : [['tool_result','calculator',true]])]);
+  assert.deepEqual(events, invalid ? [['error','Invalid stream response']] : [['done','s']]);
+ }
+});
+
+test('local conversion status names the tool and keeps other tools outside the stream contract', async () => {
+ const turn = {session_id:'s', turn_id:'local-conversion', attempt:1};
+ for (const tool of ['unit_conversion', 'file_read']) {
+  const events = [];
+  const wire = [
+   {type:'accepted', content:''},
+   {type:'agent_status', content:'tool_selected', tool},
+   {type:'tool_start', content:'', tool},
+   {type:'tool_result', content:'', tool, success:true},
+   {type:'done', content:''},
+  ].map((event, index) => 'data: ' + JSON.stringify({...turn, ...event, sequence:index + 1}) + '\n\n');
+  global.fetch = async () => response(wire);
+  await streamSSE('/api/chat', turn, {
+   ...callbacks(events),
+   onAgentStatus: (status, selected) => events.push([status, selected]),
+   onToolEvent: event => events.push([event.type, event.tool]),
+  });
+  assert.deepEqual(events, tool === 'unit_conversion'
+   ? [['tool_selected', tool], ['tool_start', tool], ['tool_result', tool], ['done', 's']]
+   : [['error', 'Invalid stream response']]);
+ }
+});

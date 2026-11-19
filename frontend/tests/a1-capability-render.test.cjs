@@ -42,6 +42,27 @@ function fixture() {
     capabilities, models: { default_chat: model }, installed_models: [] };
 }
 
+test('local tool status accepts only the two server-specified tools and consistent availability', () => {
+  const report = visionFixture();
+  report.local_tools = {enabled: true, tools: {
+    calculator: {available: true, reason: 'available', requires_approval: false},
+    unit_conversion: {available: false, reason: 'approval_required', requires_approval: true},
+  }};
+  assert.throws(() => helpers.parseCapabilityReport(report), /Invalid capability response/);
+  report.run_profile = 'local_dev';
+  report.selected_chat_model = {id: report.models.default_chat.id, state: 'available',
+    reason: 'model_listed', identity_evidence: 'provider_digest'};
+  assert.deepEqual(helpers.parseCapabilityReport(report).local_tools, report.local_tools);
+  report.selected_chat_model.identity_evidence = 'unavailable';
+  assert.throws(() => helpers.parseCapabilityReport(report), /Invalid capability response/);
+  report.selected_chat_model.identity_evidence = 'provider_digest';
+  report.local_tools.tools.file_read = report.local_tools.tools.calculator;
+  assert.throws(() => helpers.parseCapabilityReport(report), /Invalid capability response/);
+  delete report.local_tools.tools.file_read;
+  report.local_tools.enabled = false;
+  assert.throws(() => helpers.parseCapabilityReport(report), /Invalid capability response/);
+});
+
 test('only the explicit local profile permits chat from a local inventory observation', () => {
   const report = fixture();
   const model = report.models.default_chat.id;

@@ -707,6 +707,21 @@ function snapshot(userId, state, attempt=1) {
     [user, {id:'reply-from-server', role:'assistant', content:'Cedar.', timestamp:''}] : [user] };
 }
 
+test('a local tool can start a new conversation when Ollama is unavailable', async t => {
+  localHarness(t);
+  localOffline = true;
+  slots[3] = '';
+  const submission = parts().input.onSendMessage('5 km to m');
+  await Promise.resolve();
+  const request = requests[0];
+  assert.equal(request.payload.message, '5 km to m');
+  assert.equal(request.payload.session_id, 'created-server-id');
+  historyImpl = async () => snapshot(request.payload.turn_id, 'completed');
+  request.resolve();
+  await submission;
+  assert.equal(requests.length, 1);
+});
+
 function buttonWithText(tree, label) {
   if (Array.isArray(tree)) return tree.map(child => buttonWithText(child, label)).find(Boolean);
   if (!tree || typeof tree !== 'object') return;
@@ -720,7 +735,7 @@ test('local stream with lost completion displays only the reconciled server repl
   const request = requests[0];
   assert.match(request.payload.turn_id, /^[0-9a-f-]{36}$/);
   assert.equal(request.payload.attempt, 1);
-  assert.equal(request.payload.tools_enabled, false);
+  assert.equal(request.payload.tools_enabled, undefined);
   request.callbacks.onAccepted();
   request.callbacks.onDelta('Provisional output.');
   assert.equal(parts().list.messages.at(-1).localPreview, true);
@@ -733,6 +748,66 @@ test('local stream with lost completion displays only the reconciled server repl
   assert.deepEqual(parts().list.messages.map(message => message.id), [request.payload.turn_id, 'reply-from-server']);
   assert.equal(parts().list.messages.at(-1).content, 'Cedar.');
   assert.equal(requests.length, 1);
+});
+
+test('local calculator preview reconciles to server tool history after disconnect', async t => {
+  const view = localHarness(t);
+  const pending = view.input.onSendMessage('What is 25 + 17?');
+  const request = requests[0];
+  request.callbacks.onAccepted();
+  request.callbacks.onAgentStatus('planning');
+  assert.equal(parts().list.messages.at(-1).localAgentStatus, 'planning');
+  request.callbacks.onAgentStatus('tool_selected');
+  request.callbacks.onToolEvent({type:'tool_start', tool:'calculator'});
+  request.callbacks.onToolEvent({type:'tool_result', tool:'calculator', success:true});
+  assert.equal(parts().list.messages.at(-1).localAgentStatus, 'tool_selected');
+  assert.equal(parts().list.messages.at(-1).toolEvents.length, 2);
+  historyImpl = async () => {
+    const saved = snapshot(request.payload.turn_id, 'completed');
+    saved.messages[1].content = '**Result: 42**';
+    saved.messages[1].toolEvents = [{type:'tool_result', tool:'calculator', success:true}];
+    return saved;
+  };
+  request.callbacks.onError('Connection interrupted');
+  request.resolve();
+  await pending;
+  const answer = parts().list.messages.at(-1);
+  assert.equal(answer.id, 'reply-from-server');
+  assert.equal(answer.content, '**Result: 42**');
+  assert.equal(answer.localPreview, undefined);
+  assert.deepEqual(answer.toolEvents, [{type:'tool_result', tool:'calculator', success:true}]);
+  assert.equal(requests.length, 1);
+});
+
+test('local conversion reconciles the server result and follow-up sends only the new prompt', async t => {
+  const view = localHarness(t);
+  const pending = view.input.onSendMessage('Convert 5 km to m.');
+  const request = requests[0];
+  request.callbacks.onAccepted();
+  request.callbacks.onAgentStatus('tool_selected', 'unit_conversion');
+  assert.equal(parts().list.messages.at(-1).localSelectedTool, 'unit_conversion');
+  request.callbacks.onToolEvent({type:'tool_start', tool:'unit_conversion'});
+  historyImpl = async () => {
+    const saved = snapshot(request.payload.turn_id, 'completed');
+    saved.messages[1].content = '**Result: 5000 m**';
+    saved.messages[1].toolEvents = [{type:'tool_result', tool:'unit_conversion', success:true}];
+    return saved;
+  };
+  request.callbacks.onError('Connection interrupted');
+  request.resolve();
+  await pending;
+  assert.equal(parts().list.messages.at(-1).content, '**Result: 5000 m**');
+  assert.equal(parts().list.messages.at(-1).toolEvents[0].tool, 'unit_conversion');
+  const followup = parts().input.onSendMessage('Convert that to cm.');
+  const second = requests[1];
+  assert.equal(second.payload.message, 'Convert that to cm.');
+  assert.equal(second.payload.session_id, request.payload.session_id);
+  assert.notEqual(second.payload.turn_id, request.payload.turn_id);
+  assert.equal(second.payload.value, undefined);
+  historyImpl = async () => snapshot(second.payload.turn_id, 'failed');
+  second.resolve();
+  await followup;
+  assert.equal(requests.length, 2);
 });
 
 test('refresh during a local stream polls history without posting the turn', async (t) => {

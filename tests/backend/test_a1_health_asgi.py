@@ -8,12 +8,14 @@ import sniffio
 from fastapi import FastAPI
 
 from backend.auth.dependencies import _get_synthetic_dev_admin
+from backend.auth.request_context import ClearanceContextMiddleware, effective_owner
 from backend.health import routes
 from backend.health.capabilities import ModelObservation
 
 
 def test_real_health_router_authentication_and_recovery(monkeypatch):
     app = FastAPI()
+    app.add_middleware(ClearanceContextMiddleware)
     app.include_router(routes.router)
     app.state.settings = SimpleNamespace(app_env='development', auth_enabled=True,
         ollama_base_url='http://127.0.0.1:11434', ollama_default_model='qwen:7b',
@@ -38,16 +40,19 @@ def test_real_health_router_authentication_and_recovery(monkeypatch):
         response = await client.post('/api/health/capabilities/ollama-check', headers={'Authorization': 'Bearer fake'})
         assert response.status_code == 200
         assert response.json()['capabilities']['ollama']['state'] == 'unavailable'
+        assert 'local_tools' not in response.json()
         for name in ('document_rag', 'approval_resume', 'artifact_access', 'code_execution'):
             assert response.json()['capabilities'][name]['state'] == 'blocked'
         fake.assert_awaited_once_with('http://127.0.0.1:11434/api/tags')
     # No I/O, sockets, event loop, threads or background tasks are allowed.
     # Fail if the ASGI pipeline ever actually suspends.
     token = sniffio.current_async_library_cvar.set('asyncio')
+    prior_owner = effective_owner.get()
     coro = exercise()
     try:
         with pytest.raises(StopIteration):
             coro.send(None)
+        assert effective_owner.get() == prior_owner
     finally:
         coro.close()
         sniffio.current_async_library_cvar.reset(token)

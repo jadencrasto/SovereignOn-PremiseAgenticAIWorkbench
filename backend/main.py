@@ -38,7 +38,7 @@ from backend.config import settings
 from backend.utils.config_validation import ConfigValidator
 from backend.utils.logging import request_id_ctx, setup_logging
 from backend.models.router import ModelRouter
-from backend.agent.memory import ConversationMemory
+from backend.agent.memory import ConversationMemory, LOCAL_PLAN_LIMIT
 from backend.agent.engine import AgentEngine
 from backend.security.provenance_keystore import KeyStoreError, startup_provenance_keys
 from backend.rag.embeddings import EmbeddingService
@@ -561,16 +561,26 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
     model_router = ModelRouter(cfg)
     stack.push_async_callback(_close_owned, model_router, "model router")
     app.state.model_router = model_router
+    local_tools = ToolRegistry(local_viewer_id=app.state.local_viewer_id)
+    local_tools.set_audit_logger(AuditLogger(root / "tool-audit.sqlite3"))
+    local_tools.register(ToolDefinition(
+        name="calculator", description="Evaluate a bounded arithmetic expression.",
+        input_schema=CalculatorInput, execute_fn=execute_calculator,
+    ))
+    register_unit_conversion(local_tools, local=True)
     app.state.conversation_registry = registry
     app.state.conversation_persistence_initialized = memory.persistence_configured
     app.state.engine = AgentEngine(
         settings=cfg, router=model_router, memory=memory,
+        tool_registry=local_tools,
         system_prompt=(
             "You are Sovereign Assistant in local development. Answer in plain conversation. "
             "You can use the conversation history and your general knowledge. "
             "If asked to perform an action or consult a source, explain that this profile supports text chat only."
         ),
     )
+    app.state.engine.set_planner(AgentPlanner(max_plan_steps=LOCAL_PLAN_LIMIT))
+    app.state.engine.set_plan_validator(PlanValidator(local_tools, max_plan_steps=LOCAL_PLAN_LIMIT))
     app.state.local_inventory_lock = Lock()
     app.state.local_chat_runs = local_runs = LocalChatRuns()
     stack.push_async_callback(local_runs.close)

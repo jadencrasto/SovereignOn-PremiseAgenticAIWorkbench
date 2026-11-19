@@ -5,6 +5,8 @@ effective_clearance = ContextVar('effective_clearance', default=None)
 effective_owner = ContextVar('effective_owner', default=None)
 local_legacy_access = ContextVar('local_legacy_access', default=False)
 request_tools_enabled = ContextVar('request_tools_enabled', default=None)
+# Set by the owned local chat task around one permitted tool dispatch.
+local_chat_tool_turn = ContextVar('local_chat_tool_turn', default=None)
 # Bound only after server authentication; never populated from tool arguments.
 dispatch_identity_resolver = ContextVar('dispatch_identity_resolver', default=None)
 http_request_active = ContextVar('http_request_active', default=False)
@@ -31,6 +33,7 @@ class ClearanceContextMiddleware:
         owner_token = effective_owner.set(None)
         legacy_token = local_legacy_access.set(False)
         tools_token = request_tools_enabled.set(None)
+        local_tool_token = local_chat_tool_turn.set(None)
         identity_token = dispatch_identity_resolver.set(None)
         http_token = http_request_active.set(scope['type'] == 'http')
         try:
@@ -38,6 +41,7 @@ class ClearanceContextMiddleware:
         finally:
             http_request_active.reset(http_token)
             dispatch_identity_resolver.reset(identity_token)
+            local_chat_tool_turn.reset(local_tool_token)
             effective_clearance.reset(token)
             effective_owner.reset(owner_token)
             local_legacy_access.reset(legacy_token)

@@ -229,8 +229,16 @@ export const ChatView: React.FC = () => {
         isStreaming: true, localPreview: true },
     ]);
     try {
-      await streamChat({ ...command, tools_enabled: false }, guardChatCallbacks({
+      await streamChat(command, guardChatCallbacks({
         onAccepted: () => setLocalAccepted(true),
+        onAgentStatus: (status: string, tool?: string) => {
+          if (status !== 'planning' && status !== 'tool_selected') return;
+          const localSelectedTool = tool === 'calculator' || tool === 'unit_conversion' ? tool : undefined;
+          setMessages(previous => previous.map(message =>
+            message.id === previewId ? { ...message, localAgentStatus: status, localSelectedTool } : message));
+        },
+        onToolEvent: (event: ToolEvent) => setMessages(previous => previous.map(message =>
+          message.id === previewId ? { ...message, toolEvents: [...(message.toolEvents ?? []), event] } : message)),
         onDelta: (delta: string) => setMessages(previous => previous.map(message =>
           message.id === previewId ? { ...message, content: message.content + delta } : message)),
         onSources: () => {},
@@ -314,7 +322,7 @@ export const ChatView: React.FC = () => {
         addToast('info', 'Text-file questions require the authenticated local chat-only profile.');
         return;
       }
-      const textReady = !chatDisabled(capabilities, false, selectedModel);
+      const textReady = local || !chatDisabled(capabilities, false, selectedModel);
       if (!textReady || (image && chatDisabled(capabilities, true, selectedVisionModel))) {
         addToast('info', describeCapability(textReady ? imageStatus : chatStatus));
         return;
@@ -375,7 +383,7 @@ export const ChatView: React.FC = () => {
           updateSessionCount();
           const current = modelSelection.current;
           if (current.selectedModel !== selectedModel ||
-              chatDisabled(current.capabilities, false, selectedModel) ||
+              (!local && chatDisabled(current.capabilities, false, selectedModel)) ||
               (image && (current.selectedVisionModel !== selectedVisionModel ||
                 chatDisabled(current.capabilities, true, selectedVisionModel))) ||
               (textFile && current.capabilities?.text_file_understanding !== true)) {
@@ -1180,7 +1188,7 @@ export const ChatView: React.FC = () => {
       <ChatInput
         key={activeSessionId ? activeSessionId + ':' + draftRevision : 'new-draft-' + draftRevision}
         onSendMessage={handleSendMessage}
-        sendBlocked={textDisabled || restoring || (local && Boolean(localNotice || localStopping))}
+        sendBlocked={(!local && textDisabled) || restoring || (local && Boolean(localNotice || localStopping))}
         imageBlocked={imageDisabled || restoring}
         textOnly={local}
         hasEarlierImage={messages.some(message => message.attachments?.some(file => file.mimeType.startsWith('image/')))}
@@ -1197,7 +1205,11 @@ export const ChatView: React.FC = () => {
         textFileSupported={capabilities?.text_file_understanding === true}
         onSessionExpired={handleSessionExpired}
         sessionId={activeSessionId || undefined}
-        sendStatus={selectedModelMissing && chatStatus.state !== 'blocked' && chatStatus.state !== 'unavailable'
+        sendStatus={local && textDisabled
+          ? (capabilities?.local_tools?.enabled
+            ? 'The selected model is unavailable. Available local tools can run without Ollama.'
+            : 'The selected model is unavailable.')
+          : selectedModelMissing && chatStatus.state !== 'blocked' && chatStatus.state !== 'unavailable'
           ? 'The selected model was not found in the checked inventory. Select an available model.'
           : textDisabled && chatStatus.state === 'available' ? 'Verify the selected text model in Models before sending.'
             : textDisabled || chatStatus.state === 'unknown' ? describeCapability(chatStatus) : undefined}

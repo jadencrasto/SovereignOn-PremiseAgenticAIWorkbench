@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import math
 import secrets
 import logging
 import uuid
@@ -40,10 +41,36 @@ _PLAIN_CHAT = 'independent_plain_chat'
 _CALCULATION = 'deterministic_calculation'
 _PROVENANCE_VERSION = 3
 LOCAL_TURN_FIELD = 'local_turn_v1'
+LOCAL_PLAN_LIMIT = 3
+_LOCAL_CALCULATOR = 'local-verified-calculator'
+_LOCAL_CONVERSION = 'local-verified-unit-conversion'
+_LOCAL_NUMERIC_FIELD = 'numeric_result_v1'
+
+
+def _local_number(value):
+    return (type(value) is float and math.isfinite(value)
+            or type(value) is int and value.bit_length() <= 2048)
+
+
+def _local_result_value(value, tool, unit):
+    from typing import get_args
+    from backend.tools.unit_conversion import LocalUnit
+
+    if tool == 'calculator':
+        return (unit is None or unit in get_args(LocalUnit)) and _local_number(value)
+    return tool == 'unit_conversion' and unit in get_args(LocalUnit) and type(value) is float and _local_number(value)
 
 
 class LocalTurnConflict(Exception):
     """The turn ID, attempt, or conversation state does not permit submission."""
+
+
+def public_local_turn(record):
+    fields = ('attempt', 'state', 'model', 'error_code', 'assistant_id')
+    public = {key: record[key] for key in fields if key in record}
+    if record.get('tools_enabled') is False:
+        public['tools_enabled'] = False
+    return public
 
 
 def safe_tool_history(events):
@@ -231,7 +258,7 @@ class ConversationMemory:
                 if message.images:
                     raise ValueError('Local history contains unexpected attachments')
                 if expected_assistant:
-                    if message.id != expected_assistant or not self.verify_independent_plain_chat(sid, message):
+                    if message.id != expected_assistant or not self.verify_local_reply(sid, message):
                         raise ValueError('Invalid completed local reply')
                     expected_assistant = None
                     continue
@@ -245,6 +272,18 @@ class ConversationMemory:
                     raise ValueError('Invalid local turn metadata')
                 state = turn.get('state')
                 fields = {'attempt', 'model', 'state'}
+                if 'tools_enabled' in turn:
+                    if (type(turn['tools_enabled']) is not bool
+                            or (turn['tools_enabled'] is False and 'calculator_progress' in turn)):
+                        raise ValueError('Invalid local tool preference')
+                    fields.add('tools_enabled')
+                if 'numeric_tool' in turn:
+                    if turn['numeric_tool'] not in ('calculator', 'unit_conversion') or turn.get('tools_enabled') is False:
+                        raise ValueError('Invalid local numeric tool')
+                    fields.add('numeric_tool')
+                if 'calculator_progress' in turn and state != 'completed':
+                    self._verified_local_progress(sid, (owner, active[sid]), message)
+                    fields.add('calculator_progress')
                 if state == 'completed' and set(turn) == fields | {'assistant_id'}:
                     expected_assistant = turn['assistant_id']
                     if not isinstance(expected_assistant, str) or not expected_assistant:
@@ -473,18 +512,45 @@ class ConversationMemory:
     @staticmethod
     def _assistant_mac(key, session_id, identity, message, proof):
         owner, generation = identity
-        payload = json.dumps([
+        fields = [
             'sovereignai.assistant-history', proof['version'], proof['kind'], proof['key_id'],
             proof['producer'], session_id, owner, generation, proof['position'],
             message.id, message.created_at, message.role, message.content,
             message.extra_fields.get('response_state_v1', 'completed'),
-        ], ensure_ascii=True, separators=(',', ':')).encode('ascii')
+        ]
+        if 'tool_events_v1' in message.extra_fields:
+            fields.append(message.extra_fields['tool_events_v1'])
+        if _LOCAL_NUMERIC_FIELD in message.extra_fields:
+            fields.append(message.extra_fields[_LOCAL_NUMERIC_FIELD])
+        payload = json.dumps(fields, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
     @_synchronized
     def verify_assistant_provenance(self, session_id: str, message: Message, *, plain_only=False) -> bool:
         proof = message.extra_fields.get('access_provenance_v1')
         status = message.extra_fields.get('response_state_v1', 'completed')
+        allowed_fields = {'access_provenance_v1', 'response_state_v1'}
+        if (isinstance(proof, dict) and proof.get('kind') == _CALCULATION
+                and proof.get('producer') in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION)):
+            events = message.extra_fields.get('tool_events_v1')
+            tool = 'calculator' if proof['producer'] == _LOCAL_CALCULATOR else 'unit_conversion'
+            if (not isinstance(events, list) or not 1 <= len(events) <= LOCAL_PLAN_LIMIT
+                    or safe_tool_history(events) != events
+                    or any(event['tool'] != tool or event['success'] is not True for event in events)):
+                return False
+            allowed_fields.add('tool_events_v1')
+            if _LOCAL_NUMERIC_FIELD in message.extra_fields:
+                numeric = message.extra_fields[_LOCAL_NUMERIC_FIELD]
+                if (not isinstance(numeric, dict)
+                        or numeric.keys() != {'turn_id', 'attempt', 'invocation_id', 'value', 'unit'}
+                        or not isinstance(numeric['turn_id'], str)
+                        or type(numeric['attempt']) is not int or numeric['attempt'] < 1
+                        or numeric['invocation_id'] != events[-1]['invocation_id']
+                        or not _local_result_value(numeric['value'], tool, numeric['unit'])):
+                    return False
+                allowed_fields.add(_LOCAL_NUMERIC_FIELD)
+            elif tool == 'unit_conversion':
+                return False
         if (message.role != 'assistant' or message.images != [] or not isinstance(message.content, str)
                 or not message.id or not isinstance(message.created_at, str) or not message.created_at
                 or not isinstance(proof, dict)
@@ -495,7 +561,7 @@ class ConversationMemory:
                 or not isinstance(proof['producer'], str) or not proof['producer']
                 or type(proof['position']) is not int or proof['position'] < 0
                 or not isinstance(proof['mac'], str) or not re.fullmatch(r'[0-9a-f]{64}', proof['mac'])
-                or set(message.extra_fields) - {'access_provenance_v1', 'response_state_v1'}
+                or set(message.extra_fields) - allowed_fields
                 or ('response_state_v1' in message.extra_fields and
                     (proof['kind'] != _PLAIN_CHAT or status not in ('interrupted', 'failed')))):
             return False
@@ -521,6 +587,12 @@ class ConversationMemory:
 
     def verify_independent_plain_chat(self, session_id: str, message: Message) -> bool:
         return self.verify_assistant_provenance(session_id, message, plain_only=True)
+
+    def verify_local_reply(self, session_id: str, message: Message) -> bool:
+        proof = message.extra_fields.get('access_provenance_v1')
+        if isinstance(proof, dict) and proof.get('producer') in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION):
+            return proof.get('kind') == _CALCULATION and self.verify_assistant_provenance(session_id, message)
+        return self.verify_independent_plain_chat(session_id, message)
 
     @_synchronized
     def add_user_message(self, session_id: str, content: str, attachment=None) -> Message:
@@ -556,7 +628,7 @@ class ConversationMemory:
         return msg
 
     @_synchronized
-    def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model):
+    def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model, *, tools_enabled=True):
         """Atomically persist admission or return the existing attempt's state."""
         if self.stream_identity(session_id) != identity:
             raise PermissionError('Conversation unavailable')
@@ -566,6 +638,8 @@ class ConversationMemory:
             record = turn.extra_fields.get(LOCAL_TURN_FIELD)
             if not record or turn.role != 'user' or turn.content != content or record['model'] != model:
                 raise LocalTurnConflict('Turn ID is already bound to a different submission.')
+            if record.get('tools_enabled', tools_enabled) is not tools_enabled:
+                raise LocalTurnConflict('Turn ID is already bound to a different tool preference.')
             if attempt == record['attempt']:
                 return dict(record), False
             if (attempt != record['attempt'] + 1 or record['state'] not in {'failed', 'cancelled', 'interrupted'}
@@ -579,7 +653,13 @@ class ConversationMemory:
                 raise LocalTurnConflict('A response is already running in this conversation.')
             turn = conv.add_message('user', content)
             turn.id = turn_id
-        record = {'attempt': attempt, 'model': model, 'state': 'running'}
+        progress = self._verified_local_progress(session_id, identity, turn)
+        record = {'attempt': attempt, 'model': model, 'state': 'running', 'tools_enabled': tools_enabled}
+        prior_tool = turn.extra_fields.get(LOCAL_TURN_FIELD, {}).get('numeric_tool')
+        if prior_tool is not None:
+            record['numeric_tool'] = prior_tool
+        if progress is not None:
+            record['calculator_progress'] = progress
         turn.extra_fields[LOCAL_TURN_FIELD] = record
         conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
         self._save()
@@ -609,9 +689,129 @@ class ConversationMemory:
         raise KeyError(turn_id)
 
     @_synchronized
+    def mark_local_numeric_tool(self, session_id, identity, turn_id, attempt, name):
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if (record['attempt'] != attempt or record['state'] != 'running' or record.get('tools_enabled') is False
+                or name not in ('calculator', 'unit_conversion') or record.get('numeric_tool', name) != name):
+            raise LocalTurnConflict('Turn is no longer eligible to execute.')
+        if 'numeric_tool' not in record:
+            record['numeric_tool'] = name
+            self._save()
+
+    def _local_prior_result(self, session_id, source, assistant):
+        prior = source.extra_fields.get(LOCAL_TURN_FIELD, {})
+        if (source.role != 'user' or prior.get('state') != 'completed' or prior.get('assistant_id') != assistant.id
+                or not self.verify_local_reply(session_id, assistant)):
+            return None, None
+        events = assistant.extra_fields.get('tool_events_v1')
+        tool = events[-1]['tool'] if events else None
+        numeric = assistant.extra_fields.get(_LOCAL_NUMERIC_FIELD)
+        if (not isinstance(numeric, dict) or numeric.get('turn_id') != source.id
+                or numeric.get('attempt') != prior.get('attempt')):
+            return tool, None
+        return tool, dict(numeric)
+
+    @_synchronized
+    def local_numeric_result(self, session_id, identity, turn_id, attempt, reference):
+        """Resolve a bounded selector against completed, owned turn proofs."""
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        messages = self._store[session_id].messages
+        current = turn.extra_fields[LOCAL_TURN_FIELD]
+        if (len(messages) < 3 or messages[-1] is not turn or current['state'] != 'running'
+                or current['attempt'] != attempt or current.get('tools_enabled') is False):
+            return None
+        _, adjacent = self._local_prior_result(session_id, messages[-3], messages[-2])
+        if reference.kind == 'adjacent' or (reference.kind == 'before' and adjacent is None):
+            return adjacent
+        if reference.kind == 'before':
+            for index in range(len(messages) - 4, 0, -1):
+                _, numeric = self._local_prior_result(session_id, messages[index - 1], messages[index])
+                if numeric is not None:
+                    return numeric
+            return None
+
+        matches = []
+        for source, assistant in zip(messages, messages[1:]):
+            if assistant is turn and source.role == 'assistant':
+                break
+            prior = source.extra_fields.get(LOCAL_TURN_FIELD)
+            if prior is None:
+                continue
+            tool, numeric = self._local_prior_result(session_id, source, assistant)
+            tool = tool or prior.get('numeric_tool')
+            # An old incomplete turn has no signed answer or known tool category.
+            # Treat it as ambiguous rather than silently shifting a named ordinal.
+            if (tool is None and prior['state'] != 'completed' and prior.get('tools_enabled') is not False
+                    and prior.get('error_code') not in {'LOCAL_TOOL_CONTEXT', 'LOCAL_TOOL_REFERENCE_UNIT',
+                                                       'LOCAL_TOOL_UNIT', 'LOCAL_TOOL_UNAUTHORIZED'}):
+                return None
+            if tool != reference.tool:
+                continue
+            matches.append(numeric)
+            if reference.kind == 'ordinal' and len(matches) == reference.ordinal:
+                return numeric
+        return matches[0] if reference.kind == 'unique' and len(matches) == 1 else None
+
+    def _local_progress_mac(self, session_id, identity, turn, plan_digest, steps):
+        payload = json.dumps(
+            ['local-calculator-progress-v1', session_id, *identity, turn.id, turn.content,
+             turn.extra_fields[LOCAL_TURN_FIELD]['model'], plan_digest, steps],
+            separators=(',', ':'), allow_nan=False, sort_keys=True,
+        ).encode('ascii')
+        return hmac.new(self._provenance_key[1], payload, hashlib.sha256).hexdigest()
+
+    def _verified_local_progress(self, session_id, identity, turn):
+        record = turn.extra_fields.get(LOCAL_TURN_FIELD, {})
+        if 'calculator_progress' not in record:
+            return None
+        progress = record['calculator_progress']
+        if (not isinstance(progress, dict) or progress.keys() != {'plan', 'steps', 'mac'}
+                or not isinstance(progress['plan'], str) or not re.fullmatch(r'[a-f0-9]{64}', progress['plan'])
+                or not isinstance(progress['mac'], str) or not re.fullmatch(r'[a-f0-9]{64}', progress['mac'])
+                or not isinstance(progress['steps'], list) or not 1 <= len(progress['steps']) <= LOCAL_PLAN_LIMIT):
+            raise ValueError('Invalid local calculator progress')
+        for receipt in progress['steps']:
+            if (not isinstance(receipt, dict)
+                    or receipt.keys() not in ({'invocation_id', 'result'}, {'invocation_id', 'result', 'tool', 'unit'})
+                    or not isinstance(receipt['invocation_id'], str)
+                    or not re.fullmatch(r'[a-f0-9-]{36}', receipt['invocation_id'])
+                    or not _local_result_value(receipt['result'], receipt.get('tool', 'calculator'), receipt.get('unit'))):
+                raise ValueError('Invalid local calculator receipt')
+        if not hmac.compare_digest(
+            progress['mac'], self._local_progress_mac(session_id, identity, turn, progress['plan'], progress['steps'])
+        ):
+            raise ValueError('Invalid local calculator proof')
+        return progress
+
+    @_synchronized
+    def local_calculator_receipts(self, session_id, identity, turn_id, attempt, plan_digest):
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if record['state'] != 'running' or record['attempt'] != attempt or record.get('tools_enabled') is False:
+            raise LocalTurnConflict('Turn is no longer eligible to execute.')
+        progress = self._verified_local_progress(session_id, identity, turn)
+        if progress is not None and progress['plan'] != plan_digest:
+            raise LocalTurnConflict('The calculator plan differs from the saved attempt.')
+        return progress['steps'] if progress is not None else []
+
+    @_synchronized
+    def record_local_calculator_step(self, session_id, identity, turn_id, attempt, plan_digest, index, receipt):
+        steps = self.local_calculator_receipts(session_id, identity, turn_id, attempt, plan_digest)
+        if index != len(steps) or index >= LOCAL_PLAN_LIMIT:
+            raise LocalTurnConflict('Calculator step is no longer eligible to complete.')
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        steps = [*steps, receipt]
+        turn.extra_fields[LOCAL_TURN_FIELD]['calculator_progress'] = {
+            'plan': plan_digest, 'steps': steps,
+            'mac': self._local_progress_mac(session_id, identity, turn, plan_digest, steps),
+        }
+        self._save()
+
+    @_synchronized
     def record_plain_response(
         self, session_id, identity, content, *, status=None, producer=None,
-        access_provenance=None, calculation=False, local_turn=None,
+        access_provenance=None, calculation=False, local_turn=None, local_plan_digest=None,
     ):
         """Finalize the original live conversation and authenticate only eligible output."""
         if (status not in (None, 'interrupted', 'failed') or not isinstance(content, str)
@@ -624,6 +824,7 @@ class ConversationMemory:
         if producer is not None and (not owner or owner != self._current_owner() or not generation):
             raise PermissionError('Conversation unavailable')
         conv = self._store[session_id]
+        events = None
         if local_turn is not None:
             turn_id, attempt = local_turn
             turn = self._owned_local_turn(session_id, identity, turn_id)
@@ -631,7 +832,24 @@ class ConversationMemory:
             if (turn is not conv.messages[-1] or record['attempt'] != attempt or record['state'] != 'running'
                     or not producer or status is not None or not content.strip()):
                 raise LocalTurnConflict('Turn is no longer eligible to complete.')
+            if local_plan_digest is not None:
+                steps = self.local_calculator_receipts(session_id, identity, turn_id, attempt, local_plan_digest)
+                if not steps:
+                    raise LocalTurnConflict('Verified local tool receipts are unavailable.')
+                events = [{'type': 'tool_result', 'tool': step.get('tool', 'calculator'), 'success': True,
+                           'invocation_id': step['invocation_id']} for step in steps]
+                producer = _LOCAL_CONVERSION if events[-1]['tool'] == 'unit_conversion' else _LOCAL_CALCULATOR
+                calculation = True
+            elif 'calculator_progress' in record:
+                raise LocalTurnConflict('Saved calculator work requires the original plan.')
         msg = conv.add_message('assistant', content)
+        if events is not None:
+            msg.extra_fields['tool_events_v1'] = events
+            final = steps[-1]
+            msg.extra_fields[_LOCAL_NUMERIC_FIELD] = {
+                'turn_id': turn_id, 'attempt': attempt, 'invocation_id': final['invocation_id'],
+                'value': final['result'], 'unit': final.get('unit'),
+            }
         if status is not None:
             msg.extra_fields['response_state_v1'] = status
         if producer is not None:
@@ -648,6 +866,7 @@ class ConversationMemory:
         elif access_provenance is not None:
             msg.extra_fields['access_provenance_v1'] = access_provenance
         if local_turn is not None:
+            record.pop('calculator_progress', None)
             record.update(state='completed', assistant_id=msg.id)
         conv.extra_fields['updated_at'] = msg.created_at
         self._save()

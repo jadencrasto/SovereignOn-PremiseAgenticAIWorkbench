@@ -57,6 +57,7 @@ from backend.schemas.chat import (
 from backend.auth.dependencies import get_current_user, require_permission
 from backend.auth.models import Permission, User, resolve_user_clearance
 from backend.agent.engine import InvalidModelToolRequest
+from backend.agent.numeric_receipts import arithmetic_expression as _arithmetic_expression
 from backend.agent.numeric_receipts import numeric_request_steps, requires_prior_numeric_receipt, resolve_numeric_followup
 from backend.multimodal.context import (
     IMAGE_REATTACH_MESSAGE, TEXT_REATTACH_MESSAGE, requires_reattachment, requires_text_reattachment,
@@ -593,74 +594,8 @@ async def chat_multimodal(
 
 
 # ---------------------------------------------------------------------------
-# Arithmetic auto-detection (Test A1/A2)
+# Conversation stream authorization
 # ---------------------------------------------------------------------------
-
-def _arithmetic_expression(message: str) -> Optional[str]:
-    """
-    Recognize simple arithmetic expressions for the validated calculator plan.
-
-    Returns the expression, or None if the message
-    is not a simple arithmetic query.
-
-    Handles patterns like:
-      - "What is 25 + 17?"
-      - "calculate 125 * 840 * 1.18"
-      - "25 + 17"
-      - "What is 3.14 * 2?"
-
-    """
-    import re as _re
-
-    if not message or len(message) > 200:
-        return None
-
-    q = message.strip()
-    q_lower = q.lower()
-
-    # Pattern 1: "What is <expr>?" / "What's <expr>?"
-    m = _re.match(
-        r"^(?:what(?:'s|\s+is)\s+)([\d\s\+\-\*\/\.\(\)\^%x×]+)\s*\??$",
-        q_lower,
-    )
-    expr = None
-    if m:
-        expr = m.group(1).strip()
-
-    # Pattern 2: "calculate <expr>" / "compute <expr>"
-    if expr is None:
-        m = _re.match(
-            r"^(?:calculate|compute|eval(?:uate)?)\s+([\d\s\+\-\*\/\.\(\)\^%x×]+)\s*\??$",
-            q_lower,
-        )
-        if m:
-            expr = m.group(1).strip()
-
-    # Pattern 3: Pure arithmetic expression (e.g. "25 + 17", "3 * 4.5")
-    if expr is None:
-        m = _re.match(
-            r"^([\d\s\+\-\*\/\.\(\)\^%x×]+)$",
-            q.strip(),
-        )
-        if m:
-            expr = m.group(1).strip()
-
-    if expr is None or not expr:
-        return None
-
-    # Normalize: replace × with *, x with * (when between digits)
-    expr = _re.sub(r"×", "*", expr)
-    expr = _re.sub(r"(?<=\d)\s*x\s*(?=\d)", "*", expr)
-    expr = _re.sub(r"\^", "**", expr)
-
-    # Must contain at least one operator and one digit
-    if not _re.search(r"[\+\-\*\/\%]", expr):
-        return None
-    if not _re.search(r"\d", expr):
-        return None
-
-    return expr
-
 
 def _guard_conversation_stream(*, engine_index: int = 0, session_index: int = 1):
     """Recheck conversation access before releasing each generated SSE event."""
@@ -1968,7 +1903,7 @@ async def read_session(
         created_at, updated_at = engine._memory.get_timestamps(session_id)
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    from backend.agent.memory import LOCAL_TURN_FIELD, safe_image_attachment, safe_tool_history
+    from backend.agent.memory import LOCAL_TURN_FIELD, public_local_turn, safe_image_attachment, safe_tool_history
     from backend.multimodal.text_file import safe_text_attachment
     from backend.security.conversation_access import may_read_assistant
     # Only server-owned task records can contribute read-only recovery state.
@@ -2027,8 +1962,7 @@ async def read_session(
             if message.role == 'assistant' and allowed else [],
             "withheld": not allowed,
             **({"attachments": [attachment]} if attachment else {}),
-            **({"turn": {key: turn[key] for key in ('attempt', 'state', 'model', 'error_code', 'assistant_id')
-                         if key in turn}} if turn else {}),
+            **({"turn": public_local_turn(turn)} if turn else {}),
         })
     try:
         if engine._memory.stream_identity(session_id) != identity:

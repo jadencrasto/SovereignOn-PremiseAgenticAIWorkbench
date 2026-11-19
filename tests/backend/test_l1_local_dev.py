@@ -151,7 +151,10 @@ def test_isolated_startup_authentication_and_protected_routes(monkeypatch, tmp_p
             assert app.state.settings.auth_enabled and not app.state.settings.allow_dev_clearance_simulation
             assert not hasattr(app.state, "source_recovery_registration")
             assert not hasattr(app.state, "deployment_documents")
-            assert app.state.engine._tool_registry is None and app.state.engine._doc_service is None
+            assert {tool.name for tool in app.state.engine._tool_registry.list_enabled_tools()} == {
+                "calculator", "unit_conversion",
+            }
+            assert app.state.engine._doc_service is None
             assert not app.state.auth_store.get_user_by_username("admin")
             credentials = {"X-User-Role": "admin", "X-Clearance-Level": "L3", "X-Requested-With": "XMLHttpRequest"}
             client.cookies.set("session_token", "synthetic-production-cookie")

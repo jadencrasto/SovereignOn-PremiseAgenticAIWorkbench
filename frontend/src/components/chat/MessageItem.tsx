@@ -41,9 +41,9 @@ const ToolActivity: React.FC<{ events: ToolEvent[]; isStreaming?: boolean }> = (
       case 'file_read':
         return 'WORKSPACE_FILE_INGEST';
       case 'calculator':
-        return 'NUMERIC_TOLERANCE_SOLVER';
+        return 'Calculator';
       case 'unit_conversion':
-        return 'UNIT CONVERSION';
+        return 'Unit conversion';
       case 'xlsx_report':
         return 'XLSX_COMPLIANCE_BUILDER';
       case 'file_write':
@@ -213,6 +213,18 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 MODEL_UNAVAILABLE: 'The selected local model is unavailable.',
                 MODEL_TIMEOUT: 'Ollama timed out.',
                 MODEL_INCOMPLETE: 'Ollama returned an incomplete or invalid response.',
+                LOCAL_TOOL_UNAUTHORIZED: 'Local chat can run arithmetic and unit conversions only.',
+                LOCAL_TOOL_APPROVAL_REQUIRED: 'This operation requires approval and is unavailable in local chat.',
+                LOCAL_TOOL_CONFIRMATION_REQUIRED: 'This tool requires confirmation and is unavailable in local chat.',
+                LOCAL_TOOL_UNAVAILABLE: 'The requested local tool is unavailable.',
+                LOCAL_TOOL_UNSUPPORTED: 'Try writing an explicit calculation.',
+                LOCAL_TOOL_INVALID: 'The numeric request is invalid or outside the supported bounds.',
+                LOCAL_TOOL_FAILED: 'The tool could not produce a verified result.',
+                LOCAL_TOOL_CHANGED_PLAN: 'The proposed plan changed. Send a new message to start again.',
+                LOCAL_TOOL_CONTEXT: 'Specify one verified result, such as the result from the first calculation, or enter the value.',
+                LOCAL_TOOL_REFERENCE_UNIT: 'For a measured result, specify an addition or subtraction in the same unit. Enter an explicit value for temperature arithmetic.',
+                LOCAL_TOOL_UNIT: 'Use supported units of the same dimension. Specify US customary volume units.',
+                LOCAL_TOOL_ZERO_DIVISION: 'Division by zero is undefined.',
               } as Record<string, string>)[message.localTurn.error_code || ''] || 'The response could not be completed.'
                 : { running: 'Response running', cancelled: 'Response cancelled',
                     interrupted: 'Response interrupted' }[message.localTurn.state]}
@@ -342,7 +354,10 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                       uploading: 'Uploading image…',
                       analyzing_image: 'Analyzing image…',
                       reasoning: 'Preparing image answer…',
-                    }[message.imageProgress] : hasToolEvents ? 'Running tools...' : 'Thinking...'}
+                    }[message.imageProgress] : message.localAgentStatus === 'planning' ? 'Planning…'
+                      : message.localAgentStatus === 'tool_selected' && !hasToolEvents
+                        ? (message.localSelectedTool === 'unit_conversion' ? 'Unit conversion selected' : 'Calculator selected')
+                        : hasToolEvents ? 'Running tools...' : 'Thinking...'}
                   </span>
                 </div>
               )

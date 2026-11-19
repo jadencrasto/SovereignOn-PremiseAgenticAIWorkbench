@@ -6,6 +6,7 @@ export interface LocalSubmission {
   attempt: number;
   message: string;
   model: string;
+  tools_enabled?: false;
 }
 
 export function createLocalSubmission(sessionId: string, message: string, model: string): LocalSubmission {
@@ -21,8 +22,10 @@ export function createLocalSubmission(sessionId: string, message: string, model:
 export function retryLocalSubmission(sessionId: string, message?: ChatMessage): LocalSubmission | null {
   const turn = message?.localTurn;
   if (!message || !turn || message.withheld || turn.state === 'completed' || turn.state === 'running') return null;
-  return { session_id: sessionId, turn_id: message.id, attempt: turn.attempt + 1,
+  const retry: LocalSubmission = { session_id: sessionId, turn_id: message.id, attempt: turn.attempt + 1,
     message: message.content, model: turn.model };
+  if (turn.tools_enabled === false) retry.tools_enabled = false;
+  return retry;
 }
 
 export function reconcileLocalSubmission(messages: ChatMessage[], pending: LocalSubmission | null): LocalSubmission | null {

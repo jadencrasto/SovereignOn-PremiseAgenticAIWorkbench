@@ -211,6 +211,8 @@ class OllamaProvider(BaseModelProvider):
         }
         if request.max_tokens is not None:
             payload["options"]["num_predict"] = request.max_tokens
+        if request.response_schema is not None:
+            payload["format"] = request.response_schema
         return payload
 
 

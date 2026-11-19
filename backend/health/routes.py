@@ -10,10 +10,11 @@ import time
 from contextlib import aclosing
 
 import httpx
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from backend.auth.dependencies import require_permission
+from backend.auth.dependencies import bearer_scheme, get_current_user, request_session_credentials, require_permission
+from backend.auth.request_context import dispatch_identity_resolver
 from backend.auth.models import Permission
 from backend.config import settings
 from backend.health.capabilities import ModelObservation, capability_report, loopback_tags_url, parse_tags, parse_tag_digests, model_key
@@ -179,6 +180,27 @@ def _report(state, selected_model: str | None = None, vision_model: str | None =
     return report
 
 
+def _with_local_tools(report, state):
+    if report.get('run_profile') != 'local_dev':
+        return report
+    resolve = dispatch_identity_resolver.get()
+    user = resolve() if resolve else None
+    if user is None or user.id != getattr(state, 'local_viewer_id', None):
+        return report
+
+    from backend.tools.registry import LOCAL_CHAT_TOOLS
+
+    registry = getattr(getattr(state, 'engine', None), '_tool_registry', None)
+    tools = {
+        name: registry.local_tool_status(name, user.id, user.role)
+        if registry and getattr(state, 'startup_complete', False)
+        else {'available': False, 'reason': 'unavailable', 'requires_approval': False}
+        for name in LOCAL_CHAT_TOOLS
+    }
+    report['local_tools'] = {'enabled': any(tool['available'] for tool in tools.values()), 'tools': tools}
+    return report
+
+
 async def probe_inference(target: str, model: str, *, vision: bool = False) -> bool:
     """Bounded synthetic inference; never follows redirects or environment proxies."""
     prompt = {'role': 'user', 'content': 'Reply with OK.'}
@@ -272,23 +294,35 @@ async def liveness():
 
 
 @router.get("/capabilities", summary="Passive development capability status")
-async def capabilities(request: Request, response: Response, model: str | None = None, vision_model: str | None = None):
+async def capabilities(request: Request, response: Response, model: str | None = None,
+                       vision_model: str | None = None, bearer=Depends(bearer_scheme)):
     response.headers["Cache-Control"] = "no-store"
-    return _report(request.app.state, model, vision_model)
+    state = request.app.state
+    report = _report(state, model, vision_model)
+    if (report.get('run_profile') == 'local_dev' and getattr(state, 'startup_complete', False)
+            and request_session_credentials(request, bearer)[0]):
+        try:
+            await get_current_user(request, bearer=bearer)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            return report
+        return _with_local_tools(report, state)
+    return report
 
 
 @router.post('/capabilities/inference-check', summary='Explicit local chat inference check')
 async def check_inference(body: InferenceCheck, request: Request, response: Response,
                           _user=Depends(require_permission(Permission.VIEW_DATA)), vision_model: str | None = None):
     await _check_model(request.app.state, response, body.model, 'chat')
-    return _report(request.app.state, body.model, vision_model)
+    return _with_local_tools(_report(request.app.state, body.model, vision_model), request.app.state)
 
 
 @router.post('/capabilities/vision-check', summary='Explicit local vision inference check')
 async def check_vision(body: InferenceCheck, request: Request, response: Response,
                        _user=Depends(require_permission(Permission.VIEW_DATA)), model: str | None = None):
     await _check_model(request.app.state, response, body.model, 'vision')
-    return _report(request.app.state, model, body.model)
+    return _with_local_tools(_report(request.app.state, model, body.model), request.app.state)
 
 
 async def _check_model(state, response: Response, model: str, capability: str) -> None:
@@ -340,7 +374,7 @@ async def check_ollama(
     response.headers["Cache-Control"] = "no-store"
     if getattr(_settings(state), 'is_local_dev', False):
         await refresh_local_inventory(state)
-        return _report(state, model, vision_model)
+        return _with_local_tools(_report(state, model, vision_model), state)
     target = _tags_url(state)
     if target and getattr(state, "startup_complete", False):
         if getattr(state, "model_check_in_progress", False):

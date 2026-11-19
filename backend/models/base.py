@@ -61,6 +61,7 @@ class ChatRequest:
     # When non-empty the provider must use a vision-capable model.
     # Empty list → pure text request (100% backward compatible).
     images: List[str] = field(default_factory=list)
+    response_schema: Optional[dict] = None
 
 
 @dataclass

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing, contextmanager
+import hashlib
 import json
 import logging
 import math
@@ -94,6 +95,10 @@ def _strict_tool_json(raw: str) -> dict:
 
 class InvalidModelToolRequest(RuntimeError):
     """The model emitted tool-call markup that could not be parsed safely."""
+
+
+class LocalToolError(RuntimeError):
+    """A local planning or execution failure with a public error code."""
 
 
 class AgentEngine:
@@ -287,7 +292,7 @@ class AgentEngine:
                         message.id == local_turn.turn_id or
                         message.extra_fields.get(LOCAL_TURN_FIELD, {}).get('state', 'completed') == 'completed']
 
-        independent = self._independent_plain_input(session_id, messages, sources)
+        independent = self._independent_plain_input(session_id, messages, sources, local=local_turn is not None)
         request = ChatRequest(
             messages=messages,
             model=model_name,
@@ -361,6 +366,234 @@ class AgentEngine:
     # ------------------------------------------------------------------
     # Public API — Tool-enabled streaming (Phase 4, unchanged)
     # ------------------------------------------------------------------
+
+    async def local_chat_stream(self, run, message, model):
+        """Execute one owned local text turn using this engine's scoped registry."""
+        from backend.agent.memory import LocalTurnConflict
+        from backend.agent.numeric_receipts import (
+            arithmetic_expression, local_conversion_intent, local_followup_intent,
+            local_numeric_phrase, local_unit_name, numeric_request_steps,
+        )
+        from backend.agent.planner import AgentPlan, PlanStep, is_standalone_diagnostic_query
+        from backend.auth.request_context import local_chat_tool_turn, request_tools_enabled
+        from backend.tools.calculator import validate_calculator_syntax
+        from backend.tools.unit_conversion import convert_units
+
+        # This router only decides which path to take. The registry still authorizes every call.
+        if is_standalone_diagnostic_query(message) or re.search(
+            r'\b(?:file_(?:read|write|list)|code_execution|document_search|docx_create|xlsx_report|'
+            r'security_diagnostics|hardware_status|model_scan)\b|'
+            r'\b(?:run|execute|read|write|open|list|delete|modify|upload|download|fetch|search|create|save|'
+            r'restore|publish)\b[^.!?\n]{0,100}\b(?:powershell|shell|terminal|commands?|scripts?|python|'
+            r'code|files?|folders?|directories|documents?|docx|xlsx|pdf|artifacts?|disk|'
+            r'web|internet|network|https?|database|backups?|records?)\b', message, re.IGNORECASE,
+        ):
+            raise LocalToolError('LOCAL_TOOL_UNAUTHORIZED')
+
+        attempt = (run.session_id, run.identity, run.turn_id, run.attempt)
+        steps = source = result_unit = None
+        name = 'calculator'
+        if run.tools_enabled:
+            normalized = message.translate(str.maketrans('×−÷', '*-/'))
+            phrase = local_numeric_phrase(normalized)
+            try:
+                followup = local_followup_intent(phrase)
+            except ValueError:
+                raise LocalToolError('LOCAL_TOOL_CONTEXT') from None
+            if followup:
+                source = self._memory.local_numeric_result(*attempt, followup.reference)
+                if source is None:
+                    raise LocalToolError('LOCAL_TOOL_CONTEXT')
+                if followup.operation == 'recall':
+                    reading = f"{source['value']:.12g} {source['unit']}" if source['unit'] else str(source['value'])
+                    answer = f'**Verified result: {reading}**'
+                    run.check_access()
+                    self._memory.record_plain_response(
+                        run.session_id, run.identity, answer, producer='local-verified-result-recall',
+                        local_turn=(run.turn_id, run.attempt),
+                    )
+                    yield answer
+                    return
+            try:
+                conversion = local_conversion_intent(phrase) if followup is None else None
+                if followup and followup.operation == 'convert':
+                    conversion = source['value'], followup.operand or source['unit'], followup.unit
+                if conversion:
+                    value, from_unit, to_unit = conversion
+                    if from_unit is None:
+                        raise LocalToolError('LOCAL_TOOL_CONTEXT')
+                    origin = local_unit_name(from_unit)
+                    if source and source['unit'] and origin != source['unit']:
+                        raise LocalToolError('LOCAL_TOOL_UNIT')
+                    name = 'unit_conversion'
+                    quantity = float(value)
+                    if source and quantity != value:
+                        raise LocalToolError('LOCAL_TOOL_INVALID')
+                    steps = [PlanStep(id='step_1', description='Convert units', tool_name=name, arguments={
+                        'value': quantity, 'from_unit': origin, 'to_unit': local_unit_name(to_unit),
+                    })]
+            except (ValueError, OverflowError):
+                raise LocalToolError('LOCAL_TOOL_UNIT') from None
+            if followup and not conversion:
+                result_unit = source['unit']
+                if result_unit is not None:
+                    if (followup.operation not in ('+', '-') or not followup.unit
+                            or result_unit in ('°C', '°F', 'K')):
+                        raise LocalToolError('LOCAL_TOOL_REFERENCE_UNIT')
+                    try:
+                        if local_unit_name(followup.unit) != result_unit:
+                            raise ValueError('Reference unit is different')
+                    except ValueError:
+                        raise LocalToolError('LOCAL_TOOL_REFERENCE_UNIT') from None
+                elif followup.unit:
+                    raise LocalToolError('LOCAL_TOOL_REFERENCE_UNIT')
+                steps = [PlanStep(id='step_1', description='Calculate', tool_name=name, arguments={
+                    'expression': f"({source['value']!r}) {followup.operation} ({followup.operand})",
+                })]
+            if steps is None:
+                steps = numeric_request_steps(normalized, local_calculator=True)
+                if steps is None and (expression := arithmetic_expression(normalized)) is not None:
+                    steps = [PlanStep(id='step_1', description='Calculate', tool_name=name,
+                                      arguments={'expression': expression})]
+                elif steps is None and re.fullmatch(r"(?:what(?:'s|\s+is)\s+)?[\d\s().+*/%^-]+", phrase) and re.search(
+                    r'[+*/%^-]', phrase,
+                ):
+                    raise LocalToolError('LOCAL_TOOL_INVALID')
+        model_plan = run.tools_enabled and steps is None and re.search(
+            r'\b(?:calculate|compute|multiply|divide|subtract|arithmetic)\b.*\d|'
+            r'\b(?:sum|product|quotient|difference)\s+of\b.*\d|'
+            r'\b\d+(?:\.\d+)?\s+(?:plus|minus|times|divided\s+by)\s+[+-]?\d',
+            message, re.IGNORECASE | re.DOTALL,
+        )
+        if steps is None and not model_plan:
+            await run.check_model(model)
+            async with aclosing(self.chat_stream(run.session_id, message, model, local_turn=run)) as stream:
+                async for delta in stream:
+                    yield delta
+            return
+
+        run.emit('agent_status', 'planning')
+        registry = self._tool_registry
+        owner = run.identity[0]
+        user = run.check_access()
+        definition = registry.get(name)
+        if user.id != run.app_state.local_viewer_id or user.role != 'viewer':
+            raise LocalToolError('LOCAL_TOOL_UNAUTHORIZED')
+        try:
+            self._memory.mark_local_numeric_tool(*attempt, name)
+        except LocalTurnConflict:
+            raise LocalToolError('LOCAL_TOOL_CHANGED_PLAN') from None
+        status = registry.local_tool_status(name, owner, user.role)
+        if not status['available']:
+            raise LocalToolError({
+                'approval_required': 'LOCAL_TOOL_APPROVAL_REQUIRED',
+                'confirmation_required': 'LOCAL_TOOL_CONFIRMATION_REQUIRED',
+            }.get(status['reason'], 'LOCAL_TOOL_UNAVAILABLE'))
+        registration = registry.registration_token(name)
+        if registration is None:
+            raise LocalToolError('LOCAL_TOOL_UNAVAILABLE')
+        if model_plan:
+            if len(message) > 2000:
+                raise LocalToolError('LOCAL_TOOL_INVALID')
+            await run.check_model(model)
+            provider, model_name = self._router.get_provider_for_model(model)
+            plan = await self._planner.create_local_calculation_plan(
+                run.turn_id, message, definition, provider, model_name,
+            )
+        else:
+            plan = AgentPlan(task_id=run.turn_id, objective=message, steps=steps)
+        run.check_access()
+        if not plan.steps:
+            raise LocalToolError('LOCAL_TOOL_UNSUPPORTED')
+        if any(step.tool_name != name for step in plan.steps):
+            raise LocalToolError('LOCAL_TOOL_UNAUTHORIZED')
+        if self._plan_validator.validate(plan, tool_lookup=lambda selected: definition if selected == name else None):
+            raise LocalToolError('LOCAL_TOOL_INVALID')
+
+        references = re.compile(r'@([A-Za-z0-9_]+)\.result')
+        planned = []
+        try:
+            for step in plan.steps:
+                definition.input_schema.model_validate(step.arguments, strict=True, extra='forbid')
+                if name == 'calculator':
+                    validate_calculator_syntax(references.sub('(1)', step.arguments['expression']))
+                    planned.append(step.arguments['expression'])
+                else:
+                    planned.append(step.arguments)
+        except (KeyError, ValueError, SyntaxError, TypeError, RecursionError):
+            raise LocalToolError('LOCAL_TOOL_INVALID') from None
+
+        if name == 'unit_conversion':
+            try:
+                for args in planned:
+                    convert_units(args['value'], args['from_unit'], args['to_unit'], local=True)
+            except ValueError:
+                raise LocalToolError('LOCAL_TOOL_UNIT') from None
+        # Keep the L4 calculator checkpoint digest stable for existing attempts.
+        digest_fields = planned if source is None and name == 'calculator' else [
+            name, planned, source['invocation_id'] if source else None,
+        ]
+        digest = hashlib.sha256(json.dumps(digest_fields, separators=(',', ':')).encode('ascii')).hexdigest()
+        try:
+            receipts = self._memory.local_calculator_receipts(*attempt, digest)
+        except LocalTurnConflict:
+            raise LocalToolError('LOCAL_TOOL_CHANGED_PLAN') from None
+        results = {}
+        run.emit('agent_status', 'tool_selected', tool=name)
+        for index, (step, args) in enumerate(zip(plan.steps, planned)):
+            await asyncio.sleep(0)
+            run.check_access()
+            if registry.registration_token(name) != registration:
+                raise LocalToolError('LOCAL_TOOL_UNAVAILABLE')
+            arguments = ({'expression': references.sub(lambda match: f'({results[match[1]]!r})', args)}
+                         if name == 'calculator' else args)
+            if index < len(receipts):
+                receipt = receipts[index]
+            else:
+                invocation_id = str(uuid.uuid4())
+                run.emit('tool_start', tool=name)
+                scope = local_chat_tool_turn.set((run.session_id, owner, invocation_id, name))
+                enabled = request_tools_enabled.set(True)
+                try:
+                    result, verified = await execute_plan_action(
+                        name, arguments,
+                        lambda: self._dispatch_tool(
+                            name, arguments, session_id=run.session_id, user_id=owner,
+                            step_id=invocation_id, expected_registration=registration,
+                        ),
+                        registry.get, current=lambda: registry.registration_token(name) == registration,
+                    )
+                finally:
+                    request_tools_enabled.reset(enabled)
+                    local_chat_tool_turn.reset(scope)
+                run.check_access()
+                value = result.result['result'] if verified and result.success and result.tool == name else None
+                if value is None or (type(value) is int and value.bit_length() > 2048):
+                    run.emit('tool_result', tool=name, success=False)
+                    if name == 'calculator' and result.error == 'Division by zero.':
+                        raise LocalToolError('LOCAL_TOOL_ZERO_DIVISION')
+                    raise LocalToolError('LOCAL_TOOL_FAILED')
+                receipt = {'invocation_id': invocation_id, 'result': value}
+                unit = result.result['to_unit'] if name == 'unit_conversion' else result_unit
+                if unit is not None:
+                    receipt.update(tool=name, unit=unit)
+                self._memory.record_local_calculator_step(*attempt, digest, index, receipt)
+            results[step.id] = receipt['result']
+            run.emit('tool_result', tool=name, success=True)
+
+        value = results[plan.steps[-1].id]
+        unit = receipt.get('unit')
+        formatted = f"{value:.12g} {unit}" if unit else str(value)
+        answer = f'**Result: {formatted}**'
+        if len(results) > 1:
+            answer += '\n\n' + '\n'.join(f'{index}. Step {index} gave {value}.'
+                                         for index, value in enumerate(results.values(), 1))
+        run.check_access()
+        self._memory.record_plain_response(
+            run.session_id, run.identity, answer, producer='local-verified-calculator', calculation=True,
+            local_turn=(run.turn_id, run.attempt), local_plan_digest=digest,
+        )
+        yield answer
 
     async def chat_stream_with_tools(
         self,
@@ -6187,7 +6420,7 @@ class AgentEngine:
         from backend.agent.planner import is_standalone_non_rag_task
         return is_standalone_non_rag_task(query)
 
-    def _independent_plain_input(self, session_id, messages, sources):
+    def _independent_plain_input(self, session_id, messages, sources, *, local=False):
         """Recognize only a complete dependency-free input; ambiguity stays withheld."""
         from backend.security.provenance_foundation import document_content_allowed
         from backend.agent.memory import ConversationMemory
@@ -6204,7 +6437,9 @@ class AgentEngine:
                     if not self._system_prompt or message.content != self._system_prompt:
                         return None
                 elif message.role == 'assistant':
-                    if not self._memory.verify_independent_plain_chat(session_id, message):
+                    verify = (self._memory.verify_local_reply if local
+                              else self._memory.verify_independent_plain_chat)
+                    if not verify(session_id, message):
                         return None
                 elif message.role != 'user':
                     return None

@@ -11,7 +11,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from backend.agent.memory import LocalTurnConflict
+from backend.agent.engine import LocalToolError
+from backend.agent.memory import LocalTurnConflict, public_local_turn
 from backend.api.chat import StreamingResponse
 from backend.auth.dependencies import get_current_user
 from backend.auth.request_context import dispatch_identity_resolver, request_tools_enabled
@@ -30,6 +31,18 @@ _ERRORS = {
     "CONVERSATION_UNAVAILABLE": "The conversation or sign-in is no longer available.",
     "TURN_CANCELLED": "Response cancelled.",
     "TURN_INTERRUPTED": "The response was interrupted. You can retry this message.",
+    "LOCAL_TOOL_UNAUTHORIZED": "Local chat can run arithmetic and unit conversions only.",
+    "LOCAL_TOOL_UNSUPPORTED": "The agent could not plan this request. Try writing an explicit calculation.",
+    "LOCAL_TOOL_INVALID": "The numeric request is invalid or outside the supported bounds.",
+    "LOCAL_TOOL_UNAVAILABLE": "The requested local tool is unavailable.",
+    "LOCAL_TOOL_APPROVAL_REQUIRED": "This operation requires approval and cannot run in local chat.",
+    "LOCAL_TOOL_CONFIRMATION_REQUIRED": "This tool requires confirmation and is unavailable in local chat.",
+    "LOCAL_TOOL_FAILED": "The tool could not produce a verified result.",
+    "LOCAL_TOOL_CHANGED_PLAN": "The proposed plan changed. Send a new message to start it again.",
+    "LOCAL_TOOL_CONTEXT": "Specify one verified result, such as the result from the first calculation, or enter the value.",
+    "LOCAL_TOOL_REFERENCE_UNIT": "For a measured result, specify an addition or subtraction in the same unit. Enter an explicit value for temperature arithmetic.",
+    "LOCAL_TOOL_UNIT": "Use supported units of the same dimension. Specify US customary volume units.",
+    "LOCAL_TOOL_ZERO_DIVISION": "Division by zero is undefined.",
 }
 
 
@@ -93,19 +106,21 @@ def _provider_error(exc):
         "Model response interrupted": "MODEL_INCOMPLETE",
         "Incomplete model response": "MODEL_INCOMPLETE",
         "Invalid model response": "MODEL_INCOMPLETE",
+        "Planning response invalid": "LOCAL_TOOL_INVALID",
     }.get(str(exc), "CHAT_UNAVAILABLE")
 
 
 class LocalChatRun:
     """A single attempt's task and bounded, disposable outgoing SSE queue."""
 
-    def __init__(self, app_state, engine, session_id, turn_id, attempt, identity, *, stream):
+    def __init__(self, app_state, engine, session_id, turn_id, attempt, identity, *, stream, tools_enabled):
         self.app_state = app_state
         self.engine = engine
         self.session_id = session_id
         self.turn_id = turn_id
         self.attempt = attempt
         self.identity = identity
+        self.tools_enabled = tools_enabled
         self.resolve_user = dispatch_identity_resolver.get()
         self.queue = asyncio.Queue(maxsize=64) if stream else None
         self.sequence = 0
@@ -124,6 +139,7 @@ class LocalChatRun:
         if (user is None or user.id != self.identity[0] or
                 self.engine._memory.stream_identity(self.session_id) != self.identity):
             raise PermissionError("Conversation unavailable")
+        return user
 
     def emit(self, kind, content="", **extra):
         if self.queue is None:
@@ -160,6 +176,14 @@ class LocalChatRun:
             if self.started:
                 self.task.cancel()
 
+    async def check_model(self, model):
+        await health.refresh_local_inventory(self.app_state)
+        self.check_access()
+        readiness = health.model_readiness(self.app_state, model)
+        if readiness["state"] != "available":
+            code = "OLLAMA_UNAVAILABLE" if readiness["reason"] == "ollama_check_failed" else "MODEL_UNAVAILABLE"
+            raise LocalToolError(code)
+
     async def generate(self, message, model):
         self.started = True
         memory = self.engine._memory
@@ -168,27 +192,21 @@ class LocalChatRun:
             if self.stop_state:
                 raise asyncio.CancelledError
             self.check_access()
-            await health.refresh_local_inventory(self.app_state)
-            self.check_access()
-            readiness = health.model_readiness(self.app_state, model)
-            if readiness["state"] != "available":
-                code = "OLLAMA_UNAVAILABLE" if readiness["reason"] == "ollama_check_failed" else "MODEL_UNAVAILABLE"
-                failure = ("failed", code)
-            else:
-                async with aclosing(self.engine.chat_stream(
-                        self.session_id, message, model, local_turn=self)) as stream:
-                    async for delta in stream:
-                        self.check_access()
-                        if isinstance(delta, str):
-                            self.emit("delta", delta)
-                            if self.queue is not None and self.queue.qsize() >= 32:
-                                # Give an attached reader a chance to drain a burst of buffered tokens.
-                                await asyncio.sleep(0)
+            async with aclosing(self.engine.local_chat_stream(self, message, model)) as stream:
+                async for delta in stream:
+                    self.check_access()
+                    if isinstance(delta, str):
+                        self.emit("delta", delta)
+                        if self.queue is not None and self.queue.qsize() >= 32:
+                            # Give an attached reader a chance to drain a burst of buffered tokens.
+                            await asyncio.sleep(0)
         except asyncio.CancelledError:
             state = self.stop_state or "interrupted"
             failure = (state, "TURN_CANCELLED" if state == "cancelled" else "TURN_INTERRUPTED")
         except PermissionError:
             failure = ("interrupted", "CONVERSATION_UNAVAILABLE")
+        except LocalToolError as exc:
+            failure = ("failed", str(exc))
         except RuntimeError as exc:
             failure = ("failed", _provider_error(exc))
         except Exception:
@@ -246,7 +264,7 @@ class LocalChatRuns:
 async def submit_local_chat(body, request, engine, model_router):
     if ((body.tools_enabled and "tools_enabled" in body.model_fields_set)
             or (body.planning_enabled and "planning_enabled" in body.model_fields_set)):
-        raise HTTPException(403, "Tool execution and planning are disabled in local development.")
+        raise HTTPException(403, "Local chat manages tool selection automatically.")
     if not body.session_id or not _valid_turn_id(body.turn_id) or not body.message.strip():
         raise HTTPException(422, "Local chat requires an owned conversation, a UUIDv4 turn ID, and a message.")
     request_tools_enabled.set(False)
@@ -263,16 +281,20 @@ async def submit_local_chat(body, request, engine, model_router):
             pass
         else:
             runs.reconcile(memory, session_id, identity, turn_id, previous)
-        record, admitted = memory.claim_local_turn(session_id, identity, turn_id, attempt, body.message, model)
+        tools_enabled = bool(body.tools_enabled and body.planning_enabled)
+        record, admitted = memory.claim_local_turn(
+            session_id, identity, turn_id, attempt, body.message, model, tools_enabled=tools_enabled,
+        )
     except PermissionError:
         raise HTTPException(404, "Conversation not found") from None
     except LocalTurnConflict as exc:
         raise HTTPException(409, str(exc), headers={"X-Error-Code": "TURN_CONFLICT"}) from None
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error, ValueError):
         raise HTTPException(503, _ERRORS["CHAT_UNAVAILABLE"]) from None
 
     if admitted:
-        run = LocalChatRun(app_state, engine, session_id, turn_id, attempt, identity, stream=body.stream)
+        run = LocalChatRun(app_state, engine, session_id, turn_id, attempt, identity, stream=body.stream,
+                           tools_enabled=tools_enabled)
         runs.start(run, body.message, model)
         if body.stream:
             return StreamingResponse(run.events(), media_type="text/event-stream", headers=_STREAM_HEADERS)
@@ -293,10 +315,16 @@ async def submit_local_chat(body, request, engine, model_router):
             yield _event(session_id, turn_id, attempt, 1, kind, content, **extra)
         return StreamingResponse(replay(), media_type="text/event-stream", headers=_STREAM_HEADERS)
     if kind == "error":
-        status = 409 if record["state"] == "cancelled" else 503
+        status = {"LOCAL_TOOL_UNAUTHORIZED": 403, "LOCAL_TOOL_APPROVAL_REQUIRED": 403,
+                  "LOCAL_TOOL_UNSUPPORTED": 422, "LOCAL_TOOL_INVALID": 422, "LOCAL_TOOL_UNIT": 422,
+                  "LOCAL_TOOL_CONTEXT": 422, "LOCAL_TOOL_REFERENCE_UNIT": 422, "LOCAL_TOOL_ZERO_DIVISION": 422,
+                  "LOCAL_TOOL_CONFIRMATION_REQUIRED": 403,
+                  "LOCAL_TOOL_CHANGED_PLAN": 409}.get(extra["error_code"], 503)
+        if record["state"] == "cancelled":
+            status = 409
         raise HTTPException(status, content, headers={"X-Error-Code": extra["error_code"]})
     answer = next((item for item in memory.get_history(session_id) if item.id == record["assistant_id"]), None)
-    if answer is None or not memory.verify_independent_plain_chat(session_id, answer):
+    if answer is None or not memory.verify_local_reply(session_id, answer):
         raise HTTPException(503, _ERRORS["CHAT_UNAVAILABLE"])
     return ChatResponse(session_id=session_id, message=ChatMessage(role=MessageRole.assistant, content=answer.content),
                         model_used=record["model"])
@@ -320,6 +348,7 @@ async def cancel_local_turn(session_id: str, turn_id: str, attempt: int, request
             record = memory.read_local_turn(session_id, identity, turn_id)
             if record["attempt"] != attempt:
                 raise HTTPException(409, "A newer attempt exists. Refresh conversation history.")
-        return runs.reconcile(memory, session_id, identity, turn_id, record)
+        record = runs.reconcile(memory, session_id, identity, turn_id, record)
+        return public_local_turn(record)
     except (PermissionError, KeyError):
         raise HTTPException(404, "Conversation turn not found") from None

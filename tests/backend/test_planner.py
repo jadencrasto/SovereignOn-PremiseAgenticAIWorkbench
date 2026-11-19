@@ -96,8 +96,7 @@ class TestAgentPlanner:
 
         mock_provider = AsyncMock()
         mock_provider.chat.return_value = ChatResponse(
-            content="""Here is the execution plan:
-```json
+            content="""```json
 [
     {"description": "Find files", "tool_name": "file_list", "arguments": {}}
 ]
@@ -122,12 +121,17 @@ class TestAgentPlanner:
         assert plan.steps[0].tool_name == "file_list"
 
     @pytest.mark.asyncio
-    async def test_create_plan_invalid_json_fallback(self):
+    @pytest.mark.parametrize('response', [
+        "I am not able to output JSON for this request.",
+        'Here is the plan:\n```json\n[{"tool_name": "file_list"}]\n```',
+        '[{"tool_name": "calculator", "tool_name": "file_list"}]',
+    ])
+    async def test_create_plan_rejects_invalid_json(self, response):
         planner = AgentPlanner(max_plan_steps=5)
 
         mock_provider = AsyncMock()
         mock_provider.chat.return_value = ChatResponse(
-            content="I am not able to output JSON for this request.",
+            content=response,
             model="qwen2.5:7b",
             provider="ollama",
         )
@@ -135,14 +139,11 @@ class TestAgentPlanner:
         mock_registry = MagicMock()
         mock_registry.list_enabled_tools.return_value = []
 
-        plan = await planner.create_plan(
-            task_id="task_789",
-            objective="Invalid JSON test",
-            tool_registry=mock_registry,
-            provider=mock_provider,
-            model_name="qwen2.5:7b",
-        )
-
-        assert plan.task_id == "task_789"
-        assert len(plan.steps) == 1
-        assert plan.steps[0].tool_name is None  # fallback reasoning step
+        with pytest.raises(RuntimeError, match="Planning response invalid"):
+            await planner.create_plan(
+                task_id="task_789",
+                objective="Invalid JSON test",
+                tool_registry=mock_registry,
+                provider=mock_provider,
+                model_name="qwen2.5:7b",
+            )

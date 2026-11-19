@@ -61,6 +61,8 @@ export interface ChatMessage {
   withheld?: boolean;
   localTurn?: LocalTurnState;
   localPreview?: boolean;
+  localAgentStatus?: 'planning' | 'tool_selected';
+  localSelectedTool?: 'calculator' | 'unit_conversion';
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   // Request-scoped image previews and metadata for both attachment types.
   attachments?: ImageAttachment[];
@@ -75,6 +77,7 @@ export interface ChatMessage {
 
 export interface LocalTurnState {
   attempt: number;
+  tools_enabled?: false;
   model: string;
   state: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   error_code?: string;

@@ -25,6 +25,7 @@ from typing import Any, Callable, Awaitable, Dict, List, Optional, Type
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
+LOCAL_CHAT_TOOLS = ("calculator", "unit_conversion")
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +75,39 @@ class ToolRegistry:
         result = await registry.execute("calculator", {"expression": "2+2"}, session_id="abc")
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, local_viewer_id: str | None = None) -> None:
         self._tools: Dict[str, ToolDefinition] = {}
         self._registration_versions: Dict[str, int] = {}
         self._approval_manager = None
+        self._local_viewer_id = local_viewer_id
+
+    def local_tool_status(self, name: str, user_id: str, role: str) -> dict:
+        from backend.tools.calculator import CalculatorInput, CalculatorOutput, execute_calculator, verify_calculator_output
+        from backend.tools.unit_conversion import (
+            LocalUnitConversionInput, LocalUnitConversionOutput, execute_unit_conversion, verify_local_unit_conversion,
+        )
+
+        contracts = {
+            "calculator": (CalculatorInput, CalculatorOutput, execute_calculator, verify_calculator_output),
+            "unit_conversion": (LocalUnitConversionInput, LocalUnitConversionOutput,
+                                execute_unit_conversion, verify_local_unit_conversion),
+        }
+        tool = self.get(name) if self._local_viewer_id and user_id == self._local_viewer_id and role == "viewer" and name in contracts else None
+        approved_contract = bool(tool and tool.read_only and tool.risk_level == "low"
+                                 and (tool.input_schema, tool.result_schema, tool.execute_fn, tool.result_verifier) == contracts[name])
+        requires_approval = bool(approved_contract and tool.requires_approval)
+        if not approved_contract or self.registration_token(name) is None:
+            reason = "unavailable"
+        elif not tool.enabled:
+            reason = "disabled"
+        elif requires_approval or tool.requires_confirmation:
+            reason = "approval_required" if requires_approval else "confirmation_required"
+        else:
+            reason = "available"
+        return {"available": reason == "available", "reason": reason, "requires_approval": requires_approval}
+
+    def allows_local_tool(self, name: str, user_id: str, role: str) -> bool:
+        return self.local_tool_status(name, user_id, role)["available"]
 
     def registration_token(self, name: str):
         """Return process-local evidence of the current execution contract.
@@ -232,6 +262,19 @@ class ToolRegistry:
                 error=f"Tool '{name}' is currently disabled.",
             )
 
+        local_allowed = False
+        if self._local_viewer_id is not None:
+            from backend.auth.request_context import effective_owner, local_chat_tool_turn
+
+            scope = local_chat_tool_turn.get()
+            local_allowed = bool(
+                scope == (session_id, user_id, step_id, name)
+                and user_id == effective_owner.get() and expected_registration is not None
+                and self.allows_local_tool(name, user_id, user_role)
+            )
+            if not local_allowed:
+                return ToolResult(tool=name, success=False, error="Local tool execution is not authorized.")
+
         if name in ('file_read', 'file_list', 'document_search'):
             from backend.security.provenance_foundation import document_content_allowed
             if not document_content_allowed():
@@ -269,7 +312,7 @@ class ToolRegistry:
             return ToolResult(tool=name, success=False, error="Permission denied: authenticated role is required.")
 
         # --- Enforce RBAC (Phase 7 & Phase B) ---
-        if user_role is not None:
+        if not local_allowed:
             from backend.auth.models import UserRole, Permission, has_permission
             try:
                 role_enum = UserRole(user_role)
@@ -404,7 +447,8 @@ class ToolRegistry:
 
         # --- Validate arguments ---
         try:
-            validated = tool.input_schema(**arguments)
+            validated = (tool.input_schema.model_validate(arguments, strict=True, extra="forbid")
+                         if local_allowed else tool.input_schema(**arguments))
         except ValidationError as exc:
             errors = exc.errors()
             error_summary = "; ".join(
@@ -637,6 +681,10 @@ class ToolRegistry:
         user_role: Optional[str] = None,
     ) -> None:
         """Emit a structured audit log entry for tool execution."""
+        # Local expressions and numeric results stay in the owned transcript.
+        if self._local_viewer_id is not None:
+            arguments = {}
+            result_summary = "Local tool executed" if success else "Local tool execution failed"
         # Sanitize arguments for logging (truncate large values)
         safe_args = {}
         for k, v in arguments.items():

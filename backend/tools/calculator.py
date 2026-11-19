@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import math
 import operator
 from typing import Union
 
@@ -160,6 +161,19 @@ def safe_calculate(expression: str) -> Union[int, float]:
             raise ValueError("Result is infinite.")
 
     return result
+
+
+def validate_calculator_syntax(expression: str) -> None:
+    """Reject unsupported syntax before a plan can dispatch any calculator step."""
+    tree = ast.parse(expression.strip(), mode="eval")
+    allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, *_BINARY_OPS, *_UNARY_OPS)
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            raise ValueError("Unsupported calculator syntax")
+        if isinstance(node, ast.Constant) and not (
+            type(node.value) is int or (type(node.value) is float and math.isfinite(node.value))
+        ):
+            raise ValueError("Unsupported calculator syntax")
 
 
 class CalculatorOutput(BaseModel):

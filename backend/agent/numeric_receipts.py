@@ -52,7 +52,73 @@ def terminal_scale_reference(expression: str) -> str | None:
     return match[1] if match else None
 
 
-def numeric_request_steps(message: str):
+def arithmetic_expression(message: str) -> str | None:
+    """
+    Recognize simple arithmetic expressions for the validated calculator plan.
+
+    Returns the expression, or None if the message
+    is not a simple arithmetic query.
+
+    Handles patterns like:
+      - "What is 25 + 17?"
+      - "calculate 125 * 840 * 1.18"
+      - "25 + 17"
+      - "What is 3.14 * 2?"
+
+    """
+    import re as _re
+
+    if not message or len(message) > 200:
+        return None
+
+    q = message.strip()
+    q_lower = q.lower()
+
+    # Pattern 1: "What is <expr>?" / "What's <expr>?"
+    m = _re.match(
+        r"^(?:what(?:'s|\s+is)\s+)([\d\s\+\-\*\/\.\(\)\^%x×]+)\s*\??$",
+        q_lower,
+    )
+    expr = None
+    if m:
+        expr = m.group(1).strip()
+
+    # Pattern 2: "calculate <expr>" / "compute <expr>"
+    if expr is None:
+        m = _re.match(
+            r"^(?:calculate|compute|eval(?:uate)?)\s+([\d\s\+\-\*\/\.\(\)\^%x×]+)\s*\??$",
+            q_lower,
+        )
+        if m:
+            expr = m.group(1).strip()
+
+    # Pattern 3: Pure arithmetic expression (e.g. "25 + 17", "3 * 4.5")
+    if expr is None:
+        m = _re.match(
+            r"^([\d\s\+\-\*\/\.\(\)\^%x×]+)$",
+            q.strip(),
+        )
+        if m:
+            expr = m.group(1).strip()
+
+    if expr is None or not expr:
+        return None
+
+    # Normalize: replace × with *, x with * (when between digits)
+    expr = _re.sub(r"×", "*", expr)
+    expr = _re.sub(r"(?<=\d)\s*x\s*(?=\d)", "*", expr)
+    expr = _re.sub(r"\^", "**", expr)
+
+    # Must contain at least one operator and one digit
+    if not _re.search(r"[\+\-\*\/\%]", expr):
+        return None
+    if not _re.search(r"\d", expr):
+        return None
+
+    return expr
+
+
+def numeric_request_steps(message: str, *, local_calculator=False):
     """Build plans only for whole requests covered by the bounded grammar."""
     from backend.agent.planner import PlanStep
     from backend.tools.unit_conversion import Unit
@@ -94,6 +160,12 @@ def numeric_request_steps(message: str):
             subtract = re.fullmatch(rf"subtract\s+({_NUMBER})", next_phrase)
             if subtract:
                 second = f"@step_1.result - ({subtract[1]})"
+            elif local_calculator:
+                next_phrase = re.sub(r'\bthe\s+result\b', 'that result', next_phrase)
+                for pattern, operator in _ARITHMETIC_PATTERNS:
+                    if match := re.fullmatch(pattern, next_phrase):
+                        second = f"@step_1.result {operator} ({match[1]})"
+                        break
     if first is None or (rest and second is None):
         return None
     if second is None:
@@ -112,6 +184,116 @@ def requires_prior_numeric_receipt(message: str) -> bool:
     return bool(re.match(rf"(?:multiply|divide|add|subtract|convert|calculate|compute|use)\s+{reference}\b", phrase)
                 or re.match(r"(?:multiply|divide)\s+that\s+by\b", phrase)
                 or re.match(rf"(?:add|subtract)\s+\S+\s+(?:to|from)\s+(?:{reference}\b|that$)", phrase))
+
+
+def local_numeric_phrase(message: str) -> str:
+    return _phrase(re.sub(r'^\s*(?:can|could|would) you\s+', '', message, flags=re.IGNORECASE))
+
+
+_LOCAL_REFERENCE = rf"(?:{_ARITHMETIC_REFERENCE}|the\s+result|the\s+answer)"
+_LOCAL_FOLLOWUP = tuple(
+    (pattern.replace(_ARITHMETIC_REFERENCE, _LOCAL_REFERENCE), operator)
+    for pattern, operator in _ARITHMETIC_PATTERNS
+) + ((rf"subtract\s+({_NUMBER})", "-"),)
+_LOCAL_UNIT = r"(?:[a-z°]+(?:[ \t]+[a-z°]+){0,4}?)"
+_LOCAL_CONVERT = rf"(?:convert\s+|what(?:'s|\s+is)\s+|how much is\s+)?({_NUMBER})\s*({_LOCAL_UNIT})\s*(?:\s+(?:to|into|in)\s+|→\s*)({_LOCAL_UNIT})"
+_LOCAL_CONVERT_REFERENCE = rf"convert\s+{_LOCAL_REFERENCE}(?:\s+from\s+({_LOCAL_UNIT}))?\s+(?:to|into)\s+({_LOCAL_UNIT})"
+_LOCAL_NAMED_REFERENCE = r"(?:the\s+)?(?:result\s+from\s+(?:the\s+)?)?(first|second|third)\s+(calculation|conversion)(?:\s+result)?"
+_LOCAL_REFERENCE_TOOL = {'calculation': 'calculator', 'conversion': 'unit_conversion'}
+_LOCAL_ORDINAL = {'first': 1, 'second': 2, 'third': 3}
+_LOCAL_REFERENCE_HINT = re.compile(
+    r'\b(?:that|those|it|them|results?|answers?|previous|earlier|above|first|second|third|last|'
+    r'former|latter|calculation|conversion)\b'
+)
+_LOCAL_ALIASES = {
+    **_UNIT_NAMES,
+    'milligram': 'mg', 'inch': 'in', 'inches': 'in', 'foot': 'ft', 'feet': 'ft',
+    'mile': 'mi', 'ounce': 'oz', 'pound': 'lb', 'lb': 'lb',
+    'c': '°C', '°c': '°C', 'celsius': '°C', 'f': '°F', '°f': '°F', 'fahrenheit': '°F',
+    'k': 'K', 'kelvin': 'K', 'ml': 'mL', 'l': 'L',
+    'milliliter': 'mL', 'millilitre': 'mL', 'liter': 'L', 'litre': 'L',
+    'us fl oz': 'US fl oz', 'us fluid ounce': 'US fl oz',
+    'us cup': 'US cup', 'us customary cup': 'US cup',
+    'us gal': 'US gal', 'us gallon': 'US gal', 'us liquid gallon': 'US gal',
+}
+
+
+def local_unit_name(unit: str) -> str:
+    from backend.tools.unit_conversion import LocalUnit
+
+    unit = ' '.join(unit.lower().split())
+    unit = re.sub(r'^degrees?\s+', '', unit)
+    canonical = _LOCAL_ALIASES.get(unit, _LOCAL_ALIASES.get(unit.removesuffix('s'), unit))
+    if canonical not in get_args(LocalUnit):
+        raise ValueError('Unsupported or ambiguous unit')
+    return canonical
+
+
+def local_conversion_intent(phrase: str):
+    """Return explicit conversion operands or identify an unsupported conversion request."""
+    if len(phrase) <= 300:
+        if match := re.fullmatch(_LOCAL_CONVERT, phrase):
+            return match.groups()
+        if match := re.fullmatch(rf"how many\s+({_LOCAL_UNIT})\s+(?:are\s+)?in\s+({_NUMBER})\s*({_LOCAL_UNIT})", phrase):
+            target, value, source = match.groups()
+            return value, source, target
+    if re.match(r'^convert\b', phrase) or '→' in phrase:
+        raise ValueError('Unsupported conversion request')
+    return None
+
+
+@dataclass(frozen=True)
+class LocalNumericReference:
+    kind: str = 'adjacent'
+    tool: str | None = None
+    ordinal: int | None = None
+
+
+@dataclass(frozen=True)
+class LocalNumericFollowup:
+    operation: str
+    reference: LocalNumericReference
+    operand: str | None = None
+    unit: str | None = None
+
+
+def _local_reference(phrase: str):
+    if re.fullmatch(_LOCAL_REFERENCE, phrase):
+        return LocalNumericReference()
+    if match := re.fullmatch(_LOCAL_NAMED_REFERENCE, phrase):
+        return LocalNumericReference('ordinal', _LOCAL_REFERENCE_TOOL[match[2]], _LOCAL_ORDINAL[match[1]])
+    if match := re.fullmatch(r"(?:the\s+)?(calculation|conversion)\s+result", phrase):
+        return LocalNumericReference('unique', _LOCAL_REFERENCE_TOOL[match[1]])
+    raise ValueError('Unclear numeric reference')
+
+
+def local_followup_intent(phrase: str):
+    """Parse a whole reference request or flag one that needs clarification."""
+    if len(phrase) <= 300:
+        for pattern, operator in _LOCAL_FOLLOWUP:
+            if match := re.fullmatch(pattern, phrase):
+                return LocalNumericFollowup(operator, LocalNumericReference(), match[1])
+        if match := re.fullmatch(_LOCAL_CONVERT_REFERENCE, phrase):
+            return LocalNumericFollowup('convert', LocalNumericReference(), match[1], match[2])
+        if re.fullmatch(r"what (?:was|is) the (?:answer|result) before that", phrase):
+            return LocalNumericFollowup('recall', LocalNumericReference('before'))
+        if match := re.fullmatch(rf"(?:use|show(?: me)?)\s+({_LOCAL_NAMED_REFERENCE}|the (?:calculation|conversion) result)", phrase):
+            return LocalNumericFollowup('recall', _local_reference(match[1]))
+        if match := re.fullmatch(rf"(add|subtract)\s+({_NUMBER})(?:\s*({_LOCAL_UNIT}))?\s+(to|from)\s+(.+)", phrase):
+            action, value, unit, connector, reference = match.groups()
+            if (action, connector) in (('add', 'to'), ('subtract', 'from')) and _LOCAL_REFERENCE_HINT.search(reference):
+                return LocalNumericFollowup('+' if action == 'add' else '-', _local_reference(reference), value, unit)
+        if match := re.fullmatch(rf"(multiply|divide)\s+(.+)\s+by\s+({_NUMBER})", phrase):
+            action, reference, value = match.groups()
+            if _LOCAL_REFERENCE_HINT.search(reference):
+                return LocalNumericFollowup('*' if action == 'multiply' else '/', _local_reference(reference), value)
+        if match := re.fullmatch(rf"convert\s+({_LOCAL_NAMED_REFERENCE}|the (?:calculation|conversion) result)\s+to\s+({_LOCAL_UNIT})", phrase):
+            return LocalNumericFollowup('convert', _local_reference(match[1]), unit=match[4])
+    if re.match(rf'^(?:calculate|compute)\s+{_LOCAL_REFERENCE}\b', phrase) or (
+        re.match(r'^(?:add|subtract|multiply|divide|convert|use)\b', phrase) and _LOCAL_REFERENCE_HINT.search(phrase)
+    ):
+        raise ValueError('Unclear numeric reference')
+    return None
 
 
 def resolve_numeric_followup(message: str, receipt: NumericReceipt):

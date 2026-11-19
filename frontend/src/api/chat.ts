@@ -28,7 +28,7 @@ export async function streamChat(
     onError: (error: string, info?: StreamErrorInfo) => void;
     onAccepted?: () => void;
     onToolEvent?: (event: ToolEvent) => void;
-    onAgentStatus?: (status: string) => void;
+    onAgentStatus?: (status: string, tool?: string) => void;
     onPlanCreated?: (planData: any) => void;
     onPlanStep?: (stepData: any) => void;
     onApprovalRequired?: (approvalData: any) => void;

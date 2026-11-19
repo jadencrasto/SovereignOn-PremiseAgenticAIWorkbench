@@ -523,6 +523,28 @@ AVAILABLE TOOLS:
 
 
 
+def _parse_plan_json(raw):
+    raw = raw.strip()
+    if len(raw) > 65536:
+        raise ValueError('Plan response too large')
+    fenced = re.fullmatch(r'```(?:json)?\s*([\s\S]*?)\s*```', raw, re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1)
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate plan field')
+            result[key] = value
+        return result
+
+    def reject_constant(_value):
+        raise ValueError('Non-finite plan value')
+
+    return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+
+
 class AgentPlanner:
     """
     Generates structured execution plans from user requests.
@@ -550,6 +572,52 @@ class AgentPlanner:
         if len(steps) > self._max_plan_steps:
             raise ReasoningError('PLAN_LIMIT', 'The document plan exceeds the configured step budget.')
         return AgentPlan(task_id=task_id, objective='Grounded document analysis', steps=steps)
+
+    async def create_local_calculation_plan(self, turn_id, objective, tool, provider, model_name):
+        """Use the existing planner with only the local calculator contract."""
+        from backend.models.base import ChatRequest, Message
+
+        arguments = tool.input_schema.model_json_schema()
+        arguments["additionalProperties"] = False
+        schema = {
+            "type": "object", "additionalProperties": False, "required": ["steps"],
+            "properties": {"steps": {
+                "type": "array", "maxItems": self._max_plan_steps,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["name", "arguments"],
+                    "properties": {"name": {"const": tool.name}, "arguments": arguments},
+                },
+            }},
+        }
+        prompt = (
+            "Plan arithmetic using only the supplied tool schema. Preserve the user's operands and operators. "
+            "Every step must be necessary. Refer to earlier verified values as @step_1.result, @step_2.result, etc. "
+            "Use an empty steps array for unsupported requests. Output JSON only. "
+            "The schema is " + json.dumps(schema)
+        )
+        response = await provider.chat(ChatRequest(
+            messages=[Message(role="system", content=prompt), Message(role="user", content=objective)],
+            model=model_name, temperature=0, max_tokens=768, response_schema=schema,
+        ))
+        try:
+            parsed = _parse_plan_json(response.content)
+            if not isinstance(parsed, dict) or parsed.keys() != {"steps"}:
+                raise ValueError("Invalid local plan")
+            steps = parsed["steps"]
+            if not isinstance(steps, list) or len(steps) > self._max_plan_steps:
+                raise ValueError("Invalid local plan length")
+            if any(not isinstance(step, dict) or step.keys() != {"name", "arguments"}
+                   or not isinstance(step["name"], str) or not isinstance(step["arguments"], dict)
+                   for step in steps):
+                raise ValueError("Invalid local step")
+            return AgentPlan(task_id=turn_id, objective=objective, steps=[
+                PlanStep(id=f"step_{index}", description="Calculate", tool_name=step["name"],
+                         arguments=step["arguments"])
+                for index, step in enumerate(steps, 1)
+            ])
+        except (ValueError, TypeError, RecursionError):
+            raise RuntimeError("Planning response invalid") from None
 
     async def create_plan(
         self,
@@ -610,25 +678,7 @@ class AgentPlanner:
 
         try:
             response = await provider.chat(request)
-            raw = response.content.strip()
-
-            # Accept a single array or a single fenced JSON array, not prose
-            # surrounding an executable fragment or multiple responses.
-            if len(raw) > 65536:
-                raise ValueError('Plan response too large')
-            fenced = re.fullmatch(r'```(?:json)?\s*([\s\S]*?)\s*```', raw, re.IGNORECASE)
-            if fenced:
-                raw = fenced.group(1)
-            def unique_object(pairs):
-                result = {}
-                for key, value in pairs:
-                    if key in result:
-                        raise ValueError('Duplicate plan field')
-                    result[key] = value
-                return result
-            def reject_constant(_value):
-                raise ValueError('Non-finite plan value')
-            steps_data = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+            steps_data = _parse_plan_json(response.content)
 
             if not isinstance(steps_data, list):
                 raise ValueError("Plan must be a JSON array of steps")

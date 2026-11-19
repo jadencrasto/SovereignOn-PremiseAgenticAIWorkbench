@@ -77,7 +77,7 @@ export async function streamSSE(
     onAccepted?: () => void;
     onToolEvent?: (event: ToolEvent) => void;
     // Phase 5: vision status events
-    onAgentStatus?: (status: string) => void;
+    onAgentStatus?: (status: string, tool?: string) => void;
     // Phase 6: planning / approval / task callbacks
     onPlanCreated?: (planData: any) => void;
     onPlanStep?: (stepData: any) => void;
@@ -142,9 +142,18 @@ export async function streamSSE(
                 !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
                 typeof chunk.content !== 'string') throw new Error('Invalid turn event');
             if (chunk.sequence <= sequence) continue;
+            const approvedTool = chunk.tool === 'calculator' || chunk.tool === 'unit_conversion';
+            const localStatus = chunk.type === 'agent_status' &&
+              ((chunk.content === 'planning' && chunk.tool === undefined) ||
+               (chunk.content === 'tool_selected' && (approvedTool || chunk.tool === undefined))) &&
+              chunk.tool_args === undefined && chunk.summary === undefined;
+            const localTool = (chunk.type === 'tool_start' || chunk.type === 'tool_result') &&
+              approvedTool && chunk.content === '' &&
+              chunk.tool_args === undefined && chunk.summary === undefined &&
+              (chunk.type === 'tool_result' ? typeof chunk.success === 'boolean' : chunk.success === undefined);
             if (chunk.sequence !== sequence + 1 ||
                 !(chunk.type === 'done' || chunk.type === 'error' ||
-                  (sequence === 0 ? chunk.type === 'accepted' : chunk.type === 'delta'))) {
+                  (sequence === 0 ? chunk.type === 'accepted' : chunk.type === 'delta' || localStatus || localTool))) {
               throw new Error('Out-of-order turn event');
             }
             sequence = chunk.sequence;
@@ -183,7 +192,7 @@ export async function streamSSE(
           } else if (chunk.type === 'agent_status') {
             // Phase 5: vision/agent status updates
             if (callbacks.onAgentStatus) {
-              callbacks.onAgentStatus(chunk.content || 'thinking');
+              callbacks.onAgentStatus(chunk.content || 'thinking', identified ? chunk.tool : undefined);
             }
           } else if (chunk.type === 'plan_created') {
             // Phase 6: Plan created event

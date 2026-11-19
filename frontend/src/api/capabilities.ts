@@ -15,6 +15,16 @@ export type CapabilityName = keyof typeof capabilityLabels;
 export type CapabilityState = 'available' | 'unavailable' | 'blocked' | 'unknown';
 export type Capability = { state: CapabilityState; reason: string };
 type ModelReadiness = Capability & { id: string; expires_at?: number; identity_evidence?: 'provider_digest' | 'unavailable' };
+export const localToolLabels = { calculator: 'Calculator', unit_conversion: 'Unit conversion' } as const;
+export const localToolReasons = {
+  available: 'Available',
+  unavailable: 'Unavailable',
+  disabled: 'Disabled',
+  approval_required: 'Unavailable · approval required',
+  confirmation_required: 'Unavailable · confirmation required',
+} as const;
+type LocalToolStatus = { available: boolean; reason: keyof typeof localToolReasons; requires_approval: boolean };
+type LocalTools = { enabled: boolean; tools: Record<keyof typeof localToolLabels, LocalToolStatus> };
 
 interface DocumentIntelligenceReport {
   formats: ['PDF', 'DOCX', 'XLSX'];
@@ -31,6 +41,7 @@ export interface CapabilityReport {
   environment: string;
   run_profile?: 'local_dev';
   history_retention?: 'disposable' | 'durable';
+  local_tools?: LocalTools;
   deployment_verified: false;
   capabilities: Record<CapabilityName, Capability>;
   models: Record<string, Capability & { id: string | null }>;
@@ -123,9 +134,11 @@ function isCapability(value: unknown): value is Capability {
   return typeof reason === 'string' && ['available', 'unavailable', 'blocked', 'unknown'].includes(state ?? '');
 }
 
-function isModelReadiness(value: ModelReadiness | undefined): boolean {
+function isModelReadiness(value: ModelReadiness | undefined, localChat = false): boolean {
   return !!value && isCapability(value) && typeof value.id === 'string' &&
-    (value.state !== 'available' || (typeof value.expires_at === 'number' && Number.isFinite(value.expires_at)));
+    (value.state !== 'available' || (localChat
+      ? value.reason === 'model_listed' && value.identity_evidence === 'provider_digest'
+      : typeof value.expires_at === 'number' && Number.isFinite(value.expires_at)));
 }
 
 export function parseCapabilityReport(value: unknown): CapabilityReport {
@@ -136,6 +149,7 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
       (report.run_profile !== undefined && report.run_profile !== 'local_dev') ||
       (report.history_retention !== undefined && (report.run_profile !== 'local_dev' ||
         !['disposable', 'durable'].includes(report.history_retention))) ||
+      (report.local_tools !== undefined && (report.run_profile !== 'local_dev' || !isLocalTools(report.local_tools))) ||
       !report.capabilities || !Object.keys(capabilityLabels).every(key =>
         isCapability(report.capabilities?.[key as CapabilityName])) ||
       !report.models || !['default_chat', 'image_chat', 'vision', 'embedding'].every(key => {
@@ -145,7 +159,7 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
       !Array.isArray(report.installed_models) || !report.installed_models.every(name => typeof name === 'string') ||
       !Array.isArray(report.chat_models) || !report.chat_models.every(name => typeof name === 'string') ||
       (report.document_intelligence !== undefined && !isDocumentIntelligence(report.document_intelligence)) ||
-      !isModelReadiness(report.selected_chat_model) ||
+      !isModelReadiness(report.selected_chat_model, report.run_profile === 'local_dev') ||
       (report.vision_models !== undefined &&
         (!Array.isArray(report.vision_models) || !report.vision_models.every(name => typeof name === 'string'))) ||
       (report.selected_vision_model !== undefined && !isModelReadiness(report.selected_vision_model)) ||
@@ -153,6 +167,19 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
     throw new Error('Invalid capability response');
   }
   return report as CapabilityReport;
+}
+
+function isLocalTools(value: LocalTools): boolean {
+  const names = Object.keys(localToolLabels) as (keyof typeof localToolLabels)[];
+  return !!value?.tools && Object.keys(value.tools).length === names.length &&
+    names.every(name => {
+      const tool = value.tools[name];
+      return !!tool && Object.hasOwn(localToolReasons, tool.reason) &&
+        tool.available === (tool.reason === 'available') &&
+        typeof tool.requires_approval === 'boolean' &&
+        (!tool.available || !tool.requires_approval) &&
+        (tool.reason !== 'approval_required' || tool.requires_approval);
+    }) && value.enabled === names.some(name => value.tools[name].available);
 }
 
 function isDocumentIntelligence(value: DocumentIntelligenceReport): boolean {
