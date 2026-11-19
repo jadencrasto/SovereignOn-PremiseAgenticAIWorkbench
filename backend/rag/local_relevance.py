@@ -59,6 +59,7 @@ _CONDITION_GROUPS = ({'normal', 'warning', 'alarm', 'startup', 'shutdown', 'stea
                      {'minimum', 'maximum'})
 _QUANTITIES = {
     'pressure': r'pressure',
+    'temperature_difference': r'(?:temperature|thermal)[ -]+(?:difference|differential)',
     'temperature': r'temperature|thermal',
     'flow': r'flow(?:[ -]rate)?',
     'time': r'interval|frequency|how often',

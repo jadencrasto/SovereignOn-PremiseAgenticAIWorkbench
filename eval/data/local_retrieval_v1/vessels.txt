@@ -1,0 +1,10 @@
+Synthetic tank and vessel instructions
+
+Section 1: V-301
+Section 1.1: Design
+Design vessel capacity is 500 L.
+The access platform height is 2 m.
+
+Section 1.2: Maintenance
+Inspect the relief valve every 72 hours.
+The drain flow rate is 12 L/min.

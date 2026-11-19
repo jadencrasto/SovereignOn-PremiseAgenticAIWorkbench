@@ -47,6 +47,8 @@ _STOP = set(('a an and are as at be by can compare contrast could did do does di
              'there these this to use was were what when where which who why will with would my our your source '
              'sources note notes document documents say says about between according find please').split())
 _METRIC = re.compile(r'\b(?:limit|pressure|temperature|interval|inspect|recommend|capacity|tolerance|flow)\w*\b', re.I)
+_OPERATING_HEADINGS = {'operating envelope', 'operating limits'}
+_DOCUMENT_HEADING = re.compile(r'\b(?:handbook|manual|amendment)$')
 _SINGULAR_PUMP = re.compile(r'\b(?:the|this|that|a)\s+pump\b', re.I)
 _EVIDENCE_ID = Annotated[str, StringConstraints(pattern=r'^C[0-9a-f]{32}_[1-6]$')]
 _SOURCE_ID = Annotated[str, StringConstraints(pattern=r'^[0-9a-f]{32}$')]
@@ -647,13 +649,23 @@ def _conflicting_labels(passages, selected):
     """Compare like claims only within the same entity, condition and section wording."""
     groups = {}
     for label, passage in passages.items():
-        heading = ' / '.join(section.title.casefold() for section in passage.context.sections)
+        sections = passage.context.sections
+        path = tuple(section.title.casefold() for section in sections)
         values = passage.values()
-        if len(values) != 1 or not _METRIC.search(f'{heading} {passage.text}'):
+        if len(values) != 1 or not _METRIC.search(f'{" / ".join(path)} {passage.text}'):
             continue
         value = values[0]
+        equipment = passage.equipment()
+        body_conditions = measurement_conditions(passage.text, value, passage.context.table_header)
+        # A heading that names this equipment anchors an explicitly qualified claim.
+        # Document titles and generic operating wrappers can differ between sources.
+        if (len(sections) > 1 and sections[0].level == 1 and _DOCUMENT_HEADING.search(path[0])
+                and len(equipment) == 1 and body_conditions
+                and path[1] in {tag.casefold() for tag in equipment}
+                and not entities(path[0]) and not conditions(path[0]) and _METRIC.search(passage.text)):
+            path = tuple(title for title in path[1:] if title not in _OPERATING_HEADINGS)
         statement = ' '.join((passage.text[:value.start] + ' <measurement> ' + passage.text[value.end:]).casefold().split())
-        key = (heading, tuple(passage.equipment()), passage.context.table_header, statement, value.dimension)
+        key = (path, tuple(equipment), passage.context.table_header, statement, value.dimension)
         groups.setdefault(key, []).append((label, value))
     conflicts = set()
     for entries in groups.values():
