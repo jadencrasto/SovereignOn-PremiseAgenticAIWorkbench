@@ -587,6 +587,7 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
     app.state.engine.set_plan_validator(PlanValidator(local_tools, max_plan_steps=LOCAL_PLAN_LIMIT))
     app.state.local_inventory_lock = Lock()
     app.state.local_chat_runs = local_runs = LocalChatRuns()
+    app.state.local_document_intake = Lock()
     stack.push_async_callback(local_runs.close)
     await refresh_local_inventory(app.state)
     app.state.startup_complete = True

@@ -6,6 +6,7 @@ interface Source {
   label: string;
   revision: number;
   passages: number;
+  document?: { format: string; status: 'ready' | 'partial'; warnings: string[] };
 }
 
 interface Corpus {
@@ -13,10 +14,19 @@ interface Corpus {
   retention: 'disposable' | 'durable';
   max_sources: number;
   max_source_bytes: number;
+  document_formats?: string[];
+  max_document_bytes?: number;
   sources: Source[];
 }
 
 const endpoint = '/api/chat/local-knowledge';
+const mediaTypes: Record<string, string> = {
+  txt: 'text/plain',
+  md: 'text/markdown',
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
 
 export function LocalKnowledgePanel({ available, active, setActive, selection, setSelection, onRevision }: {
   available: boolean;
@@ -29,6 +39,7 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
   const [corpus, setCorpus] = useState<Corpus>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState('');
   const channel = useRef<BroadcastChannel | undefined>(undefined);
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -63,13 +74,24 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
     };
   }, [available, onRevision, refresh]);
 
+  const formats = ['txt', 'md', ...(corpus?.document_formats ?? [])];
+  const accept = formats.map(format => `.${format}`).join(',');
   const change = async (file: File | null, source?: Source) => {
     if (busy || (!file && !source)) return;
-    if (file && file.size > (corpus?.max_source_bytes ?? 2048)) {
-      setError('Choose a UTF-8 text or Markdown file of at most 2 KiB.');
-      return;
+    const format = file?.name.split('.').pop()?.toLowerCase() ?? '';
+    if (file) {
+      if (!formats.includes(format) || !Object.hasOwn(mediaTypes, format)) {
+        setError('Choose one of the supported file formats.');
+        return;
+      }
+      const maxBytes = ['txt', 'md'].includes(format) ? corpus?.max_source_bytes : corpus?.max_document_bytes;
+      if (maxBytes !== undefined && file.size > maxBytes) {
+        setError(`Choose a ${format.toUpperCase()} file of at most ${maxBytes / 1024} KiB.`);
+        return;
+      }
     }
     setBusy(true);
+    setOperation(file ? `Uploading and indexing ${file.name}…` : 'Removing source…');
     setError('');
     const params = new URLSearchParams();
     if (file) params.set('filename', file.name);
@@ -79,7 +101,7 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
       await apiRequest(path + '?' + params, file ? {
         method: source ? 'PUT' : 'POST',
         body: file,
-        headers: { 'Content-Type': file.name.toLowerCase().endsWith('.md') ? 'text/markdown' : 'text/plain' },
+        headers: { 'Content-Type': mediaTypes[format] },
       } : { method: 'DELETE' });
       onRevision();
       channel.current?.postMessage('changed');
@@ -88,6 +110,7 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
       setError(failure instanceof Error ? failure.message : 'The local source could not be changed.');
     } finally {
       setBusy(false);
+      setOperation('');
     }
   };
 
@@ -101,7 +124,7 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
       </button>}
       {available && (
         <div className="mt-2 max-h-56 space-y-2 overflow-y-auto text-xs">
-          <p>Registered UTF-8 text and Markdown are searched locally by keyword.</p>
+          <p>Supported formats: {formats.map(format => format.toUpperCase()).join(', ')}.</p>
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={active} onChange={event => setActive(event.target.checked)} />
             Answer from local sources
@@ -124,14 +147,15 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
           </fieldset>}
           {corpus && <p>{corpus.sources.length} of {corpus.max_sources} sources · {corpus.retention} retention</p>}
           <label className="flex flex-wrap items-center gap-2">
-            Register authorized text
-            <input type="file" accept=".txt,.md" disabled={busy || !corpus}
+            Import an authorized local file
+            <input type="file" accept={accept} disabled={busy || !corpus}
               onChange={event => {
                 const file = event.target.files?.[0];
                 event.target.value = '';
                 if (file) void change(file);
               }} />
           </label>
+          {operation && <p role="status">{operation}</p>}
           <ul className="space-y-2">
             {corpus?.sources.map(source => (
               <li key={source.source_id} className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-2">
@@ -140,9 +164,15 @@ export function LocalKnowledgePanel({ available, active, setActive, selection, s
                     ? [...selection, source.source_id] : selection.filter(id => id !== source.source_id))} />}
                 <span className="break-all font-medium">{source.label}</span>
                 <span>Revision {source.revision} · {source.passages} passages</span>
+                {source.document && <span>{source.document.format.toUpperCase()} · {
+                  source.document.status === 'partial' ? 'Partially extracted' : 'Indexed'
+                }</span>}
+                {!!source.document?.warnings.length && <ul className="basis-full text-amber-800">
+                  {source.document.warnings.map(warning => <li key={warning}>{warning}</li>)}
+                </ul>}
                 <label className="cursor-pointer underline">
                   Replace and reindex
-                  <input type="file" className="sr-only" accept=".txt,.md" disabled={busy} aria-label={`Replace ${source.label}`}
+                  <input type="file" className="sr-only" accept={accept} disabled={busy} aria-label={`Replace ${source.label}`}
                     onChange={event => {
                       const file = event.target.files?.[0];
                       event.target.value = '';

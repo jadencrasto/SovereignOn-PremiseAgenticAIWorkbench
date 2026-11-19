@@ -14,9 +14,13 @@ from typing import Annotated, Literal
 from backend.local_history import _safe_path, _strict_json, write_local_snapshot
 from backend.multimodal.text_file import MAX_TEXT_FILE_BYTES, TextFileError, decode_text_file, text_filename
 from backend.rag.grounding import Evidence, build_context, validate_answer
+from backend.rag.local_documents import (
+    MAX_DOCUMENT_BYTES, DocumentProjection, available_formats,
+)
 from backend.rag.local_relevance import (
-    LineContext, condition_matches, conditions, entities, interval_in, lexical_text, line_contexts,
-    measurement_conditions, measurement_match, measurements, merge_conditions, quantities, resolve_entities,
+    LineContext, RequestedFact, condition_matches, conditions, effective_conditions, entities, fact_evidence, interval_in, lexical_text,
+    line_contexts, measurement_conditions, measurement_match, measurements, merge_conditions, quantities,
+    requested_fact, resolve_entities, table_component, table_equipment,
 )
 
 MAX_SOURCES = 8
@@ -30,7 +34,7 @@ KNOWLEDGE_FIELD = 'local_knowledge_v1'
 KNOWLEDGE_PRODUCER = 'local-verified-knowledge'
 INSUFFICIENT = 'The available local sources do not establish an answer to this question.'
 _LOCATOR_VERSION = 'local-text-lines-v1'
-_MAX_SNAPSHOT = 28000
+_MAX_SNAPSHOT = 128 * 1024
 _INTENT = re.compile(
     r'^\s*(?:according to|from|using|use)\s+(?:(?:my|the|our|your)\s+)?(?:registered\s+)?'
     r'local\s+(?:knowledge(?:\s+sources)?|sources)\b[\s,:-]*', re.IGNORECASE,
@@ -42,11 +46,22 @@ _PART_BOUNDARY = re.compile(
     rf'(?:[?;,]\s*(?:and\s+)?|\s+and\s+)(?={_QUESTION_START})', re.IGNORECASE,
 )
 _SECTION_QUERY = re.compile(r'^(?:which|what|where)\b.*\b(?:section|heading)\b', re.IGNORECASE)
+_OPERATING_STATES = {'normal', 'alarm', 'warning', 'startup', 'shutdown', 'steady'}
+_CONDITION_COMPARISON = re.compile(
+    r'^(?:compare|contrast) (?:the )?(normal|alarm|warning|startup|shutdown) and '
+    r'(normal|alarm|warning|startup|shutdown) (.+)', re.IGNORECASE,
+)
+_TRAILING_STATE = re.compile(
+    r'\b(?:under|during|in) (normal|alarm|warning|startup|shutdown|steady) (?:conditions?|operation|mode)$', re.I,
+)
 _STOP = set(('a an and are as at be by can compare contrast could did do does difference differences differ conflict '
              'disagree both each for from how in is it its me of on or should show so tell than that the their them '
              'there these this to use was were what when where which who why will with would my our your source '
              'sources note notes document documents say says about between according find please').split())
-_METRIC = re.compile(r'\b(?:limit|pressure|temperature|interval|inspect|recommend|capacity|tolerance|flow)\w*\b', re.I)
+_METRIC = re.compile(
+    r'\b(?:limit|pressure|temperature|interval|inspect|recommend|capacity|tolerance|flow|torque|speed|voltage|threshold)\w*\b',
+    re.I,
+)
 _OPERATING_HEADINGS = {'operating envelope', 'operating limits'}
 _DOCUMENT_HEADING = re.compile(r'\b(?:handbook|manual|amendment)$')
 _SINGULAR_PUMP = re.compile(r'\b(?:the|this|that|a)\s+pump\b', re.I)
@@ -94,11 +109,21 @@ class KnowledgeScope(BaseModel):
                 else source_ids is not None and set(source_ids) == {source.source_id for source in self.sources})
 
 
+class EvidenceField(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    citation: int = Field(ge=1, le=MAX_CONTEXT_PASSAGES)
+    attribute: str = Field(pattern=r'^[a-z][a-z_]{0,29}$')
+    start: int = Field(ge=0, lt=320)
+    end: int = Field(ge=1, le=320)
+    value_digest: _DIGEST
+
+
 class EvidenceCoverage(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     question: str = Field(min_length=1, max_length=MAX_QUESTION)
     state: Literal['supported', 'incomplete', 'absent', 'conflict']
     citations: list[Annotated[int, Field(ge=1, le=MAX_CONTEXT_PASSAGES)]] = Field(max_length=MAX_PASSAGES)
+    fields: list[EvidenceField] | None = Field(default=None, max_length=MAX_CONTEXT_PASSAGES * 4)
 
 
 class KnowledgeReceipt(BaseModel):
@@ -129,6 +154,10 @@ class KnowledgeReceipt(BaseModel):
                     or (part.state == 'absent' and numbers)
                     or (part.state in ('supported', 'conflict') and not numbers)):
                 raise ValueError('Invalid evidence coverage')
+            fields = part.fields or ()
+            if (any(field.citation not in numbers or field.start >= field.end for field in fields)
+                    or len({(field.citation, field.start, field.end) for field in fields}) != len(fields)):
+                raise ValueError('Invalid evidence field')
             used.update(numbers)
         if used != set(range(1, len(self.citations) + 1)):
             raise ValueError('Citations missing from evidence coverage')
@@ -160,17 +189,38 @@ def question_parts(question):
     parts = tuple(part.strip(' ,;?') for part in _PART_BOUNDARY.split(question))
     if not all(parts) or len(parts) > MAX_QUESTION_PARTS:
         raise KnowledgeQuestionError
+    if len(parts) == 1 and (comparison := _CONDITION_COMPARISON.fullmatch(parts[0])):
+        return tuple(f'{state} {comparison[3]}' for state in (comparison[1], comparison[2]))
     if len(parts) == 1 and not _COMPARE.search(question):
         match = re.fullmatch(r'(what (?:is|are) )(.+?) and (.+)', parts[0], re.IGNORECASE)
-        if match and len(_terms(match[2])) >= 2 and len(_terms(match[3])) >= 2:
-            return (match[1] + match[2], match[1] + match[3])
+        if match:
+            left, right = match[2], match[3]
+            facts = [requested_fact(f'{match[1]}{item}', measurements(item)) for item in (left, right)]
+            typed = all(fact and fact.attribute != 'unrecognized' for fact in facts)
+            if typed or (len(_terms(left)) >= 2 and len(_terms(right)) >= 2):
+                tags = entities(f'{left} {right}')
+                if typed and len(tags) == 1:
+                    tag = next(iter(tags.values()))
+                    left = left if entities(left) else f'{left} for {tag}'
+                    right = right if entities(right) else f'{right} for {tag}'
+                    if all(fact.attribute not in ('procedure', 'alarm') for fact in facts):
+                        left_states = conditions(left) & _OPERATING_STATES
+                        right_states = conditions(right)
+                        if len(left_states) == 1 and not right_states:
+                            right += f' under {next(iter(left_states))} conditions'
+                        elif not conditions(left) and (shared := _TRAILING_STATE.search(match[3])):
+                            left += f' under {shared[1]} conditions'
+                return (match[1] + left, match[1] + right)
     return parts
 
 
 def _terms(text):
+    text = re.sub(r'\btightening moment\b', 'torque', text.casefold())
     return {'inspect' if word in {'inspection', 'inspections', 'inspecting'} else
+            'interval' if word in {'frequency', 'frequencies', 'cadence'} else
+            'normal' if word == 'normally' else
             word.removesuffix('s') if len(word) > 4 and not word.endswith('ss') else word
-            for word in re.findall(r'[^\W_]+', text.casefold()) if word not in _STOP}
+            for word in re.findall(r'[^\W_]+', text) if word not in _STOP}
 
 
 def _encode(data):
@@ -191,6 +241,9 @@ class Passage:
     context: LineContext
 
     def equipment(self):
+        if self.context.table_header:
+            tagged = table_equipment(self.text, self.context.table_header)
+            return entities(self.context.entity_context) if tagged is None else tagged
         return entities(self.text) or entities(self.context.entity_context)
 
     def values(self):
@@ -230,13 +283,23 @@ class Source:
     digest: str
     text: str
     passages: tuple[Passage, ...]
+    document: DocumentProjection | None = None
 
     def reference(self):
         return {'source_id': self.id, 'revision': self.revision, 'digest': self.digest}
 
     def public(self):
-        return {**self.reference(), 'label': self.label, 'bytes': len(self.text.encode('utf-8')),
-                'passages': len(self.passages)}
+        result = {**self.reference(), 'label': self.label, 'bytes': len(self.text.encode('utf-8')),
+                  'passages': len(self.passages)}
+        if self.document:
+            result['document'] = self.document.public()
+        return result
+
+    def locator(self, line, column=None):
+        if not self.document:
+            return None
+        loc = next((item for item in self.document.locators if item.line == line), None)
+        return loc.public(self.document.format, column) if loc else None
 
 
 @dataclass(frozen=True)
@@ -247,23 +310,29 @@ class RetrievalQuestion:
     conditions: set[str]
     quantities: set[str]
     measurements: tuple
+    fact: RequestedFact | None
 
 
 def _match(question, passage, label):
     equipment = passage.equipment()
     if question.requested_entities and (len(equipment) != 1 or next(iter(equipment)) not in question.requested_entities):
         return None
-    path = ' '.join(section.title for section in passage.context.sections)
+    headings = tuple(section.title for section in passage.context.sections)
+    path = ' '.join(headings)
     heading_conditions = merge_conditions(*(conditions(section.title) for section in passage.context.sections))
     body_conditions = conditions(passage.text)
     table = passage.context.table_header
     values = passage.values()
-    qualified = [value for value in values if not question.conditions or condition_matches(
-        question.conditions,
-        merge_conditions(heading_conditions, measurement_conditions(passage.text, value, table) or body_conditions),
-    )]
+    qualified = [value for value in values
+                 if (tags := effective_conditions(passage.text, value, table, headings)) is not None
+                 and condition_matches(question.conditions, tags)]
     if question.conditions and not qualified:
         if values or not condition_matches(question.conditions, merge_conditions(heading_conditions, body_conditions)):
+            return None
+    components = frozenset()
+    if question.fact:
+        supported, qualified, components = fact_evidence(question.fact, passage.text, table, headings, values, qualified)
+        if not supported:
             return None
     if question.quantities and values and not any(value.dimension in question.quantities for value in qualified):
         return None
@@ -276,6 +345,12 @@ def _match(question, passage, label):
             return None
         if match not in reasons:
             reasons.append(match)
+    if question.measurements:
+        qualified = [value for value in qualified if any(
+            measurement_match(measure, value) for measure in question.measurements)]
+    # A broad query can return several explicitly separated readings, within a part-wide budget.
+    if len(qualified) > 4:
+        return None
 
     body = _terms(lexical_text(passage.text, values))
     context = _terms(path) | _terms(' '.join(table))
@@ -284,7 +359,7 @@ def _match(question, passage, label):
     overlap = len(query & (body | context | _terms(label)))
     required = max(min(2, len(query)), (len(query) + 1) // 2)
     exact_section = len(query) >= 2 and query <= context
-    technical = bool(question.requested_entities or question.measurements)
+    technical = bool(question.requested_entities or question.measurements or question.fact)
     if query and not (exact_section or (overlap >= required and body_hits >= min(2, required))
                       or (technical and len(query & (body | context)) >= max(1, required - 1))):
         return None
@@ -295,7 +370,7 @@ def _match(question, passage, label):
     score = (measurement_rank, int(bool(question.conditions)),
              int(any(value.dimension in question.quantities for value in qualified)),
              int(exact_section), len(query & _terms(leaf)), body_hits, overlap)
-    return score, reasons
+    return score, reasons, components, qualified
 
 
 def _source(source_id, label, revision, raw, media_type):
@@ -308,6 +383,21 @@ def _source(source_id, label, revision, raw, media_type):
     if not passages:
         raise TextFileError('Include some body text in the source.')
     return Source(source_id, label, revision, _digest(text), text, passages)
+
+
+def _document_source(source_id, label, revision, document):
+    text_filename(label, '.' + document.format)
+    passages = tuple(_passages(document.text, markdown=True))
+    locations = {item.line: item for item in document.locators}
+    searchable = [part for part in passages if part.context.searchable]
+    if not searchable:
+        raise TextFileError('The document has no supported extractable evidence.')
+    for part in searchable:
+        location = locations.get(part.line)
+        if (location is None or (location.width or 0) != len(part.context.table_header)):
+            raise TextFileError('The document source positions could not be verified.')
+    digest = hashlib.sha256(_encode(document.model_dump(exclude_none=True))).hexdigest()
+    return Source(source_id, label, revision, digest, document.text, passages, document)
 
 
 class LocalKnowledge:
@@ -349,7 +439,11 @@ class LocalKnowledge:
             sources = {}
             for row in payload['sources']:
                 ref = Revision.model_validate({key: row[key] for key in ('source_id', 'revision', 'digest')})
-                source = _source(ref.source_id, row['label'], ref.revision, row['text'].encode('utf-8'), 'text/plain')
+                if 'document' in row:
+                    projection = DocumentProjection.model_validate(row['document'])
+                    source = _document_source(ref.source_id, row['label'], ref.revision, projection)
+                else:
+                    source = _source(ref.source_id, row['label'], ref.revision, row['text'].encode('utf-8'), 'text/plain')
                 if source.digest != ref.digest or source.id in sources:
                     raise ValueError
                 sources[source.id] = source
@@ -362,7 +456,9 @@ class LocalKnowledge:
         self._limits(sources)
         if self.path is not None:
             payload = {'owner': self.owner, 'corpus': self.id, 'sources': [
-                {**source.reference(), 'label': source.label, 'text': source.text}
+                {**source.reference(), 'label': source.label, **(
+                    {'document': source.document.model_dump(exclude_none=True)} if source.document
+                    else {'text': source.text})}
                 for source in sources.values()
             ]}
             key_id, key = self.keys.signing_key()
@@ -376,6 +472,7 @@ class LocalKnowledge:
         self._authorize(owner)
         return {'mode': RETRIEVAL_MODE, 'retention': 'durable' if self.path else 'disposable',
                 'max_sources': MAX_SOURCES, 'max_source_bytes': MAX_TEXT_FILE_BYTES,
+                'document_formats': available_formats(), 'max_document_bytes': MAX_DOCUMENT_BYTES,
                 'max_corpus_bytes': MAX_CORPUS_BYTES, 'sources': [s.public() for s in self._sources.values()]}
 
     def _existing(self, source_id, revision):
@@ -386,13 +483,24 @@ class LocalKnowledge:
 
     def register(self, owner, label, raw, media_type, *, source_id=None, revision=None):
         self._authorize(owner)
+        return self._register(label, source_id, revision,
+                              lambda sid, rev: _source(sid, label, rev, raw, media_type))
+
+    def register_document(self, owner, label, projection, *, source_id=None, revision=None):
+        self._authorize(owner)
+        return self._register(label, source_id, revision,
+                              lambda sid, rev: _document_source(sid, label, rev, projection))
+
+    def _register(self, label, source_id, revision, build):
         old = self._existing(source_id, revision) if source_id else None
         if old and old.revision >= 2**31 - 1:
             raise KnowledgeConflict('The source has reached its revision limit.')
-        source = _source(old.id if old else uuid4().hex, label, old.revision + 1 if old else 1, raw, media_type)
+        source = build(old.id if old else uuid4().hex, old.revision + 1 if old else 1)
         if old and (source.label, source.digest) == (old.label, old.digest):
             return old.public()
         if any(current.id != source.id and (current.digest == source.digest
+               or (current.document and source.document
+                   and current.document.content_sha256 == source.document.content_sha256)
                or current.label.casefold() == source.label.casefold()) for current in self._sources.values()):
             raise KnowledgeConflict('This content or filename is already registered. Replace the existing source to reindex it.')
         self._save({**self._sources, source.id: source})
@@ -434,11 +542,13 @@ class LocalKnowledge:
         if values and re.search(r'\bconvert\b', question, re.I) and any(not value.convertible for value in values):
             clarification = clarification or 'The registered converter cannot convert this measurement. Ask for the source value in its original unit.'
         query = _terms(lexical_text(question, values))
-        if _SECTION_QUERY.search(question):
+        navigation = bool(_SECTION_QUERY.search(question))
+        if navigation:
             query -= {'section', 'heading', 'describe', 'contain', 'cover', 'mention'}
         if values:
             query -= {'equivalent', 'match', 'correspond', 'value', 'listed', 'specified', 'equal', 'equals'}
-        return RetrievalQuestion(query, requested, clarification, conditions(question), quantities(question), values)
+        fact = requested_fact(question, values, navigation=navigation)
+        return RetrievalQuestion(query, requested, clarification, conditions(question), quantities(question), values, fact)
 
     def retrieve(self, owner, question, source_ids=None):
         self._authorize(owner)
@@ -455,7 +565,7 @@ class LocalKnowledge:
             matches = []
             for passage in source.passages:
                 if passage.context.searchable and (match := _match(target, passage, source.label)):
-                    score, _ = match
+                    score, _, _, _ = match
                     matches.append((score, passage))
             matches.sort(key=lambda row: (tuple(-value for value in row[0]), row[1].index))
             section_counts, block_counts = {}, {}
@@ -541,6 +651,7 @@ class LocalKnowledge:
                 or not all(self._matches_revision(dep) for dep in receipt.dependencies)):
             return None
         citations = []
+        cited_passages = []
         deps = {(dep.source_id, dep.revision, dep.digest) for dep in receipt.dependencies}
         for number, ref in enumerate(receipt.citations, 1):
             if (ref.source_id, ref.revision, ref.digest) not in deps:
@@ -555,6 +666,11 @@ class LocalKnowledge:
                         'passage_id': f'{source.id}_chunk_{passage.index}', 'line': passage.line,
                         'start': passage.start, 'end': passage.end, 'excerpt': passage.text}
             citation['line_end'] = passage.line
+            if source.document:
+                locator = source.locator(passage.line)
+                if locator is None:
+                    return None
+                citation['document_locator'] = locator
             if passage.context.sections:
                 leaf = passage.context.sections[-1]
                 citation.update(heading=source.text.split('\n')[leaf.line - 1].strip(), heading_line=leaf.line)
@@ -571,15 +687,37 @@ class LocalKnowledge:
             if ref.match_reasons:
                 citation['match_reasons'] = ref.match_reasons
             citations.append(citation)
+            cited_passages.append(passage)
         result = {'state': 'grounded' if citations else 'insufficient', 'citations': citations}
         if receipt.scope:
             result['scope'] = receipt.scope.model_dump()
-            result['coverage'] = [part.model_dump() for part in receipt.coverage]
+            result['coverage'] = []
+            for part in receipt.coverage:
+                entry = part.model_dump(exclude={'fields'})
+                if part.fields:
+                    entry['fields'] = []
+                    for field in part.fields:
+                        passage = cited_passages[field.citation - 1]
+                        value = next((item for item in passage.values()
+                                      if (item.start, item.end) == (field.start, field.end)), None)
+                        if value is None or _digest(passage.text[field.start:field.end]) != field.value_digest:
+                            return None
+                        evidence = _field_view(passage, value, field.attribute, field.citation)
+                        if evidence is None:
+                            return None
+                        source = self._sources[receipt.citations[field.citation - 1].source_id]
+                        if source.document:
+                            locator = source.locator(passage.line, evidence.get('column'))
+                            if locator is None:
+                                return None
+                            evidence['document_locator'] = locator
+                        entry['fields'].append(evidence)
+                result['coverage'].append(entry)
             if citations and any(part.state in ('absent', 'incomplete') for part in receipt.coverage):
                 result['state'] = 'partial'
         return result
 
-    def _select(self, owner, refs, proposed):
+    def _select(self, owner, refs, proposed, target, matches):
         """Validate exact per-part membership before including passages in an answer."""
         try:
             if not isinstance(proposed, str) or len(proposed) > 2048:
@@ -592,7 +730,10 @@ class LocalKnowledge:
         if not selected:
             return (), False
         matched = {label: self._passage_for(item) for label, item in refs.items()}
-        conflicts = _conflicting_labels(matched, set(selected))
+        conflicts = _conflicting_labels(
+            matched, set(selected), target.fact,
+            {label: matches[item.chunk_id][3] for label, item in refs.items()},
+        )
         included = set(selected) | conflicts
         # Keep source ranking between documents and original line order within a document.
         order = {source: index for index, source in enumerate(dict.fromkeys(item.document_id for item in refs.values()))}
@@ -610,19 +751,29 @@ class LocalKnowledge:
         for question, refs, proposed in groups:
             target = self._question(question, source_ids)
             self.check_context(owner, refs)
-            for item in refs.values():
+            eligible, matches = {}, {}
+            for label, item in refs.items():
+                passage = self._passage_for(item)
+                if (item.document_id in source_ids and passage.context.searchable and not target.clarification
+                        and (match := _match(target, passage, item.filename))):
+                    eligible[label] = item
+                    matches[item.chunk_id] = match
+            for item in eligible.values():
                 deps[item.document_id] = self._sources[item.document_id].reference()
-            passages, conflict = self._select(owner, refs, proposed)
-            numbers, quotes = [], []
+            passages, conflict = self._select(owner, eligible, proposed, target, matches)
+            numbers, quotes, fields = [], [], []
             if passages:
                 comparison = bool(_COMPARE.search(question))
                 cited_entities = {tag for item in passages for tag in self._passage_for(item).equipment()}
                 missing_entities = not set(target.requested_entities) <= cited_entities
-                incomplete = missing_entities or (comparison and len(target.requested_entities) < 2
-                                                   and len({item.document_id for item in passages}) < 2)
+                cited_components = set().union(*(matches[item.chunk_id][2] for item in passages))
+                missing_components = target.fact is not None and not target.fact.components <= cited_components
+                incomplete = missing_entities or missing_components or (comparison and len(target.requested_entities) < 2
+                                                                        and len({item.document_id for item in passages}) < 2)
                 state = 'conflict' if conflict else 'incomplete' if incomplete else 'supported'
                 intro = ('The registered sources give conflicting values.' if conflict else
                          'Cited evidence is missing for at least one requested equipment identifier.' if missing_entities else
+                         'Cited evidence is missing for at least one requested component.' if missing_components else
                          'Only one source supplies cited evidence for this comparison.' if incomplete else
                          'Compare these passages from the registered sources.' if comparison else
                          'The registered sources provide these passages.')
@@ -630,14 +781,36 @@ class LocalKnowledge:
                     evidence, number = citations.setdefault(item.chunk_id, (
                         {**deps[item.document_id], 'passage': item.chunk_index, 'excerpt_digest': _digest(item.text),
                          'match_reasons': []}, len(citations) + 1))
-                    if match := _match(target, self._passage_for(item), item.filename):
-                        evidence['match_reasons'] = list(dict.fromkeys([*evidence['match_reasons'], *match[1]]))
+                    evidence['match_reasons'] = list(dict.fromkeys([*evidence['match_reasons'], *matches[item.chunk_id][1]]))
                     numbers.append(number)
+                    passage = self._passage_for(item)
+                    values = matches[item.chunk_id][3]
+                    dense = passage.context.table_header or len(passage.values()) > 1
+                    if target.fact and target.fact.attribute != 'procedure' and values:
+                        for value in values:
+                            attribute = target.fact.attribute
+                            view = _field_view(passage, value, attribute, number)
+                            fields.append({
+                                'citation': number, 'attribute': attribute, 'start': value.start, 'end': value.end,
+                                'value_digest': _digest(view['value']),
+                            })
+                            if dense:
+                                label = ' / '.join([*view['equipment'], *view['conditions'],
+                                                    view.get('header', attribute.replace('_', ' '))])
+                                display_unit = '' if view['value'].endswith(view['unit']) else f' ({view["unit"]})'
+                                quotes.append(f'{label}: "{view["value"]}"{display_unit} [{number}]')
+                        if dense:
+                            continue
                     quotes.append(f'“{item.text}” [{number}]')
             else:
-                state = 'incomplete' if refs or target.clarification else 'absent'
+                state = 'incomplete' if eligible or target.clarification else 'absent'
                 intro = target.clarification or INSUFFICIENT
-            coverage.append({'question': question, 'state': state, 'citations': numbers})
+                if state == 'absent' and target.fact and target.fact.attribute not in ('unrecognized', 'limit'):
+                    attribute = {'time': 'interval or frequency', 'alarm': 'alarm threshold'}.get(
+                        target.fact.attribute, target.fact.attribute.replace('_', ' '))
+                    intro += f' No supporting passage was found for the requested {attribute}.'
+            coverage.append({'question': question, 'state': state, 'citations': numbers,
+                             **({'fields': fields} if fields else {})})
             sections.append('\n\n'.join([*([question] if len(groups) > 1 else []), intro, *quotes]))
         return '\n\n'.join(sections), {
             'corpus_id': self.id, 'index_version': _LOCATOR_VERSION, 'dependencies': list(deps.values()),
@@ -645,17 +818,44 @@ class LocalKnowledge:
         }
 
 
-def _conflicting_labels(passages, selected):
+def _field_view(passage, value, attribute, number):
+    headings = tuple(section.title for section in passage.context.sections)
+    tags = effective_conditions(passage.text, value, passage.context.table_header, headings)
+    if tags is None:
+        return None
+    view = {
+        'citation': number, 'attribute': attribute, 'value': passage.text[value.start:value.end],
+        'unit': value.source_unit, 'equipment': list(passage.equipment().values()), 'conditions': sorted(tags),
+        'line': passage.line, 'start': passage.start + value.start, 'end': passage.start + value.end,
+    }
+    if value.column is not None:
+        view.update(column=value.column + 1, header=passage.context.table_header[value.column],
+                    header_line=passage.context.table_header_line)
+    return view
+
+
+def _conflicting_labels(passages, selected, fact, qualified):
     """Compare like claims only within the same entity, condition and section wording."""
     groups = {}
     for label, passage in passages.items():
         sections = passage.context.sections
         path = tuple(section.title.casefold() for section in sections)
-        values = passage.values()
+        values = qualified[label]
+        equipment = passage.equipment()
+        if passage.context.table_header:
+            if fact is None or fact.attribute == 'procedure' or len(equipment) != 1:
+                continue
+            component = ' '.join((table_component(passage.text, passage.context.table_header) or '').casefold().split())
+            for value in values:
+                view = _field_view(passage, value, fact.attribute, 1)
+                header = re.sub(r'\s*\([^()]+\)\s*$', '', view['header']).casefold()
+                key = ('table', tuple(equipment), fact.attribute, header, component,
+                       tuple(view['conditions']), value.dimension)
+                groups.setdefault(key, []).append((label, value))
+            continue
         if len(values) != 1 or not _METRIC.search(f'{" / ".join(path)} {passage.text}'):
             continue
         value = values[0]
-        equipment = passage.equipment()
         body_conditions = measurement_conditions(passage.text, value, passage.context.table_header)
         # A heading that names this equipment anchors an explicitly qualified claim.
         # Document titles and generic operating wrappers can differ between sources.

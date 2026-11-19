@@ -121,3 +121,46 @@ test('technical citations show section ancestry and bounded match reasons as lit
  assert.match(html, /Source measurements.*80 °C/);
  assert.match(html, /Equivalent measurement in a supported unit/);
 });
+
+test('dense evidence shows only the selected field as an attributed value', () => {
+ const message = { id: 'dense', role: 'assistant', timestamp: '', content: 'Verified source value',
+   localKnowledge: {
+     state: 'grounded',
+     coverage: [{ question: 'Normal pressure?', state: 'supported', citations: [1],
+       fields: [{ citation: 1, attribute: 'pressure', value: '3', unit: 'bar',
+         equipment: ['P-101'], conditions: ['normal'], line: 4, column: 3, header: 'Pressure <bar>',
+         header_line: 2, start: 60, end: 61 }],
+     }],
+     citations: [{ number: 1, label: 'table.md', revision: 2, passage_id: 'chunk_0', line: 4,
+       measurements: ['3 bar', '9 bar'], excerpt: '| P-101 | Normal | 3 bar | 9 bar |' }],
+   } };
+ const html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /Attributed source values.*<strong>3 bar<\/strong>.*Pressure &lt;bar&gt;.*P-101.*normal/);
+ assert.match(html, /href="#evidence-dense-1">line 4, column 3<\/a>/);
+ assert.match(html, /table\.md.*line 4.*revision 2/);
+ assert.doesNotMatch(html, /Source measurements|<strong>9 bar<\/strong>/);
+});
+
+test('local document evidence exposes native positions and revision without projected line labels', () => {
+ const citations = [
+   { label: 'limits.pdf', position: { format: 'pdf', page: 2, block: 1 } },
+   { label: 'maintenance.docx', position: { format: 'docx', table: 1, row: 4 } },
+   { label: 'register.xlsx', position: { format: 'xlsx', sheet: 'Register <A>', range: 'A4:D4' } },
+ ];
+ const message = { id: 'documents', role: 'assistant', timestamp: '', content: 'Document measurements',
+   localKnowledge: { state: 'grounded', citations: citations.map((citation, index) => ({
+     label: citation.label, passage_id: String(index), number: index + 1, revision: 2, line: 99,
+     document_locator: citation.position, excerpt: 'Verified value',
+   })), coverage: [{ question: 'Normal torque?', state: 'supported', citations: [3],
+     fields: [{ citation: 3, attribute: 'torque', value: '26 N·m', unit: 'N·m',
+       equipment: ['P-503'], conditions: ['normal'], start: 10, end: 15, line: 99, column: 4,
+       document_locator: { ...citations[2].position, cell: 'D4' } }],
+   }] },
+ };
+ const html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /limits\.pdf.*page 2.*block 1.*revision 2/);
+ assert.match(html, /maintenance\.docx.*table 1, row 4.*revision 2/);
+ assert.match(html, /Register &lt;A&gt;.*cell D4/);
+ assert.match(html, /register\.xlsx.*range A4:D4.*revision 2/);
+ assert.doesNotMatch(html, /line 99/);
+});

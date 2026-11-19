@@ -5,7 +5,17 @@
  */
 
 import React, { useState } from 'react';
-import type { ChatMessage, ToolEvent } from '../../types';
+import type { ChatMessage, LocalDocumentLocator, ToolEvent } from '../../types';
+
+function documentPosition(locator: LocalDocumentLocator): string {
+  if (locator.format === 'xlsx') {
+    return `${locator.sheet} · ${locator.cell ? `cell ${locator.cell}` : `range ${locator.range}`}`;
+  }
+  const position = locator.table !== undefined
+    ? `table ${locator.table}, row ${locator.row}${locator.column !== undefined ? `, column ${locator.column}` : ''}`
+    : locator.format === 'pdf' ? `block ${locator.block}` : `paragraph ${locator.paragraph}`;
+  return locator.format === 'pdf' ? `page ${locator.page} · ${position}` : position;
+}
 import { MarkdownContent } from './MarkdownContent';
 import { SourceCard } from './SourceCard';
 import { Copy, Check, AlertTriangle, CheckCircle2 } from 'lucide-react';
@@ -410,6 +420,22 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 {part.citations.map(number => (
                   <a key={number} className="ml-1 underline" href={`#evidence-${message.id}-${number}`}>[{number}]</a>
                 ))}
+                {part.fields?.length ? (
+                  <ul aria-label="Attributed source values" className="mt-1 space-y-1 text-slate-700">
+                    {part.fields.map(field => (
+                      <li key={`${field.citation}-${field.start}-${field.end}`}>
+                        <strong>{field.value}{field.value.endsWith(field.unit) ? '' : ` ${field.unit}`}</strong>
+                        {' · '}{field.header || field.attribute.replaceAll('_', ' ')}
+                        {[...field.equipment, ...field.conditions].map(label => ` · ${label}`).join('')}
+                        {' · '}
+                        <a className="underline" href={`#evidence-${message.id}-${field.citation}`}>
+                          {field.document_locator ? documentPosition(field.document_locator)
+                            : `line ${field.line}${field.column !== undefined ? `, column ${field.column}` : ''}`}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -420,16 +446,21 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
               <details id={`evidence-${message.id}-${citation.number}`} key={citation.passage_id}
                 className="rounded-lg border border-slate-200 p-2 text-xs">
                 <summary className="cursor-pointer break-words font-medium">
-                  [{citation.number}] {citation.label} · {citation.line_end && citation.line_end > citation.line
-                    ? `lines ${citation.line}–${citation.line_end}` : `line ${citation.line}`} · revision {citation.revision}
+                  [{citation.number}] {citation.label} · {citation.document_locator
+                    ? documentPosition(citation.document_locator)
+                    : citation.line_end && citation.line_end > citation.line
+                      ? `lines ${citation.line}–${citation.line_end}` : `line ${citation.line}`} · revision {citation.revision}
                 </summary>
                 {citation.sections?.length ? <p className="mt-2 break-words font-medium">
-                  {citation.sections.map(section => `${section.title} (line ${section.line})`).join(' / ')}
+                  {citation.sections.map(section => citation.document_locator ? section.title
+                    : `${section.title} (line ${section.line})`).join(' / ')}
                 </p> : citation.heading && <p className="mt-2 break-words font-medium">
                   Section {citation.heading} · line {citation.heading_line}
                 </p>}
                 {citation.equipment?.length ? <p className="mt-1">Equipment · {citation.equipment.join(', ')}</p> : null}
-                {citation.measurements?.length ? <p className="mt-1">Source measurements · {citation.measurements.join(', ')}</p> : null}
+                {citation.measurements?.length && !message.localKnowledge?.coverage?.some(
+                  part => part.fields?.some(field => field.citation === citation.number)
+                ) ? <p className="mt-1">Source measurements · {citation.measurements.join(', ')}</p> : null}
                 {citation.table_header && <p className="mt-1 break-words">Table columns · {citation.table_header}</p>}
                 <p className="mt-2 whitespace-pre-wrap break-words">{citation.excerpt}</p>
                 {citation.match_reasons?.length ? <p className="mt-2 text-slate-600">

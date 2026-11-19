@@ -48,6 +48,11 @@ export interface LocalKnowledgeScope {
   sources: { source_id: string; label: string; revision: number; digest: string }[];
 }
 
+export type LocalDocumentLocator =
+  | { format: 'pdf'; page: number; block?: number; table?: number; row?: number; column?: number }
+  | { format: 'docx'; paragraph?: number; table?: number; row?: number; column?: number }
+  | { format: 'xlsx'; sheet: string; range: string; cell?: string };
+
 export interface LocalKnowledgeResult {
   state: 'grounded' | 'partial' | 'insufficient' | 'unavailable';
   scope?: LocalKnowledgeScope;
@@ -55,6 +60,21 @@ export interface LocalKnowledgeResult {
     question: string;
     state: 'supported' | 'incomplete' | 'absent' | 'conflict';
     citations: number[];
+    fields?: {
+      citation: number;
+      attribute: string;
+      value: string;
+      unit: string;
+      equipment: string[];
+      conditions: string[];
+      line: number;
+      column?: number;
+      header?: string;
+      header_line?: number;
+      start: number;
+      end: number;
+      document_locator?: LocalDocumentLocator;
+    }[];
   }[];
   citations: {
     source_id: string;
@@ -75,6 +95,7 @@ export interface LocalKnowledgeResult {
     start: number;
     end: number;
     excerpt: string;
+    document_locator?: LocalDocumentLocator;
   }[];
 }
 

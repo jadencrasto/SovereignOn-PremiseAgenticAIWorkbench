@@ -19,6 +19,7 @@ from backend.auth.dependencies import get_current_user
 from backend.auth.request_context import dispatch_identity_resolver, request_tools_enabled
 from backend.health import routes as health
 from backend.multimodal.text_file import MAX_TEXT_FILE_BYTES, TextFileError
+from backend.rag.local_documents import MAX_DOCUMENT_BYTES, document_format, import_document, validate_document_upload
 from backend.rag.local_knowledge import (
     KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeQuestionError, KnowledgeScope, knowledge_question, question_parts,
 )
@@ -89,6 +90,8 @@ async def change_local_retention(body: RetentionChange, request: Request, user=D
 
 def _owned_knowledge(request, user):
     state = request.app.state
+    if not state.settings.is_local_dev:
+        raise HTTPException(404, "Local knowledge is unavailable.")
     resolve = dispatch_identity_resolver.get()
     current = resolve() if resolve else None
     if (current is None or current.id != user.id or current.role != 'viewer'
@@ -104,17 +107,57 @@ async def read_local_knowledge(request: Request, user=Depends(get_current_user))
     return _owned_knowledge(request, user).status(user.id)
 
 
-async def _register_knowledge(request, user, filename, source_id=None, revision=None):
-    _owned_knowledge(request, user)
+async def _read_knowledge_upload(request, limit, message):
     payload = bytearray()
     async for chunk in request.stream():
-        if len(payload) + len(chunk) > MAX_TEXT_FILE_BYTES:
-            raise HTTPException(413, "The text file exceeds 2 KiB.")
+        if len(payload) + len(chunk) > limit:
+            raise HTTPException(413, message)
         payload.extend(chunk)
+    return bytes(payload)
+
+
+async def _read_document(request, kind):
+    lock = request.app.state.local_document_intake
+    if lock.locked():
+        raise HTTPException(409, "A local document import is already in progress.")
+    await lock.acquire()
     try:
+        raw = await asyncio.wait_for(
+            _read_knowledge_upload(request, MAX_DOCUMENT_BYTES, "The document exceeds 512 KiB."), timeout=15,
+        )
+        worker = asyncio.get_running_loop().run_in_executor(None, import_document, kind, raw)
+    except TimeoutError:
+        lock.release()
+        raise HTTPException(408, "The local document upload timed out.") from None
+    except BaseException:
+        lock.release()
+        raise
+
+    def release(future):
+        lock.release()
+        if not future.cancelled():
+            future.exception()
+
+    worker.add_done_callback(release)
+    document = await asyncio.shield(worker)
+    if await request.is_disconnected():
+        raise HTTPException(400, "The local document upload was disconnected.")
+    return document
+
+
+async def _register_knowledge(request, user, filename, source_id=None, revision=None):
+    _owned_knowledge(request, user)
+    media_type = request.headers.get('content-type', '')
+    try:
+        if kind := document_format(filename):
+            validate_document_upload(filename, media_type, kind)
+            projection = await _read_document(request, kind)
+            return _owned_knowledge(request, user).register_document(
+                user.id, filename, projection, source_id=source_id, revision=revision,
+            )
+        payload = await _read_knowledge_upload(request, MAX_TEXT_FILE_BYTES, "The text file exceeds 2 KiB.")
         return _owned_knowledge(request, user).register(
-            user.id, filename, bytes(payload), request.headers.get('content-type', ''),
-            source_id=source_id, revision=revision,
+            user.id, filename, payload, media_type, source_id=source_id, revision=revision,
         )
     except TextFileError as exc:
         raise HTTPException(exc.status, str(exc)) from None
