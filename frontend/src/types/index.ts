@@ -64,8 +64,14 @@ export interface LocalKnowledgeResult {
     passage_id: string;
     number: number;
     line: number;
+    line_end?: number;
     heading?: string;
     heading_line?: number;
+    sections?: { id: string; title: string; line: number; level: number }[];
+    equipment?: string[];
+    measurements?: string[];
+    table_header?: string;
+    match_reasons?: ('equipment' | 'section' | 'exact_measurement' | 'equivalent_measurement' | 'within_range')[];
     start: number;
     end: number;
     excerpt: string;

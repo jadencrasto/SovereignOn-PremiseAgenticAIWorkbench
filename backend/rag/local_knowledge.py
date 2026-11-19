@@ -1,7 +1,6 @@
 """Bounded lexical retrieval for the explicitly registered local_dev corpus."""
 
 from dataclasses import dataclass
-from decimal import Decimal
 import hashlib
 import hmac
 import json
@@ -15,6 +14,10 @@ from typing import Annotated, Literal
 from backend.local_history import _safe_path, _strict_json, write_local_snapshot
 from backend.multimodal.text_file import MAX_TEXT_FILE_BYTES, TextFileError, decode_text_file, text_filename
 from backend.rag.grounding import Evidence, build_context, validate_answer
+from backend.rag.local_relevance import (
+    LineContext, condition_matches, conditions, entities, interval_in, lexical_text, line_contexts,
+    measurement_conditions, measurement_match, measurements, merge_conditions, quantities, resolve_entities,
+)
 
 MAX_SOURCES = 8
 MAX_CORPUS_BYTES = 8192
@@ -43,8 +46,8 @@ _STOP = set(('a an and are as at be by can compare contrast could did do does di
              'disagree both each for from how in is it its me of on or should show so tell than that the their them '
              'there these this to use was were what when where which who why will with would my our your source '
              'sources note notes document documents say says about between according find please').split())
-_NUM = re.compile(r'(?<!\w)[+-]?\d+(?:\.\d+)?(?!\w)')
-_METRIC = re.compile(r'\b(?:limit|pressure|temperature|interval|inspect|recommend|capacity|tolerance)\w*\b', re.I)
+_METRIC = re.compile(r'\b(?:limit|pressure|temperature|interval|inspect|recommend|capacity|tolerance|flow)\w*\b', re.I)
+_SINGULAR_PUMP = re.compile(r'\b(?:the|this|that|a)\s+pump\b', re.I)
 _EVIDENCE_ID = Annotated[str, StringConstraints(pattern=r'^C[0-9a-f]{32}_[1-6]$')]
 _SOURCE_ID = Annotated[str, StringConstraints(pattern=r'^[0-9a-f]{32}$')]
 KnowledgeSourceIds = Annotated[list[_SOURCE_ID], Field(min_length=1, max_length=MAX_SOURCES)]
@@ -62,6 +65,9 @@ class Revision(BaseModel):
 class Citation(Revision):
     passage: int = Field(ge=0, lt=1200)
     excerpt_digest: _DIGEST
+    match_reasons: list[Literal['equipment', 'section', 'exact_measurement', 'equivalent_measurement', 'within_range']] | None = (
+        Field(default=None, max_length=5)
+    )
 
 
 class ScopedSource(Revision):
@@ -180,18 +186,24 @@ class Passage:
     start: int
     end: int
     text: str
-    heading: str
-    heading_line: int | None
+    context: LineContext
+
+    def equipment(self):
+        return entities(self.text) or entities(self.context.entity_context)
+
+    def values(self):
+        return measurements(self.text, self.context.table_header,
+                            topic=' '.join(section.title for section in self.context.sections))
 
 
-def _passages(text):
+def _passages(text, *, markdown):
     """Keep source lines and offsets. Oversized lines split on word boundaries."""
-    heading, heading_line, offset, index = '', None, 0, 0
-    for line_no, line in enumerate(text.split('\n'), 1):
+    offset, index = 0, 0
+    contexts = line_contexts(text, markdown=markdown)
+    for line_no, (line, context) in enumerate(zip(text.split('\n'), contexts), 1):
         stripped = line.strip()
-        if re.match(r'^#{1,6}\s+', stripped):
-            heading, heading_line = stripped, line_no
-        elif stripped:
+        # Preserve the original passage ordinal and excerpt bytes for signed L9-L10 receipts.
+        if stripped and not re.match(r'^#{1,6}\s+', stripped):
             start = len(line) - len(line.lstrip())
             end = len(line.rstrip())
             while start < end:
@@ -200,7 +212,7 @@ def _passages(text):
                     boundary = line.rfind(' ', start, stop)
                     if boundary > start:
                         stop = boundary
-                yield Passage(index, line_no, offset + start, offset + stop, line[start:stop], heading, heading_line)
+                yield Passage(index, line_no, offset + start, offset + stop, line[start:stop], context)
                 index += 1
                 start = stop
                 while start < end and line[start].isspace():
@@ -225,13 +237,72 @@ class Source:
                 'passages': len(self.passages)}
 
 
+@dataclass(frozen=True)
+class RetrievalQuestion:
+    terms: set[str]
+    requested_entities: tuple[str, ...]
+    clarification: str | None
+    conditions: set[str]
+    quantities: set[str]
+    measurements: tuple
+
+
+def _match(question, passage, label):
+    equipment = passage.equipment()
+    if question.requested_entities and (len(equipment) != 1 or next(iter(equipment)) not in question.requested_entities):
+        return None
+    path = ' '.join(section.title for section in passage.context.sections)
+    heading_conditions = merge_conditions(*(conditions(section.title) for section in passage.context.sections))
+    body_conditions = conditions(passage.text)
+    table = passage.context.table_header
+    values = passage.values()
+    qualified = [value for value in values if not question.conditions or condition_matches(
+        question.conditions,
+        merge_conditions(heading_conditions, measurement_conditions(passage.text, value, table) or body_conditions),
+    )]
+    if question.conditions and not qualified:
+        if values or not condition_matches(question.conditions, merge_conditions(heading_conditions, body_conditions)):
+            return None
+    if question.quantities and values and not any(value.dimension in question.quantities for value in qualified):
+        return None
+    if question.quantities and any(value.dimension not in question.quantities for value in question.measurements):
+        return None
+    reasons = ['equipment'] if question.requested_entities else []
+    for measure in question.measurements:
+        match = next((reason for candidate in qualified if (reason := measurement_match(measure, candidate))), None)
+        if match is None:
+            return None
+        if match not in reasons:
+            reasons.append(match)
+
+    body = _terms(lexical_text(passage.text, values))
+    context = _terms(path) | _terms(' '.join(table))
+    query = question.terms
+    body_hits = len(query & body)
+    overlap = len(query & (body | context | _terms(label)))
+    required = max(min(2, len(query)), (len(query) + 1) // 2)
+    exact_section = len(query) >= 2 and query <= context
+    technical = bool(question.requested_entities or question.measurements)
+    if query and not (exact_section or (overlap >= required and body_hits >= min(2, required))
+                      or (technical and len(query & (body | context)) >= max(1, required - 1))):
+        return None
+    if query & context:
+        reasons.append('section')
+    leaf = passage.context.sections[-1].title if passage.context.sections else ''
+    measurement_rank = 1 if 'within_range' in reasons else 2 if question.measurements else 0
+    score = (measurement_rank, int(bool(question.conditions)),
+             int(any(value.dimension in question.quantities for value in qualified)),
+             int(exact_section), len(query & _terms(leaf)), body_hits, overlap)
+    return score, reasons
+
+
 def _source(source_id, label, revision, raw, media_type):
     ext = '.md' if label.lower().endswith('.md') else '.txt'
     text_filename(label, ext)
     if ext == '.md' and media_type.split(';', 1)[0].strip().lower() in ('text/markdown', 'text/x-markdown'):
         media_type = 'text/plain' + (';' + media_type.split(';', 1)[1] if ';' in media_type else '')
     text = decode_text_file(raw, media_type).replace('\r\n', '\n').replace('\r', '\n')
-    passages = tuple(_passages(text))
+    passages = tuple(_passages(text, markdown=ext == '.md'))
     if not passages:
         raise TextFileError('Include some body text in the source.')
     return Source(source_id, label, revision, _digest(text), text, passages)
@@ -347,36 +418,64 @@ class LocalKnowledge:
         source = self._sources.get(ref.source_id)
         return source is not None and source.revision == ref.revision and source.digest == ref.digest
 
+    def _question(self, question, source_ids=None):
+        known = {tag for source in self._sources.values() if source_ids is None or source.id in source_ids
+                 for passage in source.passages if passage.context.searchable for tag in passage.equipment()}
+        requested, ambiguous = resolve_entities(question, known)
+        pumps = {tag.replace('-', '').replace(' ', '') for tag in known if re.match(r'^P[- ]?\d', tag)}
+        clarification = None
+        if ambiguous:
+            clarification = 'Which equipment identifier spelling should I use? Enter the exact tag from the source.'
+        elif not requested and _SINGULAR_PUMP.search(question) and len(pumps) > 1:
+            clarification = 'Which pump should I use? Specify an equipment identifier from the selected sources.'
+        values = measurements(question)
+        if values and re.search(r'\bconvert\b', question, re.I) and any(not value.convertible for value in values):
+            clarification = clarification or 'The registered converter cannot convert this measurement. Ask for the source value in its original unit.'
+        query = _terms(lexical_text(question, values))
+        if _SECTION_QUERY.search(question):
+            query -= {'section', 'heading', 'describe', 'contain', 'cover', 'mention'}
+        if values:
+            query -= {'equivalent', 'match', 'correspond', 'value', 'listed', 'specified', 'equal', 'equals'}
+        return RetrievalQuestion(query, requested, clarification, conditions(question), quantities(question), values)
+
     def retrieve(self, owner, question, source_ids=None):
         self._authorize(owner)
-        query = _terms(question)
-        section_query = bool(_SECTION_QUERY.search(question))
-        if section_query:
-            query -= {'section', 'heading', 'describe', 'contain', 'cover', 'mention'}
-        if not question or len(question) > MAX_QUESTION or not query or len(query) > 32:
+        if not question or len(question) > MAX_QUESTION:
             return ()
-        required = max(min(2, len(query)), (len(query) + 1) // 2)
+        target = self._question(question, source_ids)
+        if (target.clarification or len(target.terms) > 32
+                or not (target.terms or target.requested_entities or target.measurements)):
+            return ()
         ranked = []
         for position, source in enumerate(self._sources.values()):
             if source_ids is not None and source.id not in source_ids:
                 continue
             matches = []
             for passage in source.passages:
-                body = _terms(passage.text)
-                heading = _terms(passage.heading)
-                body_matches = len(query & body)
-                overlap = len(query & (body | heading | _terms(source.label)))
-                exact_heading = len(query) >= 2 and query <= heading
-                if exact_heading or (overlap >= required and body_matches >= min(2, required)):
-                    score = (body_matches, overlap)
+                if passage.context.searchable and (match := _match(target, passage, source.label)):
+                    score, _ = match
                     matches.append((score, passage))
-            matches.sort(key=lambda row: (-row[0][0], -row[0][1], row[1].index))
+            matches.sort(key=lambda row: (tuple(-value for value in row[0]), row[1].index))
+            section_counts, block_counts = {}, {}
             for rank, (score, passage) in enumerate(matches):
-                ranked.append((rank, -score[0], -score[1], position, source, passage))
-        ranked.sort(key=lambda row: row[:4])
+                section_rank = section_counts.get(passage.context.sections, 0)
+                section_counts[passage.context.sections] = section_rank + 1
+                block_rank = block_counts.get(passage.context.block_line, 0)
+                block_counts[passage.context.block_line] = block_rank + 1
+                key = (-score[0], -score[1], -score[2], section_rank, block_rank, rank, tuple(-value for value in score[3:]),
+                       position, passage.index)
+                ranked.append((key, source, passage))
+        ranked.sort(key=lambda row: row[0])
+        if len(target.requested_entities) > 1:
+            first = {tag: next((row for row in ranked if tag in row[2].equipment()), None)
+                     for tag in target.requested_entities}
+            reserved = [row for row in first.values() if row is not None]
+            ranked = reserved + [row for row in ranked if row not in reserved]
         result, seen = [], set()
-        for _, _, _, _, source, passage in ranked:
-            key = ' '.join(passage.text.casefold().split())
+        for _, source, passage in ranked:
+            key = (' '.join(passage.text.casefold().split()), tuple(passage.equipment()),
+                   tuple(sorted(conditions(' '.join(s.title for s in passage.context.sections)))),
+                   passage.context.table_header)
             if key in seen:
                 continue
             seen.add(key)
@@ -409,9 +508,18 @@ class LocalKnowledge:
 
     def model_evidence(self, owner, refs):
         self.check_context(owner, refs)
-        return [{'id': label, 'source': item.filename, 'passage': item.text,
-                 'heading': self._sources[item.document_id].passages[item.chunk_index].heading[:160]}
-                for label, item in refs.items()]
+        evidence = []
+        for label, item in refs.items():
+            passage = self._passage_for(item)
+            evidence.append({'id': label, 'source': item.filename, 'passage': item.text,
+                             'heading': ' / '.join(section.title for section in passage.context.sections)[:320],
+                             'equipment': list(passage.equipment().values()),
+                             'block_line': passage.context.block_line, 'block_kind': passage.context.block_kind,
+                             'table_header': ' | '.join(passage.context.table_header)[:200]})
+        return evidence
+
+    def _passage_for(self, item):
+        return self._sources[item.document_id].passages[item.chunk_index]
 
     def check_context(self, owner, refs):
         self._authorize(owner)
@@ -444,8 +552,22 @@ class LocalKnowledge:
             citation = {**source.reference(), 'number': number, 'label': source.label,
                         'passage_id': f'{source.id}_chunk_{passage.index}', 'line': passage.line,
                         'start': passage.start, 'end': passage.end, 'excerpt': passage.text}
-            if passage.heading:
-                citation.update(heading=passage.heading, heading_line=passage.heading_line)
+            citation['line_end'] = passage.line
+            if passage.context.sections:
+                leaf = passage.context.sections[-1]
+                citation.update(heading=source.text.split('\n')[leaf.line - 1].strip(), heading_line=leaf.line)
+                citation['sections'] = [
+                    {'id': f'{source.id}:r{source.revision}:line-{section.line}', 'title': section.title,
+                     'line': section.line, 'level': section.level} for section in passage.context.sections
+                ]
+            if passage.context.table_header:
+                citation['table_header'] = ' | '.join(passage.context.table_header)
+            if equipment := passage.equipment():
+                citation['equipment'] = list(equipment.values())
+            if values := passage.values():
+                citation['measurements'] = list(dict.fromkeys(value.raw for value in values))
+            if ref.match_reasons:
+                citation['match_reasons'] = ref.match_reasons
             citations.append(citation)
         result = {'state': 'grounded' if citations else 'insufficient', 'citations': citations}
         if receipt.scope:
@@ -467,9 +589,8 @@ class LocalKnowledge:
             return (), False
         if not selected:
             return (), False
-        headings = {label: self._sources[item.document_id].passages[item.chunk_index].heading
-                    for label, item in refs.items()}
-        conflicts = _conflicting_labels(refs, set(selected), headings)
+        matched = {label: self._passage_for(item) for label, item in refs.items()}
+        conflicts = _conflicting_labels(matched, set(selected))
         included = set(selected) | conflicts
         # Keep source ranking between documents and original line order within a document.
         order = {source: index for index, source in enumerate(dict.fromkeys(item.document_id for item in refs.values()))}
@@ -483,7 +604,9 @@ class LocalKnowledge:
         """Render exact passages and record what each question part can cite."""
         self.check_scope(owner, scope)
         deps, citations, coverage, sections = {}, {}, [], []
+        source_ids = {ref.source_id for ref in scope.sources}
         for question, refs, proposed in groups:
+            target = self._question(question, source_ids)
             self.check_context(owner, refs)
             for item in refs.values():
                 deps[item.document_id] = self._sources[item.document_id].reference()
@@ -491,22 +614,27 @@ class LocalKnowledge:
             numbers, quotes = [], []
             if passages:
                 comparison = bool(_COMPARE.search(question))
-                incomplete = comparison and len({item.document_id for item in passages}) < 2
+                cited_entities = {tag for item in passages for tag in self._passage_for(item).equipment()}
+                missing_entities = not set(target.requested_entities) <= cited_entities
+                incomplete = missing_entities or (comparison and len(target.requested_entities) < 2
+                                                   and len({item.document_id for item in passages}) < 2)
                 state = 'conflict' if conflict else 'incomplete' if incomplete else 'supported'
                 intro = ('The registered sources give conflicting values.' if conflict else
+                         'Cited evidence is missing for at least one requested equipment identifier.' if missing_entities else
                          'Only one source supplies cited evidence for this comparison.' if incomplete else
                          'Compare these passages from the registered sources.' if comparison else
                          'The registered sources provide these passages.')
                 for item in passages:
-                    _, number = citations.setdefault(item.chunk_id, (
-                        {**deps[item.document_id], 'passage': item.chunk_index, 'excerpt_digest': _digest(item.text)},
-                        len(citations) + 1,
-                    ))
+                    evidence, number = citations.setdefault(item.chunk_id, (
+                        {**deps[item.document_id], 'passage': item.chunk_index, 'excerpt_digest': _digest(item.text),
+                         'match_reasons': []}, len(citations) + 1))
+                    if match := _match(target, self._passage_for(item), item.filename):
+                        evidence['match_reasons'] = list(dict.fromkeys([*evidence['match_reasons'], *match[1]]))
                     numbers.append(number)
                     quotes.append(f'“{item.text}” [{number}]')
             else:
-                state = 'incomplete' if refs else 'absent'
-                intro = INSUFFICIENT
+                state = 'incomplete' if refs or target.clarification else 'absent'
+                intro = target.clarification or INSUFFICIENT
             coverage.append({'question': question, 'state': state, 'citations': numbers})
             sections.append('\n\n'.join([*([question] if len(groups) > 1 else []), intro, *quotes]))
         return '\n\n'.join(sections), {
@@ -515,19 +643,26 @@ class LocalKnowledge:
         }
 
 
-def _conflicting_labels(refs, selected, headings):
-    """Compare numeric claims with matching wording, unit and section headings."""
+def _conflicting_labels(passages, selected):
+    """Compare like claims only within the same entity, condition and section wording."""
     groups = {}
-    for label, item in refs.items():
-        phrase = ' '.join(item.text.casefold().split())
-        matches = list(_NUM.finditer(phrase))
-        if len(matches) != 1 or not _METRIC.search(phrase):
+    for label, passage in passages.items():
+        heading = ' / '.join(section.title.casefold() for section in passage.context.sections)
+        values = passage.values()
+        if len(values) != 1 or not _METRIC.search(f'{heading} {passage.text}'):
             continue
-        match = matches[0]
-        heading = ' '.join(headings[label].lstrip('#').casefold().split())
-        groups.setdefault((heading, phrase[:match.start()], phrase[match.end():]), []).append(
-            (label, item.document_id, Decimal(match[0]))
-        )
-    return {label for entries in groups.values() if any(label in selected for label, _, _ in entries)
-            for label, source, value in entries
-            if any(other_source != source and other_value != value for _, other_source, other_value in entries)}
+        value = values[0]
+        statement = ' '.join((passage.text[:value.start] + ' <measurement> ' + passage.text[value.end:]).casefold().split())
+        key = (heading, tuple(passage.equipment()), passage.context.table_header, statement, value.dimension)
+        groups.setdefault(key, []).append((label, value))
+    conflicts = set()
+    for entries in groups.values():
+        if not any(label in selected for label, _ in entries):
+            continue
+        for label, value in entries:
+            for other, candidate in entries:
+                if other == label or (bounds := interval_in(candidate, value)) is None:
+                    continue
+                if bounds[1] < value.low or bounds[0] > value.high:
+                    conflicts.update((label, other))
+    return conflicts

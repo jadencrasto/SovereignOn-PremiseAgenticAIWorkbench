@@ -104,3 +104,20 @@ test('multipart coverage links to real citations and shows uncovered parts', () 
  const scope = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message: turn }));
  assert.match(scope, /Selected local sources.*limits\.md.*rev\. 3.*pinned revision is unavailable/);
 });
+
+test('technical citations show section ancestry and bounded match reasons as literal text', () => {
+ const message = { id: 'technical', role: 'assistant', timestamp: '', content: 'Cited temperature threshold',
+   localKnowledge: { state: 'grounded', citations: [{
+     number: 1, label: 'manual.md', revision: 2, passage_id: 'chunk_0', line: 9, line_end: 9,
+     sections: [{ id: 'root', title: 'Plant <manual>', line: 1, level: 1 },
+       { id: 'limits', title: 'Operating limits', line: 5, level: 2 }],
+     equipment: ['HX-204'], measurements: ['80 °C'], match_reasons: ['equipment', 'equivalent_measurement'],
+     excerpt: 'HX-204 threshold: 80 °C.',
+   }] } };
+ const html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /manual\.md.*line 9.*revision 2/);
+ assert.match(html, /Plant &lt;manual&gt; \(line 1\) \/ Operating limits \(line 5\)/);
+ assert.match(html, /Equipment.*HX-204/);
+ assert.match(html, /Source measurements.*80 °C/);
+ assert.match(html, /Equivalent measurement in a supported unit/);
+});

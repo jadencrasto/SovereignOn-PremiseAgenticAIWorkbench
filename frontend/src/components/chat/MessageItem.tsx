@@ -420,12 +420,27 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
               <details id={`evidence-${message.id}-${citation.number}`} key={citation.passage_id}
                 className="rounded-lg border border-slate-200 p-2 text-xs">
                 <summary className="cursor-pointer break-words font-medium">
-                  [{citation.number}] {citation.label} · line {citation.line} · revision {citation.revision}
+                  [{citation.number}] {citation.label} · {citation.line_end && citation.line_end > citation.line
+                    ? `lines ${citation.line}–${citation.line_end}` : `line ${citation.line}`} · revision {citation.revision}
                 </summary>
-                {citation.heading && <p className="mt-2 break-words font-medium">
+                {citation.sections?.length ? <p className="mt-2 break-words font-medium">
+                  {citation.sections.map(section => `${section.title} (line ${section.line})`).join(' / ')}
+                </p> : citation.heading && <p className="mt-2 break-words font-medium">
                   Section {citation.heading} · line {citation.heading_line}
                 </p>}
+                {citation.equipment?.length ? <p className="mt-1">Equipment · {citation.equipment.join(', ')}</p> : null}
+                {citation.measurements?.length ? <p className="mt-1">Source measurements · {citation.measurements.join(', ')}</p> : null}
+                {citation.table_header && <p className="mt-1 break-words">Table columns · {citation.table_header}</p>}
                 <p className="mt-2 whitespace-pre-wrap break-words">{citation.excerpt}</p>
+                {citation.match_reasons?.length ? <p className="mt-2 text-slate-600">
+                  {citation.match_reasons.map(reason => ({
+                    equipment: 'Matching equipment identifier',
+                    section: 'Matching section or table context',
+                    exact_measurement: 'Matching source measurement',
+                    equivalent_measurement: 'Equivalent measurement in a supported unit',
+                    within_range: 'Requested value within source range',
+                  })[reason]).join(' · ')}
+                </p> : null}
               </details>
             ))}
           </section>
