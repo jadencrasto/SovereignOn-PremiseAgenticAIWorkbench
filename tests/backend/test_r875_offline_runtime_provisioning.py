@@ -130,6 +130,29 @@ def test_cli_requires_a_separate_review_pin_even_when_only_preparing(approved_wh
     assert not output.exists()
 
 
+@pytest.mark.parametrize(('failure', 'reason'), [
+    ('foreign_target', 'INVALID_WHEEL_LOCK'),
+    ('superseded_pin', 'WHEEL_LOCK_DIGEST_MISMATCH'),
+])
+def test_install_handoff_refuses_foreign_scope_or_superseded_pin(approved_wheels, monkeypatch, failure, reason):
+    directory, lock, output = approved_wheels
+    prior_pin = _pin(directory, lock)
+    if failure == 'foreign_target':
+        record = json.loads(lock.read_bytes())
+        record['target'] = 'cp313-win_arm64'
+        raw = json.dumps(record, sort_keys=True).encode('ascii')
+        lock.write_bytes(raw)
+        pin = hashlib.sha256(raw).hexdigest()
+    else:
+        _wheel(directory, 'fastapi', '200.0', dependencies=('uvicorn',))
+        assert _pin(directory, lock) != prior_pin
+        pin = prior_pin
+    monkeypatch.setattr(runtime, '_install_disposable', lambda *_: pytest.fail('installer started'))
+    result = runtime.verify_wheelset(directory, lock, approved_lock_sha256=pin, install_destination=output)
+    assert result['status'] == 'BLOCKED' and result['blockers'] == [reason]
+    assert not output.exists()
+
+
 def test_probe_reports_installer_overrides_without_leaking_values():
     environment = {'PIP_FIND_LINKS': 'unreviewed mirror', 'pip_extra_index_url': 'credential-bearing URL',
                    'PIP_PROXY': 'proxy override', 'PIP_CONFIG_FILE': 'site.ini'}

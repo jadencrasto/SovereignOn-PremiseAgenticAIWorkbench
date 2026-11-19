@@ -476,7 +476,9 @@ def offline(event, _args):
         'socket.getnameinfo',
         'subprocess.Popen', 'os.system', 'os.startfile', 'os.startfile/2',
     }:
-        raise RuntimeError('Operation unavailable during offline installation')
+        # Windows platform detection catches OSError when its optional shell
+        # probe is denied, then falls back to the native version information.
+        raise PermissionError('Operation unavailable during offline installation')
 
 sys.addaudithook(offline)
 sys.path.append(sys.argv.pop(1))
