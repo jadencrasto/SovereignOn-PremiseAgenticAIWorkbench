@@ -34,19 +34,46 @@ async def _serve(server, native, stop):
 
     async def watch_stop():
         try:
-            while not native.wait_process(stop, 0):
+            # The main loop checks a stop that arrives during startup. Do not
+            # short-circuit Uvicorn's lifespan shutdown after a successful bind.
+            while not server.startup_observed or not native.wait_process(stop, 0):
                 await asyncio.sleep(0.05)
         finally:
-            server.should_exit = True
+            if server.startup_observed:
+                server.should_exit = True
 
     watcher = asyncio.create_task(watch_stop())
     try:
         await server.serve()
-        return server.started
+        return server.startup_observed
     finally:
         watcher.cancel()
         with suppress(asyncio.CancelledError):
             await watcher
+
+
+def _server(app, settings, native, stop):
+    from backend.multimodal.document_reasoning import ReasoningError
+    from backend.multimodal.document_recovery_supervisor import verify_worker_startup
+    from uvicorn import Config, Server
+
+    class SupervisedServer(Server):
+        startup_observed = False
+
+        async def main_loop(self):
+            # Uvicorn reaches this hook only after lifespan startup and binding.
+            # Returning leaves its normal listener and lifespan shutdown in charge.
+            if self.should_exit or native.wait_process(stop, 0):
+                return
+            try:
+                verify_worker_startup(app, publish=True)
+            except ReasoningError:
+                return
+            self.startup_observed = True
+            await super().main_loop()
+
+    return SupervisedServer(Config(app, host=settings.backend_host, port=settings.backend_port, lifespan='on',
+                                   workers=1, reload=False, timeout_graceful_shutdown=10, use_colors=False))
 
 
 def _entry(args):
@@ -61,22 +88,19 @@ def _entry(args):
         if native.wait_process(stop, 0):
             return 1
         from backend.config import settings
-        from backend.multimodal.document_windows_supervisor import _loopback
+        from backend.multimodal.document_windows_supervisor import _require_supervised_profile
 
-        if not _loopback(settings.backend_host):
-            raise RuntimeError('Supervised workers require loopback binding')
-
+        _require_supervised_profile(settings)
         from backend.main import app
         from backend.multimodal.document_recovery_supervisor import WorkerAdmission
-        from uvicorn import Config, Server
 
         # Uvicorn completes the existing lifespan admission before binding its socket.
-        server = Server(Config(app, host=settings.backend_host, port=settings.backend_port,
-                               lifespan='on', workers=1, reload=False, timeout_graceful_shutdown=10))
+        server = _server(app, settings, native, stop)
         app.state.source_supervisor_admission = WorkerAdmission(settings.tasks_db_path.resolve(strict=True), nonce)
         del nonce
         try:
-            return 0 if asyncio.run(_serve(server, native, stop)) else 1
+            observed = asyncio.run(_serve(server, native, stop))
+            return 0 if observed and app.state.source_recovery_registration is None else 1
         finally:
             if hasattr(app.state, 'source_supervisor_admission'):
                 del app.state.source_supervisor_admission

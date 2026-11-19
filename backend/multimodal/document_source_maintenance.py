@@ -81,6 +81,56 @@ def _sidecars(path: Path) -> tuple[Path, ...]:
     return tuple(path.with_name(path.name + suffix) for suffix in ('-wal', '-shm', '-journal'))
 
 
+def _observed_sidecars(path: Path) -> tuple[str, ...] | None:
+    evidence = []
+    try:
+        _safe_path(path)
+        for kind, sidecar in zip(('wal', 'shm', 'journal'), _sidecars(path), strict=True):
+            try:
+                sidecar.lstat()
+            except FileNotFoundError:
+                continue
+            _safe_path(sidecar)
+            evidence.append(kind)
+    except (OSError, MaintenanceError):
+        return None  # Unsafe or inaccessible paths cannot support an absence observation.
+    return tuple(evidence)
+
+
+def _sqlite_clients(database: Path | None, workers: recovery.MaintenanceObservation | None) -> dict:
+    supervised = other = unmatched = None
+    if workers is not None and workers.registered_workers is not None:
+        if not workers.supervisor_registered:
+            supervised, other, unmatched = 0, workers.registered_workers, 0
+        elif workers.supervisor_registered_workers is not None and workers.supervisor_workers is not None:
+            supervised = workers.supervisor_registered_workers
+            other = workers.registered_workers - supervised
+            unmatched = workers.supervisor_workers - supervised
+    return {
+        'supervisor_matched_registrations': supervised,
+        'other_registered_lifespans': other,
+        'supervisor_records_without_registration': unmatched,
+        'application_tracked_connections': 'NOT_OBSERVED_BY_OPERATOR',
+        'other_authorized_components': 'NOT_INVENTORIED',
+        'external_clients': 'UNKNOWN',
+        'handle_coverage': 'NOT_ENUMERATED',
+        'catalog_sidecars_present': _observed_sidecars(database) if database is not None else None,
+        'coordinator_sidecars_present': (
+            _observed_sidecars(recovery._coordination_path(database)) if database is not None else None
+        ),
+    }
+
+
+def _client_roster(database: Path, expected_generation: str) -> recovery.MaintenanceObservation | None:
+    try:
+        state = _coordinator(database)
+        if state.generation == expected_generation:
+            return recovery.inspect_recovery_maintenance(database, state)
+    except (OSError, sqlite3.Error, ValueError, MaintenanceError, ReasoningError):
+        pass
+    return None
+
+
 def _standalone_database(path: Path, *, maximum: int = _MAX_BYTES) -> None:
     _safe_path(path)
     if not path.is_file() or not 100 <= path.stat().st_size <= maximum:
@@ -485,25 +535,39 @@ def main(argv: list[str] | None = None, *, custody: CheckpointCustody | None = N
                     workers = recovery.inspect_recovery_maintenance(args.database, state)
                     result = {'status': 'COORDINATION_READ', 'pending': state.pending, 'generation': state.generation,
                               'maintenance': asdict(workers), 'supervisor_verified': False,
-                              'checkpoint_custody_verified': False}
+                              'checkpoint_custody_verified': False,
+                              'checkpoint_custody_configuration': (
+                                  'CONFIGURED_UNVERIFIED' if type(custody) is CheckpointCustody
+                                  and args.database.resolve(strict=True) == custody.database else 'UNPROVISIONED'
+                              ),
+                              'sqlite_clients': _sqlite_clients(args.database, workers)}
                 else:
                     _standalone_database(coordinator, maximum=1024 * 1024)
                     active = args.command == 'prepare-maintenance'
                     recovery.set_recovery_maintenance(args.database, args.expected_generation, active=active)
                     result = {'status': 'MAINTENANCE_PREPARED' if active else 'MAINTENANCE_CANCELLED',
                               'restore_authorized': False}
+                    if active:
+                        result['sqlite_clients'] = _sqlite_clients(
+                            args.database, _client_roster(args.database, args.expected_generation),
+                        )
             else:
                 _guard_location(stack, api, args.database, owner, purpose='destination')
                 _guard_location(stack, api, args.backup, owner, purpose='input')
                 _guard_location(stack, api, args.trusted_checkpoint, owner, purpose='input')
                 result = asdict(_preflight(args.database, args.backup, args.trusted_checkpoint, args.expected_generation,
                                            custody=custody))
+                result['sqlite_clients'] = _sqlite_clients(
+                    args.database, _client_roster(args.database, args.expected_generation),
+                )
     except MaintenanceError as exc:
         result = {'status': 'BLOCKED', 'checks': [], 'blockers': [str(exc)]}
     except (OSError, sqlite3.Error, ValueError, ReasoningError):
         result = {'status': 'BLOCKED', 'checks': [], 'blockers': ['STORAGE_OR_COORDINATION_UNAVAILABLE']}
     except KeyboardInterrupt:
         result = {'status': 'BLOCKED', 'checks': [], 'blockers': ['OPERATION_INTERRUPTED']}
+    if args.command in ('status', 'prepare-maintenance', 'preflight') and 'sqlite_clients' not in result:
+        result['sqlite_clients'] = _sqlite_clients(None, None)
     print(json.dumps(result, separators=(',', ':')))
     return 2 if result['status'] == 'BLOCKED' else 0
 

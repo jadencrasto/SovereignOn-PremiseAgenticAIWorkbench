@@ -1,6 +1,7 @@
 """Opt-in Windows lifetime ownership for the fixed supervised backend worker."""
 
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 import ipaddress
 import math
@@ -15,6 +16,7 @@ from backend.multimodal.document_recovery_supervisor import (
     DeploymentSupervisor, OwnedWorker, ProcessIdentity, SupervisorSnapshot, WorkerAdmission,
     _authorize_operator, _process_identity, _valid_identity,
 )
+from backend.runtime.windows_backend_readiness import require_supervised_interpreter
 from backend.runtime.windows_recovery_worker import WindowsRecoveryWorkerAPI
 from backend.security.provenance_windows_native import WindowsKeyStoreNative
 
@@ -39,7 +41,20 @@ def _loopback(host: str) -> bool:
         return False
 
 
+def _require_supervised_profile(settings) -> None:
+    # Reuse the existing authenticated chat-only profile, where startup does
+    # not initialize the document vector store or its embedding service.
+    from backend.health.capabilities import loopback_tags_url
+
+    if (not _loopback(settings.backend_host) or settings.auth_enabled is not True
+            or settings.auth_dev_override is not False or settings.local_chat_only is not True
+            or settings.app_env.lower() not in ('development', 'dev')):
+        raise RuntimeError('Supervised startup requires the authenticated loopback chat-only profile')
+    loopback_tags_url(settings.ollama_base_url)
+
+
 def _worker_command() -> tuple[str, ...]:
+    require_supervised_interpreter()
     executable = Path(sys.executable).resolve(strict=True)
     if not executable.samefile(sys._base_executable):
         # A Windows venv redirector may create a second process before executing Python.
@@ -172,21 +187,35 @@ class _WindowsProcessBoundary:
 
 
 @contextmanager
-def open_windows_deployment_supervisor(database: Path, *, worker_primary_token: int):
-    """Compose an operator-owned supervisor with a separately provisioned worker token."""
+def open_windows_deployment_supervisor(
+    database: Path, *, worker_primary_token: int | None = None,
+    token_provider: Callable[[], AbstractContextManager[int]] | None = None,
+):
+    """Borrow one externally provisioned handle. The supervisor owns only its duplicate."""
     from backend.config import settings
 
-    if (os.name != 'nt' or not _loopback(settings.backend_host)
-            or type(worker_primary_token) is not int or worker_primary_token <= 0):
+    if os.name != 'nt':
         raise RuntimeError('Native supervision requires a local Windows deployment')
+    if worker_primary_token is None and token_provider is None:
+        raise RuntimeError('Approved filtered worker token provider unavailable')
+    if worker_primary_token is not None and token_provider is not None:
+        raise RuntimeError('Supply exactly one filtered worker token source')
+    _require_supervised_profile(settings)
     canonical = database.resolve(strict=True)
     if canonical != settings.tasks_db_path.resolve(strict=True):
         raise RuntimeError('Worker deployment does not match configuration')
     owner_sid = _authorize_operator(database)
     native, api = WindowsRecoveryWorkerAPI(), WindowsKeyStoreNative()
     with ExitStack() as resources:
-        token = native.duplicate_worker_token(worker_primary_token)
-        resources.callback(native.close, token)
+        token = None
+        scope = token_provider() if token_provider is not None else nullcontext(worker_primary_token)
+        with scope as supplied:
+            if type(supplied) is not int or supplied <= 0:
+                raise RuntimeError('A filtered primary token handle is required')
+            token = native.duplicate_worker_token(supplied)
+            resources.callback(native.close, token)
+        if token is None:
+            raise RuntimeError('Filtered worker token acquisition failed')
         with ExitStack() as operator_token:
             current = api.open_process_token()
             operator_token.callback(api.close, current)

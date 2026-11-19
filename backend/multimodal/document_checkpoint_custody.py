@@ -4,6 +4,7 @@ The deployment supplies the authority out of band. This module owns no key,
 current-checkpoint store, signing operation, file, or network client.
 """
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 import hashlib
 import hmac
@@ -83,12 +84,8 @@ class CheckpointEvidence:
         raise CheckpointCustodyError('INVALID_CHECKPOINT_EVIDENCE')
 
 
-class IndependentCheckpointAuthority(Protocol):
-    """Bounded, read-only, local checks from a separately retained trust domain."""
-
-    def authenticate(self, issuer_id: str, message: bytes, authentication: bytes) -> bool:
-        """Verify using independently configured issuer material and algorithm policy."""
-        ...
+class CheckpointFreshnessRegister(Protocol):
+    """Read-only access to the independently retained current record."""
 
     def current_fingerprint(self, deployment_id: str, database_id: str, recovery_generation: str) -> bytes | None:
         """Return SHA-256 of the current authentication message from independent custody.
@@ -97,6 +94,37 @@ class IndependentCheckpointAuthority(Protocol):
         evidence. Return None if there is no authoritative current record.
         """
         ...
+
+
+class CheckpointIssuerDirectory(Protocol):
+    """Resolve configured issuer verification capabilities without exposing keys."""
+
+    def verifier_for(self, issuer_id: str) -> Callable[[bytes, bytes], bool] | None:
+        """Return the bounded local verifier for an active issuer, or None."""
+        ...
+
+
+class IndependentCheckpointAuthority(CheckpointFreshnessRegister, Protocol):
+    """Bounded, read-only, local checks from a separately retained trust domain."""
+
+    def authenticate(self, issuer_id: str, message: bytes, authentication: bytes) -> bool:
+        """Verify using independently configured issuer material and algorithm policy."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _IndependentSources:
+    issuers: CheckpointIssuerDirectory = field(repr=False)
+    freshness: CheckpointFreshnessRegister = field(repr=False)
+
+    def authenticate(self, issuer_id: str, message: bytes, authentication: bytes) -> bool:
+        verify = self.issuers.verifier_for(issuer_id)
+        if verify is None:
+            raise CheckpointCustodyError('CHECKPOINT_CUSTODY_UNVERIFIED')
+        return verify(message, authentication)
+
+    def current_fingerprint(self, deployment_id: str, database_id: str, recovery_generation: str) -> bytes | None:
+        return self.freshness.current_fingerprint(deployment_id, database_id, recovery_generation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +136,16 @@ class CheckpointCustody:
     database_id: str
     issuer_id: str
     authority: IndependentCheckpointAuthority = field(repr=False)
+
+    @classmethod
+    def from_independent_sources(
+        cls, database: Path, *, deployment_id: str, database_id: str, issuer_id: str,
+        issuers: CheckpointIssuerDirectory | None, freshness: CheckpointFreshnessRegister | None,
+    ) -> 'CheckpointCustody':
+        """Compose trusted deployment adapters with a separately pinned scope."""
+        if issuers is None or freshness is None:
+            raise CheckpointCustodyError('CHECKPOINT_CUSTODY_UNVERIFIED')
+        return cls(database, deployment_id, database_id, issuer_id, _IndependentSources(issuers, freshness))
 
     def __post_init__(self):
         if (not isinstance(self.database, Path) or not self.database.is_absolute()

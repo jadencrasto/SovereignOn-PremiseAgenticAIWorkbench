@@ -19,7 +19,7 @@ from backend.multimodal.document_reasoning import ReasoningError
 from backend.security.provenance_foundation import document_content_allowed
 from backend.security.provenance_windows_native import WindowsKeyStoreNative
 from test_a22_async_offline import run_offline
-from test_r857_deployment_composition_offline import create_app  # noqa: F401
+from test_r857_deployment_composition_offline import create_app, create_sessions  # noqa: F401
 from test_r863_source_maintenance_offline import authority  # noqa: F401
 
 
@@ -231,7 +231,7 @@ def test_fastapi_shutdown_ack_is_tied_to_supervised_process_and_preserves_gates(
 
     async def run():
         async with original.router.lifespan_context(original):
-            pass
+            create_sessions(original)
         owner = supervisor.DeploymentSupervisor(database, boundary)
         identity = owner.start_worker()
         worker = create_app()

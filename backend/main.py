@@ -529,7 +529,7 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     # Serialize lifespan admission and the maintenance barrier before any shared DB client starts.
     from backend.multimodal.document_source_recovery import register_recovery_worker
 
-    register_recovery_worker(app)
+    registration = register_recovery_worker(app)
 
     # ---- Phase 7: Local Authentication & Audit Systems ----
     auth_store = AuthStore(db_path=active_settings.tasks_db_path)
@@ -550,7 +550,13 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     )
 
     # First-run admin initialization & Startup Banner
-    admin_one_time_pwd = initialize_admin_user_if_empty(auth_store)
+    if registration.supervised:
+        # Detached workers have no credential-delivery console.
+        if not auth_store.count_users():
+            raise RuntimeError('Supervised startup requires an initialized authentication catalog')
+        admin_one_time_pwd = None
+    else:
+        admin_one_time_pwd = initialize_admin_user_if_empty(auth_store)
     if admin_one_time_pwd:
         print("\n" + "=" * 70)
         print(" [SECURITY] INITIAL ADMINISTRATOR ACCOUNT GENERATED")
@@ -747,6 +753,10 @@ async def _lifespan_body(app: FastAPI, stack: AsyncExitStack):
     logger.info("Application startup complete | configured bind=%s:%d", active_settings.backend_host, active_settings.backend_port)
 
     app.state.startup_complete = True
+    if registration.supervised:
+        from backend.multimodal.document_recovery_supervisor import verify_worker_startup
+
+        verify_worker_startup(app)
     yield
 
 

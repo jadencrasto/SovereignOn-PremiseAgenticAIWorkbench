@@ -44,6 +44,7 @@ class MaintenanceObservation:
     awaiting_shutdown: int | None
     supervisor_registered: bool = False
     supervisor_workers: int | None = None
+    supervisor_registered_workers: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ class _WorkerRegistration:
     owner_nonce: str = field(repr=False)
     app: Starlette = field(repr=False, compare=False)
     loop: asyncio.AbstractEventLoop = field(repr=False, compare=False)
+    supervised: bool = False
 
 
 def _coordination_path(database: Path) -> Path:
@@ -226,7 +228,8 @@ def register_recovery_worker(app: Starlette) -> _WorkerRegistration:
             _ensure_maintenance_tables(connection)
             if connection.execute('SELECT COUNT(*) FROM source_recovery_workers').fetchone()[0] >= _MAX_WORKERS:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
-            worker = _WorkerRegistration(database, uuid4().hex, os.getpid(), state.generation, uuid4().hex, app, loop)
+            worker = _WorkerRegistration(database, uuid4().hex, os.getpid(), state.generation, uuid4().hex, app, loop,
+                                         supervised=admission is not None)
             claim_worker(connection, worker, state)
             connection.execute('INSERT INTO source_recovery_workers VALUES (?, ?, ?, ?, NULL)', (
                 worker.worker_id, worker.pid, worker.startup_generation, _nonce_hash(worker),
@@ -295,7 +298,14 @@ def inspect_recovery_maintenance(database: Path, state: _RecoveryState) -> Maint
                 FROM source_recovery_workers''', (generation,)).fetchone()
             if total > _MAX_WORKERS:
                 raise _error('AUTHORIZATION_UNAVAILABLE')
-            return MaintenanceObservation(generation is not None, total, awaiting, registered, managed_count)
+            matched = None
+            if registered:
+                matched, = connection.execute('''SELECT COUNT(*) FROM source_recovery_workers AS roster
+                    JOIN source_recovery_supervised_workers AS owned ON roster.worker_id = owned.worker_id
+                    AND roster.pid = owned.pid AND roster.startup_generation = owned.generation''').fetchone()
+                if not 0 <= matched <= min(total, managed_count):
+                    raise _error('AUTHORIZATION_UNAVAILABLE')
+            return MaintenanceObservation(generation is not None, total, awaiting, registered, managed_count, matched)
     except (OSError, sqlite3.Error):
         raise _error('AUTHORIZATION_UNAVAILABLE') from None
 

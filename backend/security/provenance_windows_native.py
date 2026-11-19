@@ -36,6 +36,18 @@ class _Luid(C.Structure):
     _fields_ = [("low", _DWORD), ("high", _LONG)]
 
 
+class _SidAndAttributes(C.Structure):
+    _fields_ = [("sid", _PTR), ("attributes", _DWORD)]
+
+
+class _TokenGroups(C.Structure):
+    _fields_ = [("count", _DWORD), ("first", _SidAndAttributes)]
+
+
+class _LuidAndAttributes(C.Structure):
+    _fields_ = [("luid", _Luid), ("attributes", _DWORD)]
+
+
 class _TokenStatistics(C.Structure):
     _fields_ = [
         ("token_id", _Luid), ("authentication_id", _Luid), ("expires", C.c_int64),
@@ -179,7 +191,43 @@ class WindowsKeyStoreNative:
         _require(self._copy_sid(pointer, start + size - pointer) == 'S-1-16-8192')
         facts = self.token_facts(token)
         _require(facts.primary and facts.logon_type in (2, 11) and facts.sid == facts.logon_sid)
+        self._require_filtered_worker_rights(token)
         return facts.sid, self.token_session_id(token)
+
+    def _require_filtered_worker_rights(self, token) -> None:
+        groups = C.create_string_buffer(32768)
+        used = self._token_info(token, 2, groups)  # TokenGroups
+        offset = _TokenGroups.first.offset
+        _require(used >= offset)
+        count = _DWORD.from_buffer(groups).value
+        start = C.addressof(groups)
+        tail = offset + count * C.sizeof(_SidAndAttributes)
+        _require(tail <= used)
+        administrators = []
+        for group in (_SidAndAttributes * count).from_buffer(groups, offset):
+            _require(group.sid and start + tail <= group.sid < start + used)
+            if self._copy_sid(group.sid, start + used - group.sid) == 'S-1-5-32-544':
+                administrators.append(group.attributes)
+        # Filtered Administrators may participate in deny checks only.
+        _require(len(administrators) == 1 and administrators[0] & 0x10 and not administrators[0] & 0x06)
+
+        privileges = C.create_string_buffer(1024)
+        used = self._token_info(token, 3, privileges)  # TokenPrivileges
+        offset = C.sizeof(_DWORD)
+        _require(used >= offset)
+        count = _DWORD.from_buffer(privileges).value
+        _require(offset + count * C.sizeof(_LuidAndAttributes) <= used)
+        lookup = self._function('advapi32', 'LookupPrivilegeValueW', _LONG, _WSTRING, _WSTRING, _PTR)
+        approved = {}
+        for name in ('SeChangeNotifyPrivilege', 'SeShutdownPrivilege', 'SeUndockPrivilege',
+                     'SeIncreaseWorkingSetPrivilege', 'SeTimeZonePrivilege'):
+            luid = _Luid()
+            _require(lookup(None, name, C.byref(luid)))
+            approved[luid.low, luid.high] = name
+        for privilege in (_LuidAndAttributes * count).from_buffer(privileges, offset):
+            name = approved.get((privilege.luid.low, privilege.luid.high))
+            # Only change notification may be enabled or enabled by default.
+            _require(name is not None and (name == 'SeChangeNotifyPrivilege' or not privilege.attributes & 0x03))
 
     def current_process_creation_time(self) -> int:
         """Read the creation FILETIME for the current process through its pseudo-handle."""

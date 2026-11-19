@@ -308,6 +308,7 @@ def test_native_worker_qualification_requires_filtered_medium_primary_token(monk
     monkeypatch.setattr(api, '_token_info', token_info)
     monkeypatch.setattr(api, '_copy_sid', lambda *_: integrity)
     monkeypatch.setattr(api, 'token_facts', lambda _: TokenFacts('operator', True, 'operator', 2))
+    monkeypatch.setattr(api, '_require_filtered_worker_rights', lambda _: None)
     if allowed:
         assert api.supervised_worker_token_identity(52) == ('operator', 4)
     else:

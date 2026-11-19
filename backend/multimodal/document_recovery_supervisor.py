@@ -4,17 +4,18 @@ The boundary must own the process handles and disable autonomous starts. No
 production boundary, process launcher, or remote evidence transport lives here.
 """
 from contextlib import ExitStack, contextmanager
+import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import os
 from pathlib import Path
 import re
 import sqlite3
-from time import monotonic
+from time import monotonic, sleep
 from typing import Protocol
 from uuid import uuid4
 
-from backend.agent.sqlite_transaction import immediate_transaction
+from backend.agent.sqlite_transaction import immediate_transaction, read_only_connection
 from backend.multimodal import document_source_recovery as recovery
 from backend.multimodal.document_transport import _error
 from backend.security.provenance_windows_native import WindowsKeyStoreNative
@@ -167,6 +168,7 @@ class DeploymentSupervisor:
             connection.execute('''CREATE TABLE source_recovery_supervised_workers (
                 token_hash TEXT PRIMARY KEY NOT NULL, generation TEXT NOT NULL,
                 pid INTEGER, created INTEGER, worker_id TEXT UNIQUE, drained INTEGER NOT NULL DEFAULT 0,
+                ready INTEGER NOT NULL DEFAULT 0 CHECK (ready IN (0, 1)),
                 UNIQUE (pid, created)
             )''')
             connection.execute('INSERT INTO source_recovery_supervisor VALUES (1, ?, ?, ?, NULL)',
@@ -238,6 +240,32 @@ class DeploymentSupervisor:
             self._census(_workers(connection))
         return identity
 
+    def wait_for_worker_ready(self, identity: ProcessIdentity, *, timeout_seconds: int = 15) -> None:
+        """Observe listener readiness from the admitted, still-owned process."""
+        if not _valid_identity(identity) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 30:
+            raise _unavailable()
+        deadline = monotonic() + timeout_seconds
+        while monotonic() < deadline:
+            try:
+                with read_only_connection(recovery._coordination_path(self._database)) as connection:
+                    connection.execute('BEGIN')
+                    state = self._window(connection)
+                    worker = connection.execute('''SELECT owned.ready FROM source_recovery_supervised_workers AS owned
+                        JOIN source_recovery_workers AS roster ON roster.worker_id = owned.worker_id
+                        WHERE owned.pid = ? AND owned.created = ? AND owned.generation = ? AND owned.drained = 0
+                        AND roster.pid = owned.pid AND roster.startup_generation = owned.generation
+                        AND roster.stopped_generation IS NULL''', (identity.pid, identity.created, state.generation)).fetchone()
+                    if self._census(_workers(connection)).get(identity) is not True:
+                        raise _unavailable()
+            except (OSError, sqlite3.Error):
+                raise _unavailable() from None
+            remaining = deadline - monotonic()
+            if worker == (1,) and remaining > 0:
+                return
+            if remaining > 0:
+                sleep(min(0.05, remaining))
+        raise _unavailable()
+
     def drain(self, generation: str, *, timeout_seconds: int = 15) -> None:
         _authorize_operator(self._database)
         if (type(generation) is not str or not re.fullmatch('[0-9a-f]{32}', generation)
@@ -308,10 +336,46 @@ def claim_worker(connection, worker, state) -> None:
 def record_worker_shutdown(connection, worker) -> None:
     if _owner(connection) is None:
         return
-    updated = connection.execute('UPDATE source_recovery_supervised_workers SET drained = 1 WHERE worker_id = ?',
+    updated = connection.execute('UPDATE source_recovery_supervised_workers SET drained = 1, ready = 0 WHERE worker_id = ?',
                                  (worker.worker_id,))
     if updated.rowcount != 1:
         raise _unavailable()
+
+
+def verify_worker_startup(app, *, publish: bool = False) -> None:
+    """Recheck completed app startup, then publish only after its listener binds."""
+    from backend.agent.deployment_documents import get_deployment_documents
+
+    registration = getattr(app.state, 'source_recovery_registration', None)
+    if (type(registration) is not recovery._WorkerRegistration or not registration.supervised
+            or registration.app is not app or registration.loop is not asyncio.get_running_loop()
+            or recovery._database_path(app) != registration.database
+            or getattr(app.state, 'startup_complete', None) is not True):
+        raise _unavailable()
+    get_deployment_documents(app)
+    identity = _process_identity()
+    if not _valid_identity(identity) or identity.pid != registration.pid:
+        raise _unavailable()
+    with _write(registration.database) as connection:
+        state = recovery._read_state(connection)
+        owner = _owner(connection)
+        if (state.pending or recovery._check_barrier(connection, state) is not None
+                or state.generation != registration.startup_generation or owner is None or owner[3] is not None
+                or _live_owner(ProcessIdentity(owner[1], owner[2])) is not True):
+            raise _unavailable()
+        claim = connection.execute('''SELECT owned.ready FROM source_recovery_supervised_workers AS owned
+            JOIN source_recovery_workers AS roster ON roster.worker_id = owned.worker_id
+            WHERE owned.worker_id = ? AND owned.pid = ? AND owned.created = ? AND owned.generation = ?
+            AND owned.drained = 0 AND roster.pid = owned.pid AND roster.startup_generation = owned.generation
+            AND roster.nonce_hash = ? AND roster.stopped_generation IS NULL''', (
+                registration.worker_id, identity.pid, identity.created, state.generation,
+                recovery._nonce_hash(registration),
+            )).fetchone()
+        if claim != (0,):
+            raise _unavailable()
+        if publish:
+            connection.execute('UPDATE source_recovery_supervised_workers SET ready = 1 WHERE worker_id = ?',
+                               (registration.worker_id,))
 
 
 def prepare_window(connection, generation: str, *, active: bool) -> None:

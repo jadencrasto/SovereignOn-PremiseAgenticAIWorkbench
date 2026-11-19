@@ -319,7 +319,9 @@ def test_operator_commands_pin_only_coordinator_for_write(authority, monkeypatch
     monkeypatch.setattr(maintenance, '_local_operator', lambda client: _OPERATOR)
     flags = ['--database', str(database), '--expected-generation', state.generation]
     assert maintenance.main(['prepare-maintenance', *flags]) == 0
-    assert json.loads(capsys.readouterr().out) == {'status': 'MAINTENANCE_PREPARED', 'restore_authorized': False}
+    prepared = json.loads(capsys.readouterr().out)
+    assert prepared['status'] == 'MAINTENANCE_PREPARED' and prepared['restore_authorized'] is False
+    assert prepared['sqlite_clients']['external_clients'] == 'UNKNOWN'
     assert maintenance.main(['status', '--database', str(database)]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status['maintenance']['active'] and not status['supervisor_verified']
