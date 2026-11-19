@@ -38,6 +38,8 @@ _MAINTENANCE_SECONDS = 15
 _DDL = (_CREATE, _CREATE_CATALOG)
 _SHA256 = re.compile('[0-9a-f]{64}')
 _GENERATION = re.compile('[0-9a-f]{32}')
+_CLIENT_PROCESS = re.compile(r'([1-9][0-9]{0,9}):([1-9][0-9]{0,18})', re.ASCII)
+_MAX_EXTERNAL_DECLARATIONS = 16
 
 
 class MaintenanceError(Exception):
@@ -97,7 +99,37 @@ def _observed_sidecars(path: Path) -> tuple[str, ...] | None:
     return tuple(evidence)
 
 
-def _sqlite_clients(database: Path | None, workers: recovery.MaintenanceObservation | None) -> dict:
+def _external_client_identities(values: list[str]) -> tuple[tuple[int, int], ...]:
+    if len(values) > _MAX_EXTERNAL_DECLARATIONS:
+        raise MaintenanceError('EXTERNAL_CLIENT_DECLARATION_LIMIT')
+    identities = {}
+    for value in values:
+        match = _CLIENT_PROCESS.fullmatch(value)
+        if match is None:
+            raise MaintenanceError('INVALID_EXTERNAL_CLIENT_IDENTITY')
+        pid, created = map(int, match.groups())
+        if pid > 0xFFFFFFFF or created > 0x7FFF_FFFF_FFFF_FFFF:
+            raise MaintenanceError('INVALID_EXTERNAL_CLIENT_IDENTITY')
+        if pid in identities:
+            raise MaintenanceError('AMBIGUOUS_EXTERNAL_CLIENT_IDENTITY')
+        identities[pid] = created
+    return tuple(sorted(identities.items()))
+
+
+def _observed_external_clients(api: WindowsKeyStoreNative, identities: tuple[tuple[int, int], ...]) -> list[dict]:
+    observations = []
+    for pid, created in identities:
+        try:
+            identity = api.process_identity_state(pid, created)
+        except (AttributeError, OSError, RuntimeError, ValueError, KeyStoreError):
+            identity = 'IDENTITY_UNOBSERVABLE'
+        observations.append({'pid': pid, 'creation_filetime': created,
+                             'process_identity': identity, 'database_handles': 'UNOBSERVABLE'})
+    return observations
+
+
+def _sqlite_clients(database: Path | None, workers: recovery.MaintenanceObservation | None, *,
+                    external_observations: list[dict] | None = None) -> dict:
     supervised = other = unmatched = None
     if workers is not None and workers.registered_workers is not None:
         if not workers.supervisor_registered:
@@ -111,7 +143,9 @@ def _sqlite_clients(database: Path | None, workers: recovery.MaintenanceObservat
         'other_registered_lifespans': other,
         'supervisor_records_without_registration': unmatched,
         'application_tracked_connections': 'NOT_OBSERVED_BY_OPERATOR',
+        'supervisor_database_handles': 'UNOBSERVABLE_BY_OPERATOR',
         'other_authorized_components': 'NOT_INVENTORIED',
+        'operator_declared_external_clients': external_observations or [],
         'external_clients': 'UNKNOWN',
         'handle_coverage': 'NOT_ENUMERATED',
         'catalog_sidecars_present': _observed_sidecars(database) if database is not None else None,
@@ -498,6 +532,7 @@ def main(argv: list[str] | None = None, *, custody: CheckpointCustody | None = N
     export.add_argument('--output-directory', required=True, type=Path)
     status = commands.add_parser('status')
     status.add_argument('--database', required=True, type=Path)
+    status.add_argument('--external-client', action='append', default=[], metavar='PID:CREATION_FILETIME')
     for name in ('prepare-maintenance', 'cancel-maintenance'):
         transition = commands.add_parser(name)
         transition.add_argument('--database', required=True, type=Path)
@@ -507,11 +542,13 @@ def main(argv: list[str] | None = None, *, custody: CheckpointCustody | None = N
     preflight.add_argument('--backup', required=True, type=Path)
     preflight.add_argument('--trusted-checkpoint', required=True, type=Path)
     preflight.add_argument('--expected-generation', required=True)
+    preflight.add_argument('--external-client', action='append', default=[], metavar='PID:CREATION_FILETIME')
     args = parser.parse_args(argv)
 
     try:
         api = WindowsKeyStoreNative()
         owner = _local_operator(api)
+        identities = _external_client_identities(getattr(args, 'external_client', []))
         with ExitStack() as stack:
             if args.command == 'backup':
                 _guard_location(stack, api, args.database, owner, purpose='database')
@@ -540,7 +577,9 @@ def main(argv: list[str] | None = None, *, custody: CheckpointCustody | None = N
                                   'CONFIGURED_UNVERIFIED' if type(custody) is CheckpointCustody
                                   and args.database.resolve(strict=True) == custody.database else 'UNPROVISIONED'
                               ),
-                              'sqlite_clients': _sqlite_clients(args.database, workers)}
+                              'sqlite_clients': _sqlite_clients(
+                                  args.database, workers, external_observations=_observed_external_clients(api, identities),
+                              )}
                 else:
                     _standalone_database(coordinator, maximum=1024 * 1024)
                     active = args.command == 'prepare-maintenance'
@@ -559,6 +598,7 @@ def main(argv: list[str] | None = None, *, custody: CheckpointCustody | None = N
                                            custody=custody))
                 result['sqlite_clients'] = _sqlite_clients(
                     args.database, _client_roster(args.database, args.expected_generation),
+                    external_observations=_observed_external_clients(api, identities),
                 )
     except MaintenanceError as exc:
         result = {'status': 'BLOCKED', 'checks': [], 'blockers': [str(exc)]}

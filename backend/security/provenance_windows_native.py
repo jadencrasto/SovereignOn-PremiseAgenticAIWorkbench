@@ -236,13 +236,20 @@ class WindowsKeyStoreNative:
 
     def live_process_matches(self, pid: int, created: int) -> bool:
         """Observe just the recorded owner. The handle grants no process control."""
+        return self.process_identity_state(pid, created) == 'LIVE_IDENTITY_MATCH'
+
+    def process_identity_state(self, pid: int, created: int) -> str:
+        """Check one PID and creation FILETIME with a query-only process handle."""
         open_process = self._function("kernel32", "OpenProcess", _HANDLE, _DWORD, _LONG, _DWORD)
         handle = open_process(0x101000, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION.
         if not handle:
-            return False
+            return 'IDENTITY_UNOBSERVABLE'
         try:
+            if self._process_creation_time(handle) != created:
+                return 'STALE_IDENTITY'
             wait = self._function("kernel32", "WaitForSingleObject", _DWORD, _HANDLE, _DWORD)
-            return self._process_creation_time(handle) == created and wait(handle, 0) == 0x102  # WAIT_TIMEOUT.
+            state = wait(handle, 0)
+            return {0: 'MATCHED_PROCESS_EXITED', 0x102: 'LIVE_IDENTITY_MATCH'}.get(state, 'IDENTITY_UNOBSERVABLE')
         finally:
             self.close(handle)
 
