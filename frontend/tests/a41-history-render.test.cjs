@@ -64,3 +64,43 @@ test('temperature difference shows both verified source turns and absolute-zero 
  html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message: failed }));
  assert.match(html, /cannot be below absolute zero \(0 K\)/);
 });
+
+test('local citations render literal evidence and stale evidence is hidden', () => {
+ const message = { id: 'answer', role: 'assistant', timestamp: '',
+   content: '“<img src=hidden> Pressure limit: 75 C.” [1]',
+   localKnowledge: { state: 'grounded', citations: [{ number: 1, label: 'limits.md', revision: 2,
+     passage_id: 'owned_chunk_0', line: 3, excerpt: '<img src=hidden> Pressure limit: 75 C.' }] } };
+ const render = () => renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ let html = render();
+ assert.match(html, /Verified local citations/);
+ assert.match(html, /\[1\] limits\.md.*line 3.*revision 2/);
+ assert.match(html, /&lt;img src=hidden&gt;/);
+ assert.doesNotMatch(html, /<img src=hidden>/);
+ message.withheld = true;
+ message.localKnowledge.state = 'unavailable';
+ html = render();
+ assert.match(html, /Local evidence is unavailable/);
+ assert.doesNotMatch(html, /Pressure limit|limits\.md|Verified local citations/);
+});
+
+test('multipart coverage links to real citations and shows uncovered parts', () => {
+ const message = { id: 'answer', role: 'assistant', timestamp: '', content: 'Partial answer',
+   localKnowledge: { state: 'partial', coverage: [
+     { question: 'What is operating pressure?', state: 'supported', citations: [1] },
+     { question: 'What is the alarm threshold?', state: 'absent', citations: [] },
+   ], citations: [{ number: 1, label: 'limits.md', revision: 3, passage_id: 'owned_chunk_0',
+     line: 8, heading: '# Operating limits', heading_line: 7, excerpt: 'Pressure: 3 bar.' }] } };
+ const html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /Cited evidence.*operating pressure/);
+ assert.match(html, /No evidence.*alarm threshold/);
+ assert.match(html, /href="#evidence-answer-1"/);
+ assert.match(html, /id="evidence-answer-1"/);
+ assert.match(html, /Section # Operating limits.*line 7/);
+ const turn = { id: 'question', role: 'user', timestamp: '', content: 'Original question', localTurn: {
+   state: 'completed', knowledge_scope_stale: true, knowledge_scope: {
+     mode: 'selected', sources: [{ label: 'limits.md', revision: 3 }],
+   },
+ } };
+ const scope = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message: turn }));
+ assert.match(scope, /Selected local sources.*limits\.md.*rev\. 3.*pinned revision is unavailable/);
+});

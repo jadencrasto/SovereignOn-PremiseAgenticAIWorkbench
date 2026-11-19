@@ -513,6 +513,7 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
     from backend.health.routes import refresh_local_inventory
     from backend.local_dev import announce_viewer, new_viewer, runtime_settings, validate_profile
     from backend.local_history import LocalHistoryStore, LocalRetention, exclusive_history
+    from backend.rag.local_knowledge import LocalKnowledge
 
     requested = app.state.settings
     validate_profile(requested)
@@ -537,11 +538,14 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
         history.renew_login(viewer.password_hash)
         store = AuthStore(history.path, initialize=False)
         app.state.local_viewer_id = history.owner
+        app.state.local_knowledge = LocalKnowledge(history.owner, path=retention.root / "knowledge-v1.json",
+                                                  keys=history.keys)
     else:
         cfg = runtime_settings(requested, root)
         store = AuthStore(cfg.tasks_db_path)
         store.create_user(viewer)
         app.state.local_viewer_id = viewer.id
+        app.state.local_knowledge = LocalKnowledge(viewer.id)
         keys = startup_provenance_keys(cfg.provenance_key_mode)
         registry = ConversationRegistry(cfg.tasks_db_path)
         memory = ConversationMemory(storage_file=cfg.conversation_memory_path, provenance_keys=keys)

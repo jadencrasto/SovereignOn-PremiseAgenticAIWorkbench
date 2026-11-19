@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 MEMORY_FILE = PROJECT_ROOT / "data" / "memory.json"
 _PLAIN_CHAT = 'independent_plain_chat'
 _CALCULATION = 'deterministic_calculation'
+_KNOWLEDGE = 'local_source_grounded'
 _PROVENANCE_VERSION = 3
 LOCAL_TURN_FIELD = 'local_turn_v1'
 LOCAL_PLAN_LIMIT = 3
@@ -86,6 +87,8 @@ def public_local_turn(record):
     public = {key: record[key] for key in fields if key in record}
     if record.get('tools_enabled') is False:
         public['tools_enabled'] = False
+    if 'knowledge_scope' in record:
+        public['knowledge_scope'] = record['knowledge_scope']['scope']
     return public
 
 
@@ -300,6 +303,11 @@ class ConversationMemory:
                 if 'calculator_progress' in turn and state != 'completed':
                     self._verified_local_progress(sid, (owner, active[sid]), message)
                     fields.add('calculator_progress')
+                if 'knowledge_scope' in turn:
+                    self._verified_knowledge_scope(sid, (owner, active[sid]), message)
+                    if 'numeric_tool' in turn or 'calculator_progress' in turn:
+                        raise ValueError('Invalid mixed local turn state')
+                    fields.add('knowledge_scope')
                 if state == 'completed' and set(turn) == fields | {'assistant_id'}:
                     expected_assistant = turn['assistant_id']
                     if not isinstance(expected_assistant, str) or not expected_assistant:
@@ -540,14 +548,28 @@ class ConversationMemory:
             fields.append(message.extra_fields[_LOCAL_NUMERIC_FIELD])
         if LOCAL_NUMERIC_SOURCE_FIELD in message.extra_fields:
             fields.append(message.extra_fields[LOCAL_NUMERIC_SOURCE_FIELD])
+        from backend.rag.local_knowledge import KNOWLEDGE_FIELD
+        if KNOWLEDGE_FIELD in message.extra_fields:
+            fields.append(message.extra_fields[KNOWLEDGE_FIELD])
         payload = json.dumps(fields, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
     @_synchronized
     def verify_assistant_provenance(self, session_id: str, message: Message, *, plain_only=False) -> bool:
+        from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KNOWLEDGE_PRODUCER, KnowledgeReceipt
+
         proof = message.extra_fields.get('access_provenance_v1')
         status = message.extra_fields.get('response_state_v1', 'completed')
         allowed_fields = {'access_provenance_v1', 'response_state_v1'}
+        knowledge_claim = None
+        if isinstance(proof, dict) and proof.get('kind') == _KNOWLEDGE:
+            if proof.get('producer') != KNOWLEDGE_PRODUCER or KNOWLEDGE_FIELD not in message.extra_fields:
+                return False
+            try:
+                knowledge_claim = KnowledgeReceipt.model_validate(message.extra_fields[KNOWLEDGE_FIELD])
+            except ValueError:
+                return False
+            allowed_fields.add(KNOWLEDGE_FIELD)
         if isinstance(proof, dict) and LOCAL_NUMERIC_SOURCE_FIELD in message.extra_fields:
             if (proof.get('producer') not in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION, LOCAL_RECALL_PRODUCER)
                     or not _valid_local_numeric_source(message.extra_fields[LOCAL_NUMERIC_SOURCE_FIELD])):
@@ -581,7 +603,7 @@ class ConversationMemory:
                 or not isinstance(proof, dict)
                 or set(proof) != {'version', 'kind', 'key_id', 'producer', 'position', 'mac'}
                 or type(proof['version']) is not int or proof['version'] != _PROVENANCE_VERSION
-                or proof['kind'] not in (_PLAIN_CHAT, _CALCULATION)
+                or proof['kind'] not in (_PLAIN_CHAT, _CALCULATION, _KNOWLEDGE)
                 or (plain_only and proof['kind'] != _PLAIN_CHAT)
                 or not isinstance(proof['producer'], str) or not proof['producer']
                 or type(proof['position']) is not int or proof['position'] < 0
@@ -600,6 +622,23 @@ class ConversationMemory:
         if (not owner or owner != self._current_owner() or not generation
                 or position >= len(messages) or messages[position].id != message.id):
             return False
+        if knowledge_claim is not None:
+            if position == 0:
+                return False
+            source_turn = messages[position - 1]
+            record = source_turn.extra_fields.get(LOCAL_TURN_FIELD, {})
+            if (source_turn.role != 'user' or source_turn.id != knowledge_claim.turn_id
+                    or not isinstance(record, dict) or record.get('attempt') != knowledge_claim.attempt
+                    or record.get('state') != 'completed'
+                    or record.get('assistant_id') != message.id
+                    or hashlib.sha256(source_turn.content.encode('utf-8')).hexdigest() != knowledge_claim.request_digest):
+                return False
+            try:
+                scope = self._verified_knowledge_scope(session_id, identity, source_turn)
+            except ValueError:
+                return False
+            if scope != knowledge_claim.scope:
+                return False
         if self._provenance_keys is None:
             key_id, key = self._provenance_key
             if proof['key_id'] != key_id:
@@ -615,6 +654,8 @@ class ConversationMemory:
 
     def verify_local_reply(self, session_id: str, message: Message) -> bool:
         proof = message.extra_fields.get('access_provenance_v1')
+        if isinstance(proof, dict) and proof.get('kind') == _KNOWLEDGE:
+            return self.verify_assistant_provenance(session_id, message)
         if isinstance(proof, dict) and proof.get('producer') in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION):
             return proof.get('kind') == _CALCULATION and self.verify_assistant_provenance(session_id, message)
         return self.verify_independent_plain_chat(session_id, message)
@@ -653,7 +694,8 @@ class ConversationMemory:
         return msg
 
     @_synchronized
-    def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model, *, tools_enabled=True):
+    def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model, *, tools_enabled=True,
+                         knowledge_scope=None):
         """Atomically persist admission or return the existing attempt's state."""
         if self.stream_identity(session_id) != identity:
             raise PermissionError('Conversation unavailable')
@@ -665,6 +707,8 @@ class ConversationMemory:
                 raise LocalTurnConflict('Turn ID is already bound to a different submission.')
             if record.get('tools_enabled', tools_enabled) is not tools_enabled:
                 raise LocalTurnConflict('Turn ID is already bound to a different tool preference.')
+            if self._verified_knowledge_scope(session_id, identity, turn) != knowledge_scope:
+                raise LocalTurnConflict('Turn ID is already bound to a different local source scope.')
             if attempt == record['attempt']:
                 return dict(record), False
             if (attempt != record['attempt'] + 1 or record['state'] not in {'failed', 'cancelled', 'interrupted'}
@@ -685,6 +729,11 @@ class ConversationMemory:
             record['numeric_tool'] = prior_tool
         if progress is not None:
             record['calculator_progress'] = progress
+        if knowledge_scope is not None:
+            scope = knowledge_scope.model_dump()
+            record['knowledge_scope'] = {
+                'scope': scope, 'mac': self._knowledge_scope_mac(session_id, identity, turn, model, scope),
+            }
         turn.extra_fields[LOCAL_TURN_FIELD] = record
         conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
         self._save()
@@ -693,7 +742,29 @@ class ConversationMemory:
     @_synchronized
     def read_local_turn(self, session_id, identity, turn_id):
         turn = self._owned_local_turn(session_id, identity, turn_id)
+        self._verified_knowledge_scope(session_id, identity, turn)
         return dict(turn.extra_fields[LOCAL_TURN_FIELD])
+
+    def _knowledge_scope_mac(self, session_id, identity, turn, model, scope):
+        payload = json.dumps(['local-knowledge-scope-v1', session_id, *identity, turn.id, turn.content, model, scope],
+                             sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
+        return hmac.new(self._provenance_key[1], payload, hashlib.sha256).hexdigest()
+
+    def _verified_knowledge_scope(self, session_id, identity, turn):
+        from backend.rag.local_knowledge import KnowledgeScope
+
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if 'knowledge_scope' not in record:
+            return None
+        binding = record['knowledge_scope']
+        if (not isinstance(binding, dict) or binding.keys() != {'scope', 'mac'}
+                or not isinstance(binding['mac'], str) or not re.fullmatch(r'[a-f0-9]{64}', binding['mac'])):
+            raise ValueError('Invalid local knowledge scope')
+        scope = KnowledgeScope.model_validate(binding['scope'])
+        expected = self._knowledge_scope_mac(session_id, identity, turn, record['model'], scope.model_dump())
+        if not hmac.compare_digest(binding['mac'], expected):
+            raise ValueError('Invalid local knowledge scope proof')
+        return scope
 
     @_synchronized
     def end_local_turn(self, session_id, identity, turn_id, attempt, state, error_code):
@@ -881,8 +952,15 @@ class ConversationMemory:
     def record_plain_response(
         self, session_id, identity, content, *, status=None, producer=None,
         access_provenance=None, calculation=False, local_turn=None, local_plan_digest=None, local_numeric_source=None,
+        local_knowledge=None,
     ):
         """Finalize the original live conversation and authenticate only eligible output."""
+        from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KNOWLEDGE_PRODUCER, KnowledgeReceipt
+
+        if local_knowledge is not None:
+            if (local_turn is None or producer != KNOWLEDGE_PRODUCER or local_plan_digest is not None
+                    or local_numeric_source is not None or calculation or status is not None):
+                raise ValueError('Invalid local knowledge response')
         if (status not in (None, 'interrupted', 'failed') or not isinstance(content, str)
                 or (calculation and (status is not None or not producer))
                 or (local_numeric_source is not None and (local_turn is None or not _valid_local_numeric_source(local_numeric_source)
@@ -913,7 +991,17 @@ class ConversationMemory:
                 calculation = True
             elif 'calculator_progress' in record:
                 raise LocalTurnConflict('Saved calculator work requires the original plan.')
+            if local_knowledge is not None:
+                receipt = KnowledgeReceipt.model_validate({
+                    **local_knowledge, 'turn_id': turn_id, 'attempt': attempt,
+                    'request_digest': hashlib.sha256(turn.content.encode('utf-8')).hexdigest(),
+                })
+                if receipt.scope != self._verified_knowledge_scope(session_id, identity, turn):
+                    raise LocalTurnConflict('Local knowledge receipt does not match the admitted source scope.')
+                local_knowledge = receipt.model_dump(exclude_none=True)
         msg = conv.add_message('assistant', content)
+        if local_knowledge is not None:
+            msg.extra_fields[KNOWLEDGE_FIELD] = local_knowledge
         if local_numeric_source is not None:
             msg.extra_fields[LOCAL_NUMERIC_SOURCE_FIELD] = dict(local_numeric_source)
         if events is not None:
@@ -929,7 +1017,7 @@ class ConversationMemory:
             key_id, key = self._provenance_key
             proof = {
                 'version': _PROVENANCE_VERSION,
-                'kind': _CALCULATION if calculation else _PLAIN_CHAT,
+                'kind': _KNOWLEDGE if local_knowledge is not None else _CALCULATION if calculation else _PLAIN_CHAT,
                 'key_id': key_id,
                 'producer': producer,
                 'position': len(conv.messages) - 1,

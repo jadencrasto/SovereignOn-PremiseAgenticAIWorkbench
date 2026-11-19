@@ -42,7 +42,38 @@ export interface ImageAttachment {
   objectUrl?: string;
 }
 
+export interface LocalKnowledgeScope {
+  corpus_id: string;
+  mode: 'all' | 'selected';
+  sources: { source_id: string; label: string; revision: number; digest: string }[];
+}
+
+export interface LocalKnowledgeResult {
+  state: 'grounded' | 'partial' | 'insufficient' | 'unavailable';
+  scope?: LocalKnowledgeScope;
+  coverage?: {
+    question: string;
+    state: 'supported' | 'incomplete' | 'absent' | 'conflict';
+    citations: number[];
+  }[];
+  citations: {
+    source_id: string;
+    label: string;
+    revision: number;
+    digest: string;
+    passage_id: string;
+    number: number;
+    line: number;
+    heading?: string;
+    heading_line?: number;
+    start: number;
+    end: number;
+    excerpt: string;
+  }[];
+}
+
 export interface ChatMessage {
+  localKnowledge?: LocalKnowledgeResult;
   id: string;
   role: MessageRole;
   content: string;
@@ -78,6 +109,8 @@ export interface ChatMessage {
 }
 
 export interface LocalTurnState {
+  knowledge_scope?: LocalKnowledgeScope;
+  knowledge_scope_stale?: boolean;
   attempt: number;
   tools_enabled?: false;
   model: string;

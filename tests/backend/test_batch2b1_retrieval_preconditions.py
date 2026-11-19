@@ -1,10 +1,8 @@
 """Regression for the pending/unregistered retrieval bypass documented in 2B.1."""
-from types import SimpleNamespace
-
 import pytest
 
 from backend.auth.request_context import effective_clearance, effective_owner
-from backend.rag.retriever import Retriever
+from backend.rag.retriever import RetrievalBlocked, Retriever
 from backend.security.provenance_foundation import QuarantinedSources
 from backend.tools.document_search import DocumentSearchInput, create_document_search
 
@@ -40,11 +38,11 @@ async def test_retriever_and_tool_deny_without_authoritative_source(tmp_path, re
         if registered:
             assert registry.read(source_id)['state'] == 'pending'
         retriever = Retriever(SyntheticEmbedder(), SyntheticStore(source_id))
-        chunks = await retriever.retrieve('synthetic', user_clearance='viewer')
-        assert chunks == []
+        with pytest.raises(RetrievalBlocked):
+            await retriever.retrieve('synthetic', user_clearance='viewer')
         tool = create_document_search(retriever)
-        result = await tool(DocumentSearchInput(query='synthetic'), user_role='viewer')
-        assert result == []
+        with pytest.raises(PermissionError):
+            await tool(DocumentSearchInput(query='synthetic'), user_role='viewer')
     finally:
         effective_clearance.reset(clearance)
         effective_owner.reset(owner)

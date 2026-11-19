@@ -8,7 +8,8 @@ from contextlib import aclosing
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.agent.engine import LocalToolError
@@ -17,6 +18,10 @@ from backend.api.chat import StreamingResponse
 from backend.auth.dependencies import get_current_user
 from backend.auth.request_context import dispatch_identity_resolver, request_tools_enabled
 from backend.health import routes as health
+from backend.multimodal.text_file import MAX_TEXT_FILE_BYTES, TextFileError
+from backend.rag.local_knowledge import (
+    KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeQuestionError, KnowledgeScope, knowledge_question, question_parts,
+)
 from backend.schemas.chat import ChatMessage, ChatResponse, MessageRole
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,8 @@ _ERRORS = {
     "LOCAL_TOOL_TARGET_UNIT": "Which unit should I convert the verified result to?",
     "LOCAL_TOOL_UNIT": "Use supported units of the same dimension. Specify US customary volume units.",
     "LOCAL_TOOL_ZERO_DIVISION": "Division by zero is undefined.",
+    "LOCAL_KNOWLEDGE_QUESTION": "Ask a local knowledge question of 1 to 600 characters with at most four parts.",
+    "LOCAL_KNOWLEDGE_CHANGED": "Selected local sources changed. Submit a new question with current sources.",
 }
 
 
@@ -78,6 +85,71 @@ async def change_local_retention(body: RetentionChange, request: Request, user=D
         return retention.set_next_mode(body.mode)
     except (OSError, ValueError):
         raise HTTPException(503, "Local history preference could not be saved.") from None
+
+
+def _owned_knowledge(request, user):
+    state = request.app.state
+    resolve = dispatch_identity_resolver.get()
+    current = resolve() if resolve else None
+    if (current is None or current.id != user.id or current.role != 'viewer'
+            or user.id != state.local_viewer_id):
+        raise HTTPException(403, "Only the local viewer can manage knowledge sources.")
+    if not state.startup_complete:
+        raise HTTPException(503, "Local knowledge is unavailable.")
+    return state.local_knowledge
+
+
+@router.get("/local-knowledge")
+async def read_local_knowledge(request: Request, user=Depends(get_current_user)):
+    return _owned_knowledge(request, user).status(user.id)
+
+
+async def _register_knowledge(request, user, filename, source_id=None, revision=None):
+    _owned_knowledge(request, user)
+    payload = bytearray()
+    async for chunk in request.stream():
+        if len(payload) + len(chunk) > MAX_TEXT_FILE_BYTES:
+            raise HTTPException(413, "The text file exceeds 2 KiB.")
+        payload.extend(chunk)
+    try:
+        return _owned_knowledge(request, user).register(
+            user.id, filename, bytes(payload), request.headers.get('content-type', ''),
+            source_id=source_id, revision=revision,
+        )
+    except TextFileError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    except KeyError:
+        raise HTTPException(404, "Local knowledge source not found.") from None
+    except KnowledgeConflict as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (OSError, ValueError):
+        raise HTTPException(503, "Local knowledge could not be saved.") from None
+
+
+@router.post("/local-knowledge/sources", status_code=201)
+async def add_knowledge(request: Request, filename: str = Query(min_length=1, max_length=128),
+                        user=Depends(get_current_user)):
+    return await _register_knowledge(request, user, filename)
+
+
+@router.put("/local-knowledge/sources/{source_id}")
+async def replace_knowledge(source_id: str, request: Request, filename: str = Query(min_length=1, max_length=128),
+                            revision: int = Query(ge=1, le=2**31 - 1), user=Depends(get_current_user)):
+    return await _register_knowledge(request, user, filename, source_id, revision)
+
+
+@router.delete("/local-knowledge/sources/{source_id}")
+async def remove_knowledge(source_id: str, request: Request, revision: int = Query(ge=1, le=2**31 - 1),
+                           user=Depends(get_current_user)):
+    try:
+        _owned_knowledge(request, user).remove(user.id, source_id, revision)
+    except KeyError:
+        raise HTTPException(404, "Local knowledge source not found.") from None
+    except KnowledgeConflict as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (OSError, ValueError):
+        raise HTTPException(503, "Local knowledge could not be saved.") from None
+    return {"removed": True}
 
 
 def _event(session_id, turn_id, attempt, sequence, kind, content="", **extra):
@@ -117,7 +189,8 @@ def _provider_error(exc):
 class LocalChatRun:
     """A single attempt's task and bounded, disposable outgoing SSE queue."""
 
-    def __init__(self, app_state, engine, session_id, turn_id, attempt, identity, *, stream, tools_enabled):
+    def __init__(self, app_state, engine, session_id, turn_id, attempt, identity, *, stream, tools_enabled,
+                 knowledge_scope=None):
         self.app_state = app_state
         self.engine = engine
         self.session_id = session_id
@@ -125,6 +198,7 @@ class LocalChatRun:
         self.attempt = attempt
         self.identity = identity
         self.tools_enabled = tools_enabled
+        self.knowledge_scope = knowledge_scope
         self.resolve_user = dispatch_identity_resolver.get()
         self.queue = asyncio.Queue(maxsize=64) if stream else None
         self.sequence = 0
@@ -277,28 +351,60 @@ async def submit_local_chat(body, request, engine, model_router):
     app_state = request.app.state
     runs = app_state.local_chat_runs
     model = "/".join(model_router.resolve_model(body.model))
+    selection = body.knowledge_source_ids
+    if selection is not None and len(selection) != len(set(selection)):
+        raise HTTPException(422, "Choose each local source only once.")
+    question = knowledge_question(body.message)
+    if selection is not None and question is None:
+        question = body.message.strip()
+    scope = None
     try:
         identity = memory.stream_identity(session_id)
         try:
             previous = memory.read_local_turn(session_id, identity, turn_id)
         except KeyError:
-            pass
+            previous = None
         else:
-            runs.reconcile(memory, session_id, identity, turn_id, previous)
+            previous = runs.reconcile(memory, session_id, identity, turn_id, previous)
+        corpus = app_state.local_knowledge
+        if previous is None and question is not None:
+            question_parts(question)
+            try:
+                scope = corpus.bind_scope(identity[0], selection)
+            except KeyError:
+                raise HTTPException(404, "One or more selected local sources are unavailable.",
+                                    headers={"X-Error-Code": "LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE"}) from None
+        elif previous is not None:
+            if 'knowledge_scope' in previous:
+                scope = KnowledgeScope.model_validate(previous['knowledge_scope']['scope'])
+                if not scope.matches_selection(selection):
+                    raise LocalTurnConflict('Turn ID is already bound to a different local source selection.')
+                if attempt > previous['attempt'] and previous['state'] in ('failed', 'cancelled', 'interrupted'):
+                    corpus.check_scope(identity[0], scope)
+            elif selection is not None:
+                raise LocalTurnConflict('Turn ID is already bound to a different submission.')
+            elif question is not None and attempt > previous['attempt']:
+                raise KnowledgeConflict('The original question has no saved source scope. Submit a new question.')
         tools_enabled = bool(body.tools_enabled and body.planning_enabled)
         record, admitted = memory.claim_local_turn(
             session_id, identity, turn_id, attempt, body.message, model, tools_enabled=tools_enabled,
+            knowledge_scope=scope,
         )
     except PermissionError:
         raise HTTPException(404, "Conversation not found") from None
     except LocalTurnConflict as exc:
         raise HTTPException(409, str(exc), headers={"X-Error-Code": "TURN_CONFLICT"}) from None
+    except KnowledgeQuestionError:
+        raise HTTPException(422, _ERRORS["LOCAL_KNOWLEDGE_QUESTION"],
+                            headers={"X-Error-Code": "LOCAL_KNOWLEDGE_QUESTION"}) from None
+    except KnowledgeConflict as exc:
+        raise HTTPException(409, str(exc), headers={"X-Error-Code": "LOCAL_KNOWLEDGE_CHANGED"}) from None
     except (OSError, sqlite3.Error, ValueError):
         raise HTTPException(503, _ERRORS["CHAT_UNAVAILABLE"]) from None
 
     if admitted:
         run = LocalChatRun(app_state, engine, session_id, turn_id, attempt, identity, stream=body.stream,
-                           tools_enabled=tools_enabled)
+                           tools_enabled=tools_enabled, knowledge_scope=scope)
         runs.start(run, body.message, model)
         if body.stream:
             return StreamingResponse(run.events(), media_type="text/event-stream", headers=_STREAM_HEADERS)
@@ -325,6 +431,7 @@ async def submit_local_chat(body, request, engine, model_router):
                   "LOCAL_TOOL_DIMENSION": 422, "LOCAL_TOOL_TEMPERATURE": 422, "LOCAL_TOOL_TARGET_UNIT": 422,
                   "LOCAL_TOOL_ABSOLUTE_ZERO": 422,
                   "LOCAL_TOOL_CONFIRMATION_REQUIRED": 403,
+                  "LOCAL_KNOWLEDGE_CHANGED": 409, "LOCAL_KNOWLEDGE_QUESTION": 422,
                   "LOCAL_TOOL_CHANGED_PLAN": 409}.get(extra["error_code"], 503)
         if record["state"] == "cancelled":
             status = 409
@@ -332,6 +439,12 @@ async def submit_local_chat(body, request, engine, model_router):
     answer = next((item for item in memory.get_history(session_id) if item.id == record["assistant_id"]), None)
     if answer is None or not memory.verify_local_reply(session_id, answer):
         raise HTTPException(503, _ERRORS["CHAT_UNAVAILABLE"])
+    if KNOWLEDGE_FIELD in answer.extra_fields:
+        knowledge = app_state.local_knowledge.public_receipt(identity[0], answer.extra_fields[KNOWLEDGE_FIELD])
+        if knowledge is None:
+            raise HTTPException(409, _ERRORS["LOCAL_KNOWLEDGE_CHANGED"])
+        return JSONResponse({"session_id": session_id, "message": {"role": "assistant", "content": answer.content},
+                             "model_used": record["model"], "local_knowledge": knowledge})
     return ChatResponse(session_id=session_id, message=ChatMessage(role=MessageRole.assistant, content=answer.content),
                         model_used=record["model"])
 

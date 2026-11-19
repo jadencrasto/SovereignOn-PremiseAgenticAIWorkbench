@@ -55,6 +55,23 @@ def _strict_json(data):
     return json.loads(data, object_pairs_hook=unique)
 
 
+def write_local_snapshot(path, data):
+    """Replace a dedicated local snapshot after its complete payload is on disk."""
+    _safe_path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix=".local-", suffix=".tmp",
+                                         delete=False) as file:
+            temporary = Path(file.name)
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class LocalRetention:
     def __init__(self, settings):
         self.override = settings.local_history_mode
@@ -102,19 +119,7 @@ class LocalRetention:
             return self.status()
         self.ensure_root()
         path = self.root / _PREFERENCE
-        _safe_path(path)
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.root,
-                                             prefix=".retention-", suffix=".tmp", delete=False) as file:
-                temporary = Path(file.name)
-                json.dump({"version": 1, "mode": mode}, file)
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(temporary, path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        write_local_snapshot(path, json.dumps({"version": 1, "mode": mode}).encode("utf-8"))
         return self.status()
 
 

@@ -1,4 +1,5 @@
 import { apiRequest, streamSSE, streamSSEFromFormData } from './client';
+import type { LocalKnowledgeResult } from '../types';
 import type {
   ChatRequestPayload,
   ChatResponsePayload,
@@ -211,6 +212,7 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
 interface SessionMessage {
   numeric_source_turn?: number;
   numeric_secondary_source_turn?: number;
+  local_knowledge?: LocalKnowledgeResult;
   id?: string | null;
   role: 'system' | 'user' | 'assistant';
   content: string;

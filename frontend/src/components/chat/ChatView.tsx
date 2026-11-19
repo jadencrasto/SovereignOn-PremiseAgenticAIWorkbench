@@ -9,6 +9,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import type { ChatMessage, ImageAttachment, SourceReference, StreamChunkPayload, StreamErrorInfo, ToolEvent } from '../../types';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
+import { LocalKnowledgePanel } from './LocalKnowledgePanel';
 import { useWorkbench } from '../../context/WorkbenchContext';
 import {
   createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, streamChatTextFiles,
@@ -132,6 +133,9 @@ export const ChatView: React.FC = () => {
   const selectionKey = `sovereign-active-conversation:${user?.id || ''}`;
   const { selectedModel, selectedVisionModel, addToast, capabilities, runProfile, isCheckingHealth, refreshCapabilities } = useWorkbench();
   const local = (runProfile ?? capabilities?.run_profile) === 'local_dev';
+  const [knowledgeActive, setKnowledgeActive] = useState(false);
+  const [knowledgeSelection, setKnowledgeSelection] = useState<string[] | null>(null);
+  const knowledgeAvailable = capabilities?.local_knowledge?.available === true;
   const lastLocalUser = local ? latestLocalUser(messages) : undefined;
   const localRunning = lastLocalUser?.localTurn?.state === 'running';
   const modelSelection = useRef({ selectedModel, selectedVisionModel, capabilities });
@@ -209,6 +213,13 @@ export const ChatView: React.FC = () => {
     }
   }, [addToast, clearConversation, handleSessionExpired, updateSessionCount]);
 
+  const refreshAfterSourceChange = useCallback(() => {
+    setMessages(previous => previous.map(message => message.localKnowledge ? {
+      ...message, content: '', withheld: true, localKnowledge: { state: 'unavailable', citations: [] },
+    } : message));
+    if (activeSessionId && !abortControllerRef.current) void refreshLocalHistory(activeSessionId);
+  }, [activeSessionId, refreshLocalHistory]);
+
   const runLocalSubmission = useCallback(async (command: LocalSubmission) => {
     if (abortControllerRef.current) return;
     const version = selectionVersion.current;
@@ -243,8 +254,13 @@ export const ChatView: React.FC = () => {
           message.id === previewId ? { ...message, content: message.content + delta } : message)),
         onSources: () => {},
         onDone: () => {},
-        onError: (_message: string, info?: StreamErrorInfo) => {
+        onError: (message: string, info?: StreamErrorInfo) => {
           if (info?.status === 401) handleSessionExpired();
+          if (info?.status && ['LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE', 'LOCAL_KNOWLEDGE_CHANGED',
+            'LOCAL_KNOWLEDGE_QUESTION'].includes(info.code ?? '')) {
+            pendingLocal.current = null;
+            addToast('info', message);
+          }
           // Even an error can race a completed write. History decides the outcome.
         },
       }, current), controller.signal);
@@ -263,7 +279,7 @@ export const ChatView: React.FC = () => {
         }
       }
     }
-  }, [handleSessionExpired, refreshLocalHistory, updateSessionCount]);
+  }, [addToast, handleSessionExpired, refreshLocalHistory, updateSessionCount]);
 
   useEffect(() => {
     updateSessionCount();
@@ -318,6 +334,14 @@ export const ChatView: React.FC = () => {
     async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange, batch?: TextFileBatch) => {
       if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current ||
           (local && (localRunning || localNotice || pendingLocal.current || localStopping))) return;
+      if (local && knowledgeActive && !knowledgeAvailable) {
+        addToast('info', 'Local knowledge is unavailable. Switch to general chat or wait for it to reconnect.');
+        return;
+      }
+      if (local && knowledgeActive && knowledgeSelection?.length === 0) {
+        addToast('info', 'Choose at least one registered local source.');
+        return;
+      }
       if (textFile && capabilities?.text_file_understanding !== true) {
         addToast('info', 'Text-file questions require the authenticated local chat-only profile.');
         return;
@@ -403,8 +427,12 @@ export const ChatView: React.FC = () => {
         }
       }
       if (local) {
+        const explicitlyScoped = /^\s*(?:according to|from|using|use)\s+(?:(?:my|the|our|your)\s+)?(?:registered\s+)?local\s+(?:knowledge(?:\s+sources)?|sources)\b/i.test(text);
+        const question = knowledgeActive && !explicitlyScoped
+          ? `According to my local sources, ${text}` : text;
         await runLocalSubmission({
-          session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: text, model: selectedModel,
+          session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: question, model: selectedModel,
+          ...(knowledgeActive && knowledgeSelection ? { knowledge_source_ids: knowledgeSelection } : {}),
         });
         return;
       }
@@ -725,7 +753,7 @@ export const ChatView: React.FC = () => {
         if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, localNotice, localStopping, runLocalSubmission]
+    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, localNotice, localStopping, runLocalSubmission, knowledgeAvailable, knowledgeActive, knowledgeSelection]
   );
 
   /**
@@ -1184,6 +1212,9 @@ export const ChatView: React.FC = () => {
           )}
         </div>
       )}
+      {local && <LocalKnowledgePanel available={knowledgeAvailable} active={knowledgeActive}
+        setActive={setKnowledgeActive} selection={knowledgeSelection} setSelection={setKnowledgeSelection}
+        onRevision={refreshAfterSourceChange} />}
       {/* 4. Input Composer */}
       <ChatInput
         key={activeSessionId ? activeSessionId + ':' + draftRevision : 'new-draft-' + draftRevision}

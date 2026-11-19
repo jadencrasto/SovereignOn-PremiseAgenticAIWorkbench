@@ -43,6 +43,7 @@ export async function loadSession(id: string): Promise<ChatSession> {
     localTurn: m.turn,
     numericSourceTurn: m.numeric_source_turn,
     numericSecondarySourceTurn: m.numeric_secondary_source_turn,
+    localKnowledge: m.local_knowledge,
     attachments: m.attachments?.map(attachment => ({
       id: attachment.attachment_id, filename: attachment.filename,
       mimeType: attachment.mime_type, sizeBytes: attachment.size_bytes,
@@ -212,7 +213,13 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
 
     for (const m of s.messages) {
       md += `### ${m.role === 'user' ? '👤 User' : '🤖 Sovereign Assistant'} (${m.timestamp})\n\n`;
-      md += `${m.withheld ? '[Response withheld: source access cannot be verified.]' : m.content}\n\n`;
+      if (!m.withheld && m.localKnowledge) {
+        const evidence = m.localKnowledge.citations.map(citation =>
+          `[${citation.number}] ${citation.label}, revision ${citation.revision}, line ${citation.line}`);
+        md += [m.content, ...evidence].join('\n').split('\n').map(line => '    ' + line).join('\n') + '\n\n';
+      } else {
+        md += `${m.withheld ? '[Response withheld: source access cannot be verified.]' : m.content}\n\n`;
+      }
       if (!m.withheld && m.sources && m.sources.length > 0) {
         md += `**Sources:**\n`;
         for (const src of m.sources) {

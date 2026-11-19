@@ -3,10 +3,12 @@ const {test}=require('node:test'), assert=require('node:assert/strict'), fs=requ
 let slots, cursor, requests, effects, textBlocked=false, textModel='fake', authRefreshes=0;
 const React={createElement:(type,props,...children)=>({type,props:{...props,children}}),useState(initial){let i=cursor++;if(!(i in slots))slots[i]=typeof initial==='function'?initial():initial;return [slots[i],v=>{slots[i]=typeof v==='function'?v(slots[i]):v}]},useRef(initial){let i=cursor++;return slots[i]??=( {current:initial} )},useCallback(f){cursor++;return f},useEffect(effect){cursor++;effects.push(effect)}};
 function MessageList(){} function ChatInput(){} function ChatHistorySidebar(){}
+function LocalKnowledgePanel(){}
 let createImpl=async()=>({session_id:'created-server-id'});
 let visionModel = 'ollama/vision:7b';
 let localMode = false;
 let localOffline = false;
+let localKnowledgeAvailable = false;
 let historyImpl = async () => ({id:'server-session',title:'Conversation',messages:[]});
 const api={createSession:signal=>createImpl(signal),fetchSessions:async()=>({count:0}),streamChat(payload,callbacks,signal){let resolve;let p=new Promise(r=>resolve=r);requests.push({payload,callbacks,signal,resolve});return p},guardChatCallbacks(callbacks,active){return new Proxy(callbacks,{get:(t,p)=>(...a)=>{if(active())t[p](...a)}})}};
 api.streamChatMultimodal = api.streamChat;
@@ -25,12 +27,14 @@ localTurnsMod._compile(ts.transpileModule(fs.readFileSync(localTurnsFile,'utf8')
 }).outputText,localTurnsFile);
 const mocks={react:React,'./MessageList':{MessageList},'./ChatInput':{ChatInput},'./ChatHistorySidebar':{ChatHistorySidebar,loadSession:async()=>({id:'server-session',title:'Conversation',messages:[]})},'../../context/AuthContext':{useAuth:()=>({user:{id:'a'},refreshUser:async()=>{authRefreshes++;}})},'../../api/chat':api,'../../context/WorkbenchContext':{useWorkbench:()=>({selectedModel:textModel,selectedVisionModel:visionModel,addToast(){},capabilities:{text_file_understanding:true},isCheckingHealth:false})},'../../api/capabilities':{capabilityFor:()=>({state:'available'}),chatDisabled:(_report,image)=>image?false:textBlocked,describeCapability:()=>'',permitsCapability:()=>false},'../../api/tasks':{},'lucide-react':{Clock:()=>null,Plus:()=>null}};
 mocks['./localTurns']=localTurnsMod.exports;
+mocks['./LocalKnowledgePanel']={LocalKnowledgePanel};
 mocks['./ChatHistorySidebar'].loadSession = id => historyImpl(id);
 const mockWorkbench = mocks['../../context/WorkbenchContext'].useWorkbench;
 mocks['../../context/WorkbenchContext'].useWorkbench = () => {
   const state = mockWorkbench();
   return localMode ? { ...state, runProfile: 'local_dev',
-    capabilities: localOffline ? null : { run_profile: 'local_dev' } } : state;
+    capabilities: localOffline ? null : { run_profile: 'local_dev',
+      local_knowledge: localKnowledgeAvailable ? { available: true, mode: 'bounded_lexical' } : undefined } } : state;
 };
 const file=path.resolve(__dirname,'../src/components/chat/ChatView.tsx');const out=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;const mod=new Module(file,module);mod.filename=file;mod.paths=Module._nodeModulePaths(path.dirname(file));let orig=mod.require.bind(mod);mod.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);mod._compile(out,file);
 function render(){cursor=0;effects=[];return mod.exports.ChatView()} function find(n,t){if(!n||typeof n!=='object')return;if(n.type===t)return n;for(let c of n.props?.children||[]){let x=find(c,t);if(x)return x}} function parts(){let tree=render();return {tree,input:find(tree,ChatInput).props,list:find(tree,MessageList).props,sidebar:find(tree,ChatHistorySidebar)?.props}} function setup(){slots=[];requests=[];parts();slots[3]='server-session';return parts()}
@@ -53,6 +57,48 @@ test('a second submission from the same render cannot replace the active stream'
   requests[1].callbacks.onDone('server-session', 'fake');
   requests[1].resolve();
   await next;
+});
+
+test('local knowledge opt-in routes the question and displays only reconciled evidence', async (t) => {
+  localMode = localKnowledgeAvailable = true;
+  historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [
+    { id: 'owned-answer', role: 'assistant', content: 'Verified answer', localKnowledge: { state: 'grounded', citations: [] } },
+  ] });
+  t.after(() => {
+    localMode = localKnowledgeAvailable = false;
+    historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [] });
+  });
+  const view = setup();
+  const panel = find(view.tree, LocalKnowledgePanel).props;
+  assert.equal(panel.active, false);
+  panel.setActive(true);
+  panel.setSelection([]);
+  await parts().input.onSendMessage('What is the operating pressure?');
+  assert.equal(requests.length, 0);
+  panel.setSelection(['first-source', 'second-source']);
+  const pending = parts().input.onSendMessage('From the manual in local sources, what is the operating limit?');
+  assert.equal(requests[0].payload.message, 'According to my local sources, From the manual in local sources, what is the operating limit?');
+  assert.deepEqual(requests[0].payload.knowledge_source_ids, ['first-source', 'second-source']);
+  requests[0].resolve();
+  await pending;
+  assert.equal(parts().list.messages[0].localKnowledge.state, 'grounded');
+  localKnowledgeAvailable = false;
+  await parts().input.onSendMessage('What about the compressor?');
+  assert.equal(requests.length, 1);
+});
+
+test('retry rebuilds the original source selection from history and blocks stale scopes', () => {
+  const turn = { id: 'existing-turn', content: 'What is the pressure?', localTurn: {
+    state: 'cancelled', attempt: 1, model: 'ollama/test',
+    knowledge_scope: { mode: 'selected', sources: [{ source_id: 'original', revision: 4 }] },
+  } };
+  const retry = localTurnsMod.exports.retryLocalSubmission;
+  assert.deepEqual(retry('owned-session', turn), {
+    session_id: 'owned-session', turn_id: 'existing-turn', attempt: 2, model: 'ollama/test',
+    message: 'What is the pressure?', knowledge_source_ids: ['original'],
+  });
+  turn.localTurn.knowledge_scope_stale = true;
+  assert.equal(retry('owned-session', turn), null);
 });
 test('image chat pins the selected vision model, shows progress and handles a terminal error', async (t) => {
   const { input } = setup();

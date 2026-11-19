@@ -107,6 +107,8 @@ def install_http_boundary(app, cfg: Settings, dist: Path) -> None:
             return JSONResponse({"detail": "This capability is disabled in local development."}, 403)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = _CONTENT_POLICY
+        if path == "/api/chat" or path.startswith("/api/chat/"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     app.mount("/", StaticFiles(directory=dist, html=True, check_dir=False), name="local-frontend")

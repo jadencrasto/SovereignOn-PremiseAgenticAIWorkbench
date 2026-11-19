@@ -158,6 +158,8 @@ async def chat(
         from backend.api.local_chat import submit_local_chat
 
         return await submit_local_chat(body, request, engine, model_router)
+    if 'knowledge_source_ids' in body.model_fields_set:
+        raise HTTPException(403, 'Local knowledge requires the local development profile.')
     session_id = body.session_id or str(uuid.uuid4())
     from backend.auth.request_context import request_tools_enabled
     request_tools_enabled.set(bool(body.tools_enabled))
@@ -1904,6 +1906,7 @@ async def read_session(
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
     from backend.agent.memory import LOCAL_NUMERIC_SOURCE_FIELD, LOCAL_TURN_FIELD, public_local_turn, safe_image_attachment, safe_tool_history
+    from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeScope
     from backend.multimodal.text_file import safe_text_attachment
     from backend.security.conversation_access import may_read_assistant
     # Only server-owned task records can contribute read-only recovery state.
@@ -1934,14 +1937,21 @@ async def read_session(
     doc_service = getattr(engine, '_doc_service', None)
     visible_messages = []
     local_runs = getattr(request.app.state, 'local_chat_runs', None) if request is not None else None
+    corpus = getattr(request.app.state, 'local_knowledge', None) if local_runs is not None else None
     turn_numbers = {}
     for message in messages:
         if message.role == 'system':
             continue
-        source_turn_number = secondary_turn_number = None
+        source_turn_number = secondary_turn_number = knowledge = None
         if message.role == 'assistant':
             verified = engine._memory.verify_assistant_provenance(session_id, message)
             allowed = verified or may_read_assistant(message, doc_service, clearance)
+            if KNOWLEDGE_FIELD in message.extra_fields:
+                if verified and corpus and current_user.id == corpus.owner and current_user.role == 'viewer':
+                    knowledge = corpus.public_receipt(current_user.id, message.extra_fields[KNOWLEDGE_FIELD])
+                allowed = knowledge is not None
+                if knowledge is None:
+                    knowledge = {"state": "unavailable", "citations": []}
             if local_runs is not None and verified:
                 source = message.extra_fields.get(LOCAL_NUMERIC_SOURCE_FIELD)
                 if source:
@@ -1955,10 +1965,17 @@ async def read_session(
         if message.role == 'user' and attachment is None:
             attachment = safe_text_attachment(message.extra_fields.get('text_attachment_v1'))
         turn = message.extra_fields.get(LOCAL_TURN_FIELD) if local_runs is not None and allowed and message.role == 'user' else None
+        public_turn = None
         if turn:
             turn_numbers[message.id] = len(turn_numbers) + 1
             try:
                 turn = local_runs.reconcile(engine._memory, session_id, identity, message.id, turn)
+                public_turn = public_local_turn(turn)
+                if corpus and 'knowledge_scope' in public_turn:
+                    try:
+                        corpus.check_scope(current_user.id, KnowledgeScope.model_validate(public_turn['knowledge_scope']))
+                    except KnowledgeConflict:
+                        public_turn['knowledge_scope_stale'] = True
             except (PermissionError, KeyError):
                 raise HTTPException(404, 'Conversation not found') from None
         visible_messages.append({
@@ -1970,10 +1987,11 @@ async def read_session(
             if message.role == 'assistant' and allowed else [],
             "withheld": not allowed,
             **({"attachments": [attachment]} if attachment else {}),
-            **({"turn": public_local_turn(turn)} if turn else {}),
+            **({"turn": public_turn} if public_turn else {}),
             **({"numeric_source_turn": source_turn_number} if source_turn_number else {}),
             **({"numeric_secondary_source_turn": secondary_turn_number}
                if secondary_turn_number and secondary_turn_number != source_turn_number else {}),
+            **({"local_knowledge": knowledge} if knowledge is not None else {}),
         })
     try:
         if engine._memory.stream_identity(session_id) != identity:

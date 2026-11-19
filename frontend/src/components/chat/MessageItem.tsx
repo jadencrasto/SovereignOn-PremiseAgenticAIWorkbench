@@ -229,9 +229,18 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 LOCAL_TOOL_TARGET_UNIT: 'Which unit should I convert the verified result to?',
                 LOCAL_TOOL_UNIT: 'Use supported units of the same dimension. Specify US customary volume units.',
                 LOCAL_TOOL_ZERO_DIVISION: 'Division by zero is undefined.',
+                LOCAL_KNOWLEDGE_QUESTION: 'Ask a local knowledge question of 1 to 600 characters with at most four parts.',
+                LOCAL_KNOWLEDGE_CHANGED: 'Selected local sources changed. Submit a new question with current sources.',
               } as Record<string, string>)[message.localTurn.error_code || ''] || 'The response could not be completed.'
                 : { running: 'Response running', cancelled: 'Response cancelled',
                     interrupted: 'Response interrupted' }[message.localTurn.state]}
+            </p>
+          )}
+          {message.localTurn?.knowledge_scope && !message.withheld && (
+            <p className="mt-2 break-words text-xs text-slate-600">
+              {message.localTurn.knowledge_scope.mode === 'all' ? 'All local sources at submission' : 'Selected local sources'}
+              {' · '}{message.localTurn.knowledge_scope.sources.map(source => `${source.label} (rev. ${source.revision})`).join(', ') || 'Empty corpus'}
+              {message.localTurn.knowledge_scope_stale && ' · A pinned revision is unavailable'}
             </p>
           )}
         </div>
@@ -286,7 +295,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
           </div>
         )}
         {message.withheld ? (
-          <p role="status" className="text-sm text-slate-600">This response is withheld because its source access cannot be verified.</p>
+          <p role="status" className="text-sm text-slate-600">{message.localKnowledge?.state === 'unavailable'
+            ? 'Local evidence is unavailable. A source may have changed or been removed.'
+            : 'This response is withheld because its source access cannot be verified.'}</p>
         ) : message.error ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2 font-semibold text-sm text-rose-600">
@@ -346,7 +357,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
 
             {message.content ? (
               <div className="font-sans">
-                {message.textFileAnswer ? <FileAnswer message={message} />
+                {message.localKnowledge ? (
+                  <>
+                    <p className="mb-2 text-xs font-medium text-slate-600">Local knowledge</p>
+                    <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
+                  </>
+                ) : message.textFileAnswer ? <FileAnswer message={message} />
                   : <MarkdownContent content={message.content} />}
               </div>
             ) : (
@@ -380,6 +396,39 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             </p>}
           {message.localPreview && message.content && <p className="mt-2 text-xs text-slate-600">Streaming preview</p>}
           </>
+        )}
+
+        {!message.withheld && message.localKnowledge?.coverage && (
+          <ul aria-label="Evidence by question part" className="mt-3 space-y-2 border-t border-slate-200 pt-2 text-xs">
+            {message.localKnowledge.coverage.map((part, index) => (
+              <li key={index}>
+                <span className="font-medium">{({
+                  supported: 'Cited evidence', incomplete: 'Incomplete evidence',
+                  absent: 'No evidence', conflict: 'Conflicting evidence',
+                })[part.state]}</span>
+                {' · '}{part.question}
+                {part.citations.map(number => (
+                  <a key={number} className="ml-1 underline" href={`#evidence-${message.id}-${number}`}>[{number}]</a>
+                ))}
+              </li>
+            ))}
+          </ul>
+        )}
+        {!message.withheld && message.localKnowledge && message.localKnowledge.citations.length > 0 && (
+          <section aria-label="Verified local citations" className="mt-3 space-y-2">
+            {message.localKnowledge.citations.map(citation => (
+              <details id={`evidence-${message.id}-${citation.number}`} key={citation.passage_id}
+                className="rounded-lg border border-slate-200 p-2 text-xs">
+                <summary className="cursor-pointer break-words font-medium">
+                  [{citation.number}] {citation.label} · line {citation.line} · revision {citation.revision}
+                </summary>
+                {citation.heading && <p className="mt-2 break-words font-medium">
+                  Section {citation.heading} · line {citation.heading_line}
+                </p>}
+                <p className="mt-2 whitespace-pre-wrap break-words">{citation.excerpt}</p>
+              </details>
+            ))}
+          </section>
         )}
 
         {/* Sources Grid */}

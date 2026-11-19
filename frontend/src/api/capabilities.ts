@@ -42,6 +42,7 @@ export interface CapabilityReport {
   run_profile?: 'local_dev';
   history_retention?: 'disposable' | 'durable';
   local_tools?: LocalTools;
+  local_knowledge?: { available: boolean; mode: 'bounded_lexical' };
   deployment_verified: false;
   capabilities: Record<CapabilityName, Capability>;
   models: Record<string, Capability & { id: string | null }>;
@@ -150,6 +151,8 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
       (report.history_retention !== undefined && (report.run_profile !== 'local_dev' ||
         !['disposable', 'durable'].includes(report.history_retention))) ||
       (report.local_tools !== undefined && (report.run_profile !== 'local_dev' || !isLocalTools(report.local_tools))) ||
+      (report.local_knowledge !== undefined && (report.run_profile !== 'local_dev' || !report.local_knowledge ||
+        typeof report.local_knowledge.available !== 'boolean' || report.local_knowledge.mode !== 'bounded_lexical')) ||
       !report.capabilities || !Object.keys(capabilityLabels).every(key =>
         isCapability(report.capabilities?.[key as CapabilityName])) ||
       !report.models || !['default_chat', 'image_chat', 'vision', 'embedding'].every(key => {

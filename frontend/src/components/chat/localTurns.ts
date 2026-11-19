@@ -7,6 +7,7 @@ export interface LocalSubmission {
   message: string;
   model: string;
   tools_enabled?: false;
+  knowledge_source_ids?: string[];
 }
 
 export function createLocalSubmission(sessionId: string, message: string, model: string): LocalSubmission {
@@ -21,10 +22,14 @@ export function createLocalSubmission(sessionId: string, message: string, model:
 
 export function retryLocalSubmission(sessionId: string, message?: ChatMessage): LocalSubmission | null {
   const turn = message?.localTurn;
-  if (!message || !turn || message.withheld || turn.state === 'completed' || turn.state === 'running') return null;
+  if (!message || !turn || message.withheld || turn.state === 'completed' || turn.state === 'running' ||
+      turn.knowledge_scope_stale || turn.error_code === 'LOCAL_KNOWLEDGE_CHANGED') return null;
   const retry: LocalSubmission = { session_id: sessionId, turn_id: message.id, attempt: turn.attempt + 1,
     message: message.content, model: turn.model };
   if (turn.tools_enabled === false) retry.tools_enabled = false;
+  if (turn.knowledge_scope?.mode === 'selected') {
+    retry.knowledge_source_ids = turn.knowledge_scope.sources.map(source => source.source_id);
+  }
   return retry;
 }
 

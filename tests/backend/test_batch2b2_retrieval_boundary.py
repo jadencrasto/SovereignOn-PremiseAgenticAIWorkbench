@@ -70,8 +70,10 @@ async def test_document_routes_do_not_trust_injected_service():
     from backend.auth.models import User
     user = User(id='a', username='a', password_hash='synthetic', role='operator', clearance='L1', created_at='2026-01-01T00:00:00Z')
     service = MagicMock()
-    response = await list_documents(service, user)
-    assert response.total == 0
+    with pytest.raises(HTTPException) as exc:
+        await list_documents(service, user)
+    assert exc.value.status_code == 503
+    service.list_documents.assert_not_called()
     with pytest.raises(HTTPException) as exc:
         await get_document('doc', service, user)
     assert exc.value.status_code == 404

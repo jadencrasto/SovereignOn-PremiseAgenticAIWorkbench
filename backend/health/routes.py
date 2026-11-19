@@ -198,6 +198,11 @@ def _with_local_tools(report, state):
         for name in LOCAL_CHAT_TOOLS
     }
     report['local_tools'] = {'enabled': any(tool['available'] for tool in tools.values()), 'tools': tools}
+    from backend.rag.local_knowledge import RETRIEVAL_MODE
+    report['local_knowledge'] = {
+        'available': bool(getattr(state, 'local_knowledge', None) and getattr(state, 'startup_complete', False)),
+        'mode': RETRIEVAL_MODE,
+    }
     return report
 
 
