@@ -14,7 +14,7 @@ _UNITS = {
 }
 LocalUnit = Literal[
     'mm', 'cm', 'm', 'km', 'in', 'ft', 'mi', 'mg', 'g', 'kg', 'oz', 'lb',
-    '°C', '°F', 'K', 's', 'min', 'h', 'mL', 'L', 'US fl oz', 'US cup', 'US gal',
+    '°C', '°F', 'K', 'Δ°C', 'Δ°F', 'ΔK', 's', 'min', 'h', 'mL', 'L', 'US fl oz', 'US cup', 'US gal',
 ]
 # NIST Handbook 44 Appendix C and Handbook 130 customary conversion factors.
 # The US customary cup and fluid ounce are 1/16 and 1/128 US liquid gallon.
@@ -28,7 +28,39 @@ _LOCAL_UNITS = {
     'US fl oz': ('volume', Decimal('0.0295735295625')),
     'US cup': ('volume', Decimal('0.2365882365')), 'US gal': ('volume', Decimal('3.785411784')),
 }
-_TEMPERATURE = {'°C', '°F', 'K'}
+_ABSOLUTE_ZERO = {'°C': Decimal('-273.15'), '°F': Decimal('-459.67'), 'K': Decimal('0')}
+_DIFFERENCE = {f'Δ{unit}' for unit in _ABSOLUTE_ZERO}
+
+
+class BelowAbsoluteZero(ValueError):
+    """An absolute temperature exceeded its physical lower bound."""
+
+
+def local_unit_dimension(unit: LocalUnit) -> str:
+    if unit in _ABSOLUTE_ZERO or unit in _DIFFERENCE:
+        return 'temperature'
+    return _LOCAL_UNITS[unit][0]
+
+
+def validate_absolute_temperature(value, unit) -> None:
+    if unit in _ABSOLUTE_ZERO and Decimal(str(value)) < _ABSOLUTE_ZERO[unit]:
+        raise BelowAbsoluteZero('Absolute temperature cannot be below absolute zero')
+
+
+def absolute_zero_expression(value, unit, operation, change, change_unit) -> str | None:
+    """Validate the lower bound and preserve exact cancellation at absolute zero."""
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        # Work in ninths of a kelvin before either tool rounds its inputs.
+        scale = 5 if unit == '°F' else 9
+        zero = _ABSOLUTE_ZERO[unit]
+        base = (Decimal(str(value)) - zero) * scale
+        delta = Decimal(str(change)) * (5 if change_unit == 'Δ°F' else 9)
+        remaining = base + delta if operation == '+' else base - delta
+        if remaining < 0:
+            raise BelowAbsoluteZero('Absolute temperature cannot be below absolute zero')
+        if remaining == 0:
+            return f'({zero}) + (({base}) {operation} ({delta})) / {scale}'
+    return None
 
 class UnitConversionInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -61,6 +93,15 @@ def unit_scale_factors(from_unit: str, to_unit: str, *, local=False) -> tuple[De
 
 
 def _convert_temperature(value: Decimal, source: str, target: str) -> Decimal:
+    if source in _DIFFERENCE and target in _DIFFERENCE:
+        if source == 'Δ°F' and target != 'Δ°F':
+            return value * 5 / 9
+        if target == 'Δ°F' and source != 'Δ°F':
+            return value * 9 / 5
+        return value
+    if source not in _ABSOLUTE_ZERO or target not in _ABSOLUTE_ZERO:
+        raise ValueError('Incompatible temperature types')
+    validate_absolute_temperature(value, source)
     if source == target:
         return value
     if source == '°C':
@@ -80,7 +121,8 @@ def convert_units(value: float, from_unit: str, to_unit: str, *, local=False) ->
     try:
         if local:
             with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
-                if from_unit in _TEMPERATURE and to_unit in _TEMPERATURE:
+                if (from_unit in _ABSOLUTE_ZERO or from_unit in _DIFFERENCE
+                        or to_unit in _ABSOLUTE_ZERO or to_unit in _DIFFERENCE):
                     result = float(_convert_temperature(Decimal(str(value)), from_unit, to_unit))
                 else:
                     source, target = unit_scale_factors(from_unit, to_unit, local=True)

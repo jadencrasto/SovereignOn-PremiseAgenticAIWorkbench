@@ -59,7 +59,7 @@ class PlanValidator:
         self._tool_registry = tool_registry
         self._max_plan_steps = max_plan_steps
 
-    def validate(self, plan: AgentPlan, *, tool_lookup=None) -> List[PlanValidationError]:
+    def validate(self, plan: AgentPlan, *, tool_lookup=None, local_measurement=False) -> List[PlanValidationError]:
         """
         Validate an entire plan.  Returns a list of errors (empty = valid).
 
@@ -130,8 +130,9 @@ class PlanValidator:
                         source = previous_steps.get(ref)
                         if source and source.tool_name == 'calculator':
                             continue
-                        if (source and source.tool_name == 'unit_conversion' and step is plan.steps[-1]
-                                and terminal_scale_reference(expression) == ref):
+                        if (source and source.tool_name == 'unit_conversion'
+                                and (local_measurement or (step is plan.steps[-1]
+                                                           and terminal_scale_reference(expression) == ref))):
                             continue
                         errors.append(PlanValidationError(step.id, 'Invalid calculator dependency'))
                     if '@' in re.sub(r'@[A-Za-z0-9_]+\.result', '', expression):

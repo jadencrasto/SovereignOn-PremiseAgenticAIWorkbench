@@ -45,6 +45,22 @@ LOCAL_PLAN_LIMIT = 3
 _LOCAL_CALCULATOR = 'local-verified-calculator'
 _LOCAL_CONVERSION = 'local-verified-unit-conversion'
 _LOCAL_NUMERIC_FIELD = 'numeric_result_v1'
+LOCAL_NUMERIC_SOURCE_FIELD = 'numeric_source_v1'
+LOCAL_RECALL_PRODUCER = 'local-verified-result-recall'
+
+
+def _valid_local_numeric_source(source):
+    keys = {'turn_id', 'attempt', 'invocation_id'}
+
+    def valid_link(link):
+        return (link.keys() == keys
+                and all(isinstance(link[key], str) and re.fullmatch(r'[a-f0-9-]{36}', link[key])
+                        for key in ('turn_id', 'invocation_id'))
+                and type(link['attempt']) is int and link['attempt'] >= 1)
+
+    return (isinstance(source, dict)
+            and valid_link({key: value for key, value in source.items() if key != 'secondary'})
+            and ('secondary' not in source or (isinstance(source['secondary'], dict) and valid_link(source['secondary']))))
 
 
 def _local_number(value):
@@ -522,6 +538,8 @@ class ConversationMemory:
             fields.append(message.extra_fields['tool_events_v1'])
         if _LOCAL_NUMERIC_FIELD in message.extra_fields:
             fields.append(message.extra_fields[_LOCAL_NUMERIC_FIELD])
+        if LOCAL_NUMERIC_SOURCE_FIELD in message.extra_fields:
+            fields.append(message.extra_fields[LOCAL_NUMERIC_SOURCE_FIELD])
         payload = json.dumps(fields, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
@@ -530,13 +548,20 @@ class ConversationMemory:
         proof = message.extra_fields.get('access_provenance_v1')
         status = message.extra_fields.get('response_state_v1', 'completed')
         allowed_fields = {'access_provenance_v1', 'response_state_v1'}
+        if isinstance(proof, dict) and LOCAL_NUMERIC_SOURCE_FIELD in message.extra_fields:
+            if (proof.get('producer') not in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION, LOCAL_RECALL_PRODUCER)
+                    or not _valid_local_numeric_source(message.extra_fields[LOCAL_NUMERIC_SOURCE_FIELD])):
+                return False
+            allowed_fields.add(LOCAL_NUMERIC_SOURCE_FIELD)
         if (isinstance(proof, dict) and proof.get('kind') == _CALCULATION
                 and proof.get('producer') in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION)):
             events = message.extra_fields.get('tool_events_v1')
             tool = 'calculator' if proof['producer'] == _LOCAL_CALCULATOR else 'unit_conversion'
             if (not isinstance(events, list) or not 1 <= len(events) <= LOCAL_PLAN_LIMIT
                     or safe_tool_history(events) != events
-                    or any(event['tool'] != tool or event['success'] is not True for event in events)):
+                    or events[-1]['tool'] != tool
+                    or any(event['tool'] not in ('calculator', 'unit_conversion')
+                           or event['success'] is not True for event in events)):
                 return False
             allowed_fields.add('tool_events_v1')
             if _LOCAL_NUMERIC_FIELD in message.extra_fields:
@@ -700,21 +725,31 @@ class ConversationMemory:
             self._save()
 
     def _local_prior_result(self, session_id, source, assistant):
+        from backend.tools.unit_conversion import BelowAbsoluteZero, validate_absolute_temperature
+
         prior = source.extra_fields.get(LOCAL_TURN_FIELD, {})
         if (source.role != 'user' or prior.get('state') != 'completed' or prior.get('assistant_id') != assistant.id
                 or not self.verify_local_reply(session_id, assistant)):
             return None, None
         events = assistant.extra_fields.get('tool_events_v1')
-        tool = events[-1]['tool'] if events else None
+        tool = ('calculator' if any(event['tool'] == 'calculator' for event in events) else 'unit_conversion') if events else None
         numeric = assistant.extra_fields.get(_LOCAL_NUMERIC_FIELD)
         if (not isinstance(numeric, dict) or numeric.get('turn_id') != source.id
                 or numeric.get('attempt') != prior.get('attempt')):
+            return tool, None
+        # Previously signed temperatures remain readable. An unphysical legacy
+        # value cannot be used as an operand under the current quantity rules.
+        try:
+            validate_absolute_temperature(numeric['value'], numeric['unit'])
+        except BelowAbsoluteZero:
             return tool, None
         return tool, dict(numeric)
 
     @_synchronized
     def local_numeric_result(self, session_id, identity, turn_id, attempt, reference):
         """Resolve a bounded selector against completed, owned turn proofs."""
+        from backend.tools.unit_conversion import local_unit_dimension
+
         turn = self._owned_local_turn(session_id, identity, turn_id)
         messages = self._store[session_id].messages
         current = turn.extra_fields[LOCAL_TURN_FIELD]
@@ -722,6 +757,21 @@ class ConversationMemory:
                 or current['attempt'] != attempt or current.get('tools_enabled') is False):
             return None
         _, adjacent = self._local_prior_result(session_id, messages[-3], messages[-2])
+        if reference.kind == 'adjacent' and adjacent is None:
+            recall = messages[-2]
+            source = recall.extra_fields.get(LOCAL_NUMERIC_SOURCE_FIELD)
+            proof = recall.extra_fields.get('access_provenance_v1')
+            prior = messages[-3].extra_fields.get(LOCAL_TURN_FIELD, {})
+            if (isinstance(proof, dict) and proof.get('producer') == LOCAL_RECALL_PRODUCER
+                    and prior.get('state') == 'completed' and prior.get('assistant_id') == recall.id
+                    and source and self.verify_local_reply(session_id, recall)):
+                for origin, reply in zip(messages[:-3], messages[1:-2]):
+                    if origin.id == source['turn_id']:
+                        _, value = self._local_prior_result(session_id, origin, reply)
+                        if (value and value['attempt'] == source['attempt']
+                                and value['invocation_id'] == source['invocation_id']):
+                            return value
+                        break
         if reference.kind == 'adjacent' or (reference.kind == 'before' and adjacent is None):
             return adjacent
         if reference.kind == 'before':
@@ -740,17 +790,36 @@ class ConversationMemory:
                 continue
             tool, numeric = self._local_prior_result(session_id, source, assistant)
             tool = tool or prior.get('numeric_tool')
-            # An old incomplete turn has no signed answer or known tool category.
-            # Treat it as ambiguous rather than silently shifting a named ordinal.
-            if (tool is None and prior['state'] != 'completed' and prior.get('tools_enabled') is not False
-                    and prior.get('error_code') not in {'LOCAL_TOOL_CONTEXT', 'LOCAL_TOOL_REFERENCE_UNIT',
-                                                       'LOCAL_TOOL_UNIT', 'LOCAL_TOOL_UNAUTHORIZED'}):
-                return None
-            if tool != reference.tool:
-                continue
+            if reference.quantity:
+                # A damaged completed result could change which reading an ordinal names.
+                if (numeric is None and prior['state'] == 'completed'
+                        and (tool or _LOCAL_NUMERIC_FIELD in assistant.extra_fields)
+                        and not self.verify_local_reply(session_id, assistant)):
+                    return None
+                if numeric is None or numeric['unit'] is None or (reference.tool and reference.tool != tool):
+                    continue
+                unit = numeric['unit']
+                quantity = local_unit_dimension(unit)
+                if quantity == 'temperature':
+                    quantity = 'temperature_difference' if unit.startswith('Δ') else 'absolute_temperature'
+                if quantity != reference.quantity:
+                    continue
+            else:
+                # An old incomplete turn has no signed answer or known tool category.
+                # Treat it as ambiguous rather than silently shifting a named ordinal.
+                if (tool is None and prior['state'] != 'completed' and prior.get('tools_enabled') is not False
+                        and prior.get('error_code') not in {'LOCAL_TOOL_CONTEXT', 'LOCAL_TOOL_REFERENCE_UNIT',
+                                                           'LOCAL_TOOL_UNIT', 'LOCAL_TOOL_UNAUTHORIZED',
+                                                           'LOCAL_TOOL_DIMENSION', 'LOCAL_TOOL_TEMPERATURE',
+                                                           'LOCAL_TOOL_TARGET_UNIT', 'LOCAL_TOOL_ABSOLUTE_ZERO'}):
+                    return None
+                if tool != reference.tool:
+                    continue
             matches.append(numeric)
             if reference.kind == 'ordinal' and len(matches) == reference.ordinal:
                 return numeric
+        if reference.kind == 'latest' and matches:
+            return matches[-1]
         return matches[0] if reference.kind == 'unique' and len(matches) == 1 else None
 
     def _local_progress_mac(self, session_id, identity, turn, plan_digest, steps):
@@ -811,11 +880,13 @@ class ConversationMemory:
     @_synchronized
     def record_plain_response(
         self, session_id, identity, content, *, status=None, producer=None,
-        access_provenance=None, calculation=False, local_turn=None, local_plan_digest=None,
+        access_provenance=None, calculation=False, local_turn=None, local_plan_digest=None, local_numeric_source=None,
     ):
         """Finalize the original live conversation and authenticate only eligible output."""
         if (status not in (None, 'interrupted', 'failed') or not isinstance(content, str)
                 or (calculation and (status is not None or not producer))
+                or (local_numeric_source is not None and (local_turn is None or not _valid_local_numeric_source(local_numeric_source)
+                    or (local_plan_digest is None and producer != LOCAL_RECALL_PRODUCER)))
                 or (producer is not None and (not isinstance(producer, str) or not producer or access_provenance is not None))):
             raise ValueError('Invalid assistant response')
         if self.stream_identity(session_id) != identity:
@@ -843,6 +914,8 @@ class ConversationMemory:
             elif 'calculator_progress' in record:
                 raise LocalTurnConflict('Saved calculator work requires the original plan.')
         msg = conv.add_message('assistant', content)
+        if local_numeric_source is not None:
+            msg.extra_fields[LOCAL_NUMERIC_SOURCE_FIELD] = dict(local_numeric_source)
         if events is not None:
             msg.extra_fields['tool_events_v1'] = events
             final = steps[-1]

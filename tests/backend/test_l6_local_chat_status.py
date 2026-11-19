@@ -100,9 +100,12 @@ def test_quantity_clarification_and_older_conversion_disambiguation(workbench, c
             _, _, calls = record_calls(workbench, monkeypatch)
             initial = await new_turn(client, message='5 km to m')
             assert (await send(client, initial))[-2]['content'] == '**Result: 5000 m**'
-            for prompt in ('Subtract 5 from the conversion result.', 'Subtract 5 kg from the conversion result.'):
+            for prompt, code in (
+                ('Subtract 5 from the conversion result.', 'LOCAL_TOOL_REFERENCE_UNIT'),
+                ('Subtract 5 kg from the conversion result.', 'LOCAL_TOOL_DIMENSION'),
+            ):
                 invalid = await send(client, next_turn(initial, prompt))
-                assert invalid[-1]['error_code'] == 'LOCAL_TOOL_REFERENCE_UNIT'
+                assert invalid[-1]['error_code'] == code
                 assert not any(event['type'] == 'tool_start' for event in invalid)
             result = await send(client, next_turn(initial, 'Subtract 5 m from the conversion result.'))
             assert result[-2]['content'] == '**Result: 4995 m**'

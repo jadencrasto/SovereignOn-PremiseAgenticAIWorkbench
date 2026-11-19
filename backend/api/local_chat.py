@@ -40,7 +40,11 @@ _ERRORS = {
     "LOCAL_TOOL_FAILED": "The tool could not produce a verified result.",
     "LOCAL_TOOL_CHANGED_PLAN": "The proposed plan changed. Send a new message to start it again.",
     "LOCAL_TOOL_CONTEXT": "Specify one verified result, such as the result from the first calculation, or enter the value.",
-    "LOCAL_TOOL_REFERENCE_UNIT": "For a measured result, specify an addition or subtraction in the same unit. Enter an explicit value for temperature arithmetic.",
+    "LOCAL_TOOL_REFERENCE_UNIT": "Give both measurements a unit for addition or subtraction, such as 5 m or 5 km.",
+    "LOCAL_TOOL_DIMENSION": "Use compatible dimensions for addition and subtraction, or multiply or divide a measurement by a unitless number.",
+    "LOCAL_TOOL_TEMPERATURE": "That temperature operation is unsupported. Use Δ°C, Δ°F or ΔK for a difference. To find the difference between two readings, subtract them.",
+    "LOCAL_TOOL_ABSOLUTE_ZERO": "An absolute temperature cannot be below absolute zero (0 K). Check the reading or temperature change.",
+    "LOCAL_TOOL_TARGET_UNIT": "Which unit should I convert the verified result to?",
     "LOCAL_TOOL_UNIT": "Use supported units of the same dimension. Specify US customary volume units.",
     "LOCAL_TOOL_ZERO_DIVISION": "Division by zero is undefined.",
 }
@@ -318,6 +322,8 @@ async def submit_local_chat(body, request, engine, model_router):
         status = {"LOCAL_TOOL_UNAUTHORIZED": 403, "LOCAL_TOOL_APPROVAL_REQUIRED": 403,
                   "LOCAL_TOOL_UNSUPPORTED": 422, "LOCAL_TOOL_INVALID": 422, "LOCAL_TOOL_UNIT": 422,
                   "LOCAL_TOOL_CONTEXT": 422, "LOCAL_TOOL_REFERENCE_UNIT": 422, "LOCAL_TOOL_ZERO_DIVISION": 422,
+                  "LOCAL_TOOL_DIMENSION": 422, "LOCAL_TOOL_TEMPERATURE": 422, "LOCAL_TOOL_TARGET_UNIT": 422,
+                  "LOCAL_TOOL_ABSOLUTE_ZERO": 422,
                   "LOCAL_TOOL_CONFIRMATION_REQUIRED": 403,
                   "LOCAL_TOOL_CHANGED_PLAN": 409}.get(extra["error_code"], 503)
         if record["state"] == "cancelled":

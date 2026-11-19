@@ -17,7 +17,8 @@ class NumericReceipt:
 
 
 _REFERENCE = r"(?:that\s+(?:result|number|answer|value)|(?:the\s+)?previous\s+(?:result|number|answer|value)|it)"
-_NUMBER = r"[+-]?(?:[0-9]{1,18}(?:\.[0-9]{1,18})?|\.[0-9]{1,18})"
+_UNSIGNED_NUMBER = r"(?:[0-9]{1,18}(?:\.[0-9]{1,18})?|\.[0-9]{1,18})"
+_NUMBER = rf"[+-]?{_UNSIGNED_NUMBER}"
 _ARITHMETIC_REFERENCE = rf"(?:{_REFERENCE}|that)"
 _ARITHMETIC_PATTERNS = (
     (rf"multiply\s+{_ARITHMETIC_REFERENCE}\s+by\s+({_NUMBER})", "*"),
@@ -187,29 +188,38 @@ def requires_prior_numeric_receipt(message: str) -> bool:
 
 
 def local_numeric_phrase(message: str) -> str:
-    return _phrase(re.sub(r'^\s*(?:can|could|would) you\s+', '', message, flags=re.IGNORECASE))
+    phrase = _phrase(re.sub(r'^\s*(?:can|could|would) you\s+', '', message, flags=re.IGNORECASE))
+    # Named changes take an unsigned magnitude. A decrease has negative sign.
+    return re.sub(
+        rf'\b(?:an?\s+)?(?:temperature\s+)?(increase|decrease|difference)\s+of\s+({_UNSIGNED_NUMBER})\s*'
+        rf'({_LOCAL_TEMPERATURE_SCALE})',
+        lambda m: f"{'-' if m[1] == 'decrease' else ''}{m[2]} delta {m[3]}", phrase,
+    ) if len(phrase) <= 300 else phrase
 
 
-_LOCAL_REFERENCE = rf"(?:{_ARITHMETIC_REFERENCE}|the\s+result|the\s+answer)"
+_LOCAL_REFERENCE = rf"(?:{_ARITHMETIC_REFERENCE}|the\s+(?:result|answer|total))"
 _LOCAL_FOLLOWUP = tuple(
     (pattern.replace(_ARITHMETIC_REFERENCE, _LOCAL_REFERENCE), operator)
     for pattern, operator in _ARITHMETIC_PATTERNS
 ) + ((rf"subtract\s+({_NUMBER})", "-"),)
-_LOCAL_UNIT = r"(?:[a-z°]+(?:[ \t]+[a-z°]+){0,4}?)"
+_LOCAL_UNIT = r"(?:[a-z°δ]+(?:[ \t]+[a-z°δ]+){0,5}?)"
+_LOCAL_TEMPERATURE_SCALE = r"(?:°[cf]\b|degrees?\s+(?:[cf]|celsius|fahrenheit)\b|(?:celsius|fahrenheit|k|kelvin)\b)"
 _LOCAL_CONVERT = rf"(?:convert\s+|what(?:'s|\s+is)\s+|how much is\s+)?({_NUMBER})\s*({_LOCAL_UNIT})\s*(?:\s+(?:to|into|in)\s+|→\s*)({_LOCAL_UNIT})"
-_LOCAL_CONVERT_REFERENCE = rf"convert\s+{_LOCAL_REFERENCE}(?:\s+from\s+({_LOCAL_UNIT}))?\s+(?:to|into)\s+({_LOCAL_UNIT})"
-_LOCAL_NAMED_REFERENCE = r"(?:the\s+)?(?:result\s+from\s+(?:the\s+)?)?(first|second|third)\s+(calculation|conversion)(?:\s+result)?"
+_LOCAL_CONVERT_REFERENCE = rf"convert\s+{_LOCAL_REFERENCE}(?:\s+from\s+({_LOCAL_UNIT}))?\s+(?:back\s+)?(?:to|into)\s+({_LOCAL_UNIT})"
+_LOCAL_NAMED_REFERENCE = r"(?:(?:the\s+)?(?:result\s+from|answer\s+to)\s+)?(?:(?:the|my)\s+)?(first|second|third)\s+(calculation|conversion)(?:\s+result)?"
+_LOCAL_UNIQUE_REFERENCE = r"(?:the\s+)?(?:earlier\s+)?(calculation|conversion)\s+result"
+_LOCAL_TEMPERATURE_READING = r"(?:(?:the|my)\s+)?(first|second|third)\s+temperature\s+reading"
 _LOCAL_REFERENCE_TOOL = {'calculation': 'calculator', 'conversion': 'unit_conversion'}
 _LOCAL_ORDINAL = {'first': 1, 'second': 2, 'third': 3}
 _LOCAL_REFERENCE_HINT = re.compile(
     r'\b(?:that|those|it|them|results?|answers?|previous|earlier|above|first|second|third|last|'
-    r'former|latter|calculation|conversion)\b'
+    r'former|latter|calculation|conversion|total|value|reading)\b'
 )
 _LOCAL_ALIASES = {
     **_UNIT_NAMES,
     'milligram': 'mg', 'inch': 'in', 'inches': 'in', 'foot': 'ft', 'feet': 'ft',
     'mile': 'mi', 'ounce': 'oz', 'pound': 'lb', 'lb': 'lb',
-    'c': '°C', '°c': '°C', 'celsius': '°C', 'f': '°F', '°f': '°F', 'fahrenheit': '°F',
+    '°c': '°C', 'celsius': '°C', '°f': '°F', 'fahrenheit': '°F',
     'k': 'K', 'kelvin': 'K', 'ml': 'mL', 'l': 'L',
     'milliliter': 'mL', 'millilitre': 'mL', 'liter': 'L', 'litre': 'L',
     'us fl oz': 'US fl oz', 'us fluid ounce': 'US fl oz',
@@ -222,11 +232,44 @@ def local_unit_name(unit: str) -> str:
     from backend.tools.unit_conversion import LocalUnit
 
     unit = ' '.join(unit.lower().split())
+    explicit = re.match(r'^(?:(δ)\s*|(delta|absolute)\s+)', unit)
+    difference = bool(explicit and 'absolute' not in explicit.groups())
+    if explicit:
+        unit = unit[explicit.end():]
+    suffix = re.search(r'\s+(?:temperature\s+)?(?:difference|increase)s?$', unit)
+    if suffix:
+        if explicit and not difference:
+            raise ValueError('Conflicting temperature types')
+        difference = True
+        unit = unit[:suffix.start()]
+    unit = re.sub(r'^degrees?\s+([cf])$', r'°\1', unit)
     unit = re.sub(r'^degrees?\s+', '', unit)
+    if difference and unit in ('c', 'f'):
+        unit = f'°{unit}'
     canonical = _LOCAL_ALIASES.get(unit, _LOCAL_ALIASES.get(unit.removesuffix('s'), unit))
+    if explicit or suffix:
+        if canonical not in ('°C', '°F', 'K'):
+            raise ValueError('Expected a temperature unit')
+        if difference:
+            canonical = f'Δ{canonical}'
     if canonical not in get_args(LocalUnit):
         raise ValueError('Unsupported or ambiguous unit')
     return canonical
+
+
+def local_conversion_target(unit: str, origin: str) -> str:
+    """A plain destination scale inherits the source's temperature difference type."""
+    target = local_unit_name(unit)
+    if origin.startswith('Δ') and target in ('°C', '°F', 'K') and not unit.lower().startswith('absolute '):
+        return f'Δ{target}'
+    return target
+
+
+def format_local_numeric_value(value: int | float, unit: str | None) -> str:
+    if unit is None:
+        return str(value)
+    label = ' (temperature difference)' if unit.startswith('Δ') else ''
+    return f'{value:.12g} {unit}{label}'
 
 
 def local_conversion_intent(phrase: str):
@@ -247,6 +290,7 @@ class LocalNumericReference:
     kind: str = 'adjacent'
     tool: str | None = None
     ordinal: int | None = None
+    quantity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +299,7 @@ class LocalNumericFollowup:
     reference: LocalNumericReference
     operand: str | None = None
     unit: str | None = None
+    other_reference: LocalNumericReference | None = None
 
 
 def _local_reference(phrase: str):
@@ -262,14 +307,30 @@ def _local_reference(phrase: str):
         return LocalNumericReference()
     if match := re.fullmatch(_LOCAL_NAMED_REFERENCE, phrase):
         return LocalNumericReference('ordinal', _LOCAL_REFERENCE_TOOL[match[2]], _LOCAL_ORDINAL[match[1]])
-    if match := re.fullmatch(r"(?:the\s+)?(calculation|conversion)\s+result", phrase):
+    if match := re.fullmatch(_LOCAL_UNIQUE_REFERENCE, phrase):
         return LocalNumericReference('unique', _LOCAL_REFERENCE_TOOL[match[1]])
+    if match := re.fullmatch(_LOCAL_TEMPERATURE_READING, phrase):
+        return LocalNumericReference('ordinal', ordinal=_LOCAL_ORDINAL[match[1]], quantity='absolute_temperature')
+    if re.fullmatch(r'(?:the\s+)?earlier\s+distance\s+conversion(?:\s+result)?', phrase):
+        return LocalNumericReference('unique', 'unit_conversion', quantity='length')
+    if re.fullmatch(r'(?:the\s+)?previous\s+temperature\s+difference', phrase):
+        return LocalNumericReference('latest', quantity='temperature_difference')
+    if re.fullmatch(r"(?:the\s+)?(?:earlier (?:value|result)|value we calculated before)", phrase):
+        return LocalNumericReference('unique', 'calculator')
     raise ValueError('Unclear numeric reference')
 
 
 def local_followup_intent(phrase: str):
     """Parse a whole reference request or flag one that needs clarification."""
     if len(phrase) <= 300:
+        if match := re.fullmatch(
+            rf'subtract\s+(?P<right>{_LOCAL_TEMPERATURE_READING})\s+from\s+'
+            rf'(?P<left>{_LOCAL_TEMPERATURE_READING}|(?:the\s+)?(?:first|second|third))', phrase,
+        ):
+            left = match['left']
+            if not left.endswith('reading'):
+                left += ' temperature reading'
+            return LocalNumericFollowup('-', _local_reference(left), other_reference=_local_reference(match['right']))
         for pattern, operator in _LOCAL_FOLLOWUP:
             if match := re.fullmatch(pattern, phrase):
                 return LocalNumericFollowup(operator, LocalNumericReference(), match[1])
@@ -277,22 +338,74 @@ def local_followup_intent(phrase: str):
             return LocalNumericFollowup('convert', LocalNumericReference(), match[1], match[2])
         if re.fullmatch(r"what (?:was|is) the (?:answer|result) before that", phrase):
             return LocalNumericFollowup('recall', LocalNumericReference('before'))
-        if match := re.fullmatch(rf"(?:use|show(?: me)?)\s+({_LOCAL_NAMED_REFERENCE}|the (?:calculation|conversion) result)", phrase):
-            return LocalNumericFollowup('recall', _local_reference(match[1]))
-        if match := re.fullmatch(rf"(add|subtract)\s+({_NUMBER})(?:\s*({_LOCAL_UNIT}))?\s+(to|from)\s+(.+)", phrase):
-            action, value, unit, connector, reference = match.groups()
-            if (action, connector) in (('add', 'to'), ('subtract', 'from')) and _LOCAL_REFERENCE_HINT.search(reference):
-                return LocalNumericFollowup('+' if action == 'add' else '-', _local_reference(reference), value, unit)
+        if match := re.fullmatch(r"(?:use|show(?: me)?)\s+(.+)", phrase):
+            if _LOCAL_REFERENCE_HINT.search(match[1]):
+                return LocalNumericFollowup('recall', _local_reference(match[1]))
+        for action, connector, operator in (('add', 'to', '+'), ('subtract', 'from', '-')):
+            if match := re.fullmatch(rf"{action}\s+({_NUMBER})(?:\s*({_LOCAL_UNIT}))??\s+{connector}\s+(.+)", phrase):
+                if _LOCAL_REFERENCE_HINT.search(match[3]):
+                    return LocalNumericFollowup(operator, _local_reference(match[3]), match[1], match[2])
         if match := re.fullmatch(rf"(multiply|divide)\s+(.+)\s+by\s+({_NUMBER})", phrase):
             action, reference, value = match.groups()
             if _LOCAL_REFERENCE_HINT.search(reference):
                 return LocalNumericFollowup('*' if action == 'multiply' else '/', _local_reference(reference), value)
-        if match := re.fullmatch(rf"convert\s+({_LOCAL_NAMED_REFERENCE}|the (?:calculation|conversion) result)\s+to\s+({_LOCAL_UNIT})", phrase):
-            return LocalNumericFollowup('convert', _local_reference(match[1]), unit=match[4])
+        if match := re.fullmatch(rf"convert\s+(.+?)\s+(?:back\s+)?to\s+({_LOCAL_UNIT})", phrase):
+            if _LOCAL_REFERENCE_HINT.search(match[1]):
+                return LocalNumericFollowup('convert', _local_reference(match[1]), unit=match[2])
+        if match := re.fullmatch(r"convert\s+(.+)", phrase):
+            if _LOCAL_REFERENCE_HINT.search(match[1]):
+                return LocalNumericFollowup('convert', _local_reference(match[1]))
     if re.match(rf'^(?:calculate|compute)\s+{_LOCAL_REFERENCE}\b', phrase) or (
         re.match(r'^(?:add|subtract|multiply|divide|convert|use)\b', phrase) and _LOCAL_REFERENCE_HINT.search(phrase)
     ):
         raise ValueError('Unclear numeric reference')
+    return None
+
+
+def local_output_unit(phrase: str, *, followup=False) -> tuple[str, str | None]:
+    """Separate the target of an explicit measurement calculation."""
+    connector = 'in' if followup else '(?:in|to)'
+    if len(phrase) <= 300 and (match := re.fullmatch(rf"(.+)\s+{connector}\s+({_LOCAL_UNIT})", phrase)):
+        return match[1], match[2]
+    return phrase, None
+
+
+def local_measurement_intent(phrase: str):
+    """Recognize a single binary measurement expression, with an optional final unit."""
+    core, target = local_output_unit(phrase)
+    prefix = r"(?:what(?:'s|\s+is)\s+|calculate\s+|compute\s+)?"
+    operators = {'plus': '+', 'minus': '-', 'times': '*', 'divided by': '/'}
+    expression = (
+        rf"{prefix}({_NUMBER})\s*({_LOCAL_UNIT})?\s*([-+*/]|\b(?:plus|minus|times|divided by)\b)"
+        rf"\s*({_NUMBER})\s*({_LOCAL_UNIT})?"
+    )
+    if len(phrase) <= 300:
+        if match := re.fullmatch(expression, core):
+            left, left_unit, operation, right, right_unit = match.groups()
+            if left_unit or right_unit or target:
+                return left, left_unit, operators.get(operation, operation), right, right_unit, target
+        operand = rf"({_NUMBER})(?:\s*({_LOCAL_UNIT}))??"
+        for verb, connector, operation in (
+            ('add', 'to', '+'), ('subtract', 'from', '-'), ('multiply', 'by', '*'), ('divide', 'by', '/'),
+        ):
+            if match := re.fullmatch(rf"{verb}\s+{operand}\s+{connector}\s+{operand}", core):
+                left, left_unit, right, right_unit = match.groups()
+                if left_unit or right_unit or target:
+                    if operation in ('+', '-'):
+                        return right, right_unit, operation, left, left_unit, target
+                    return left, left_unit, operation, right, right_unit, target
+                return None
+    # Give malformed quantity arithmetic a deterministic error instead of forwarding
+    # the expression to the model as a dimensionless calculator request.
+    command = re.match(r'^(?:add|subtract|multiply|divide)\s+(?=[+-]?(?:\d|\.\d))', phrase)
+    if (re.search(r'\b(?:calculate|compute|add|subtract|multiply|divide|find|evaluate)\b|'
+                  r'\b(?:sum|product|quotient|difference)\s+of\b', phrase)
+            and re.search(rf'\d\s*(?:(?:absolute|delta)\s+|δ\s*)?{_LOCAL_TEMPERATURE_SCALE}', phrase)):
+        raise ValueError('Malformed temperature arithmetic')
+    if (command or re.match(rf"{prefix}[+-]?(?:\d|\.\d)", phrase)) and re.search(
+        r"(?:\d\s*[a-z°δ]+|[-+*/]\s*[-+]?\d+(?:\.\d+)?\s*[a-z°δ]+)", phrase,
+    ) and re.search(r"[-+*/%^]|\b(?:to|from|by)\b", phrase.lstrip("+-")):
+        raise ValueError('Malformed measurement arithmetic')
     return None
 
 

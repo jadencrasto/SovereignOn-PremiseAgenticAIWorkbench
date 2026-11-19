@@ -209,6 +209,8 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
 
 
 interface SessionMessage {
+  numeric_source_turn?: number;
+  numeric_secondary_source_turn?: number;
   id?: string | null;
   role: 'system' | 'user' | 'assistant';
   content: string;

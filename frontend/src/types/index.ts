@@ -61,6 +61,8 @@ export interface ChatMessage {
   withheld?: boolean;
   localTurn?: LocalTurnState;
   localPreview?: boolean;
+  numericSourceTurn?: number;
+  numericSecondarySourceTurn?: number;
   localAgentStatus?: 'planning' | 'tool_selected';
   localSelectedTool?: 'calculator' | 'unit_conversion';
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';

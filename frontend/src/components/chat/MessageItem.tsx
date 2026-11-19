@@ -222,7 +222,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 LOCAL_TOOL_FAILED: 'The tool could not produce a verified result.',
                 LOCAL_TOOL_CHANGED_PLAN: 'The proposed plan changed. Send a new message to start again.',
                 LOCAL_TOOL_CONTEXT: 'Specify one verified result, such as the result from the first calculation, or enter the value.',
-                LOCAL_TOOL_REFERENCE_UNIT: 'For a measured result, specify an addition or subtraction in the same unit. Enter an explicit value for temperature arithmetic.',
+                LOCAL_TOOL_REFERENCE_UNIT: 'Give both measurements a unit for addition or subtraction, such as 5 m or 5 km.',
+                LOCAL_TOOL_DIMENSION: 'Use compatible dimensions for addition and subtraction, or multiply or divide a measurement by a unitless number.',
+                LOCAL_TOOL_TEMPERATURE: 'That temperature operation is unsupported. Use Δ°C, Δ°F or ΔK for a difference. To find the difference between two readings, subtract them.',
+                LOCAL_TOOL_ABSOLUTE_ZERO: 'An absolute temperature cannot be below absolute zero (0 K). Check the reading or temperature change.',
+                LOCAL_TOOL_TARGET_UNIT: 'Which unit should I convert the verified result to?',
                 LOCAL_TOOL_UNIT: 'Use supported units of the same dimension. Specify US customary volume units.',
                 LOCAL_TOOL_ZERO_DIVISION: 'Division by zero is undefined.',
               } as Record<string, string>)[message.localTurn.error_code || ''] || 'The response could not be completed.'
@@ -366,6 +370,14 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
             {message.isStreaming && message.content && (
               <span className="inline-block w-2 h-4 ml-1 bg-blue-500 animate-pulse align-middle rounded-sm" />
             )}
+          {!message.withheld && typeof message.numericSourceTurn === 'number' &&
+            Number.isSafeInteger(message.numericSourceTurn) && message.numericSourceTurn > 0 &&
+            <p className="mt-2 text-xs text-slate-600">
+              {typeof message.numericSecondarySourceTurn === 'number' &&
+                Number.isSafeInteger(message.numericSecondarySourceTurn) && message.numericSecondarySourceTurn > 0
+                ? `Reused verified results from turns ${message.numericSourceTurn} and ${message.numericSecondarySourceTurn}.`
+                : `Reused verified result from turn ${message.numericSourceTurn}.`}
+            </p>}
           {message.localPreview && message.content && <p className="mt-2 text-xs text-slate-600">Streaming preview</p>}
           </>
         )}

@@ -35,9 +35,32 @@ test('persisted local clarification tells the user how to name a result or suppl
  const message = { id: 'turn', role: 'user', content: 'Subtract 5 from the conversion result.', timestamp: '',
    localTurn: { state: 'failed', error_code: 'LOCAL_TOOL_REFERENCE_UNIT' } };
  let html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
- assert.match(html, /addition or subtraction in the same unit/);
+ assert.match(html, /Give both measurements a unit/);
  message.localTurn.error_code = 'LOCAL_TOOL_CONTEXT';
  html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
  assert.match(html, /result from the first calculation/);
  assert.doesNotMatch(html, /tool_start|numeric_tool|invocation_id/);
+});
+
+test('reconciled measurement output shows source attribution and unit steps', () => {
+ const message = { id: 'answer', role: 'assistant', timestamp: '', numericSourceTurn: 2,
+   content: '**Result: 5250 m**\n\n1. Converted to 0.25 km.\n2. Calculated 5.25 km.\n3. Converted to 5250 m.' };
+ const render = () => renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(render(), /Reused verified result from turn 2/);
+ assert.match(render(), /Result: 5250 m/);
+ assert.match(render(), /Converted to 0\.25 km/);
+ message.withheld = true;
+ assert.doesNotMatch(render(), /Reused verified result|5250 m/);
+});
+
+test('temperature difference shows both verified source turns and absolute-zero errors are clear', () => {
+ const message = { id: 'delta', role: 'assistant', timestamp: '', numericSourceTurn: 1, numericSecondarySourceTurn: 3,
+   content: '**Result: 10 Δ°C (temperature difference)**' };
+ let html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message }));
+ assert.match(html, /10 Δ°C \(temperature difference\)/);
+ assert.match(html, /Reused verified results from turns 1 and 3/);
+ const failed = { id: 'bad', role: 'user', timestamp: '', content: '0 K - 1 ΔK',
+   localTurn: { state: 'failed', error_code: 'LOCAL_TOOL_ABSOLUTE_ZERO' } };
+ html = renderToStaticMarkup(React.createElement(m.exports.MessageItem, { message: failed }));
+ assert.match(html, /cannot be below absolute zero \(0 K\)/);
 });

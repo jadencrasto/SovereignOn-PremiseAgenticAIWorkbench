@@ -41,6 +41,8 @@ export async function loadSession(id: string): Promise<ChatSession> {
     toolEvents: m.tool_events || [], withheld: m.withheld === true,
     workflowStatus: m.response_state || undefined,
     localTurn: m.turn,
+    numericSourceTurn: m.numeric_source_turn,
+    numericSecondarySourceTurn: m.numeric_secondary_source_turn,
     attachments: m.attachments?.map(attachment => ({
       id: attachment.attachment_id, filename: attachment.filename,
       mimeType: attachment.mime_type, sizeBytes: attachment.size_bytes,

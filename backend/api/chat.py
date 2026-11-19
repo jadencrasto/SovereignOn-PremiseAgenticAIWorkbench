@@ -1903,7 +1903,7 @@ async def read_session(
         created_at, updated_at = engine._memory.get_timestamps(session_id)
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    from backend.agent.memory import LOCAL_TURN_FIELD, public_local_turn, safe_image_attachment, safe_tool_history
+    from backend.agent.memory import LOCAL_NUMERIC_SOURCE_FIELD, LOCAL_TURN_FIELD, public_local_turn, safe_image_attachment, safe_tool_history
     from backend.multimodal.text_file import safe_text_attachment
     from backend.security.conversation_access import may_read_assistant
     # Only server-owned task records can contribute read-only recovery state.
@@ -1934,12 +1934,19 @@ async def read_session(
     doc_service = getattr(engine, '_doc_service', None)
     visible_messages = []
     local_runs = getattr(request.app.state, 'local_chat_runs', None) if request is not None else None
+    turn_numbers = {}
     for message in messages:
         if message.role == 'system':
             continue
+        source_turn_number = secondary_turn_number = None
         if message.role == 'assistant':
-            allowed = (engine._memory.verify_assistant_provenance(session_id, message)
-                       or may_read_assistant(message, doc_service, clearance))
+            verified = engine._memory.verify_assistant_provenance(session_id, message)
+            allowed = verified or may_read_assistant(message, doc_service, clearance)
+            if local_runs is not None and verified:
+                source = message.extra_fields.get(LOCAL_NUMERIC_SOURCE_FIELD)
+                if source:
+                    source_turn_number = turn_numbers.get(source['turn_id'])
+                    secondary_turn_number = turn_numbers.get(source.get('secondary', {}).get('turn_id'))
         else:
             allowed = 'access_provenance_v1' not in message.extra_fields
         attachments = message.extra_fields.get('attachments_v1')
@@ -1949,6 +1956,7 @@ async def read_session(
             attachment = safe_text_attachment(message.extra_fields.get('text_attachment_v1'))
         turn = message.extra_fields.get(LOCAL_TURN_FIELD) if local_runs is not None and allowed and message.role == 'user' else None
         if turn:
+            turn_numbers[message.id] = len(turn_numbers) + 1
             try:
                 turn = local_runs.reconcile(engine._memory, session_id, identity, message.id, turn)
             except (PermissionError, KeyError):
@@ -1963,6 +1971,9 @@ async def read_session(
             "withheld": not allowed,
             **({"attachments": [attachment]} if attachment else {}),
             **({"turn": public_local_turn(turn)} if turn else {}),
+            **({"numeric_source_turn": source_turn_number} if source_turn_number else {}),
+            **({"numeric_secondary_source_turn": secondary_turn_number}
+               if secondary_turn_number and secondary_turn_number != source_turn_number else {}),
         })
     try:
         if engine._memory.stream_identity(session_id) != identity:
