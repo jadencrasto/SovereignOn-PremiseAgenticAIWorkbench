@@ -22,7 +22,7 @@ MIME = {
 LABELS = {
     'source_value': 'Source-attributed value', 'source_excerpt': 'Source excerpt',
     'visual_interpretation': 'Model-generated visual interpretation', 'missing': 'Insufficient evidence',
-    'user_edited': 'User-edited wording, unverified',
+    'user_edited': 'User-edited wording, unverified', 'comparison': 'Comparison of cited values',
 }
 
 

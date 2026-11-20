@@ -12,6 +12,11 @@ let localKnowledgeAvailable = false;
 let historyImpl = async () => ({id:'server-session',title:'Conversation',messages:[]});
 const api={createSession:signal=>createImpl(signal),fetchSessions:async()=>({count:0}),streamChat(payload,callbacks,signal){let resolve;let p=new Promise(r=>resolve=r);requests.push({payload,callbacks,signal,resolve});return p},guardChatCallbacks(callbacks,active){return new Proxy(callbacks,{get:(t,p)=>(...a)=>{if(active())t[p](...a)}})}};
 api.fetchLocalImages = async () => ({images: []});
+const defaultWorkflowPreview = async payload => ({
+  objective: payload.message, sources: [], images: [], steps: ['Review source evidence', 'Prepare a draft for review'],
+  output: 'XLSX draft', question: null, sources_to_choose: false, token: 'a'.repeat(64),
+});
+api.previewLocalWorkflow = defaultWorkflowPreview;
 api.streamChatMultimodal = api.streamChat;
 api.streamChatTextFile = (file, session_id, model, message, callbacks, signal, range) =>
   api.streamChat({ file, session_id, model, message, range }, callbacks, signal);
@@ -31,6 +36,8 @@ mocks['./localTurns']=localTurnsMod.exports;
 mocks['./LocalKnowledgePanel']={LocalKnowledgePanel};
 function LocalDraftPanel(){}
 mocks['./LocalDraftPanel']={LocalDraftPanel};
+function WorkflowClarification(){}
+mocks['./WorkflowClarification']={WorkflowClarification};
 mocks['./ChatHistorySidebar'].loadSession = id => historyImpl(id);
 const mockWorkbench = mocks['../../context/WorkbenchContext'].useWorkbench;
 mocks['../../context/WorkbenchContext'].useWorkbench = () => {
@@ -41,6 +48,11 @@ mocks['../../context/WorkbenchContext'].useWorkbench = () => {
 };
 const file=path.resolve(__dirname,'../src/components/chat/ChatView.tsx');const out=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;const mod=new Module(file,module);mod.filename=file;mod.paths=Module._nodeModulePaths(path.dirname(file));let orig=mod.require.bind(mod);mod.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);mod._compile(out,file);
 function render(){cursor=0;effects=[];return mod.exports.ChatView()} function find(n,t){if(!n||typeof n!=='object')return;if(n.type===t)return n;for(let c of n.props?.children||[]){let x=find(c,t);if(x)return x}} function parts(){let tree=render();return {tree,input:find(tree,ChatInput).props,list:find(tree,MessageList).props,sidebar:find(tree,ChatHistorySidebar)?.props}} function setup(){slots=[];requests=[];parts();slots[3]='server-session';return parts()}
+function button(node, label) {
+  if (Array.isArray(node)) return node.map(child => button(child, label)).find(Boolean);
+  if (node?.type === 'button' && node.props.children.includes(label)) return node.props;
+  return node?.props ? button(node.props.children, label) : undefined;
+}
 test('chat sends draft intent with the selected conversation evidence and restores the completed draft turn', async (t) => {
   localMode = localKnowledgeAvailable = true;
   t.after(() => {
@@ -50,19 +62,113 @@ test('chat sends draft intent with the selected conversation evidence and restor
   const initial = setup().tree;
   find(initial, LocalKnowledgePanel).props.setActive(true);
   find(initial, LocalDraftPanel).props.onSelection(['first-evidence', 'second-evidence']);
-  const pending = parts().input.onSendMessage('Create an XLSX comparison.');
+  await parts().input.onSendMessage('Create an XLSX comparison.');
+  assert.equal(requests.length, 0);
+  button(parts().tree, 'Start workflow').onClick();
   const [request] = requests;
   assert.equal(request.payload.message, 'Create an XLSX comparison.');
   assert.deepEqual(request.payload.draft_turn_ids, ['first-evidence', 'second-evidence']);
   assert.equal(request.payload.knowledge_source_ids, undefined);
+  assert.equal(request.payload.workflow_preview, 'a'.repeat(64));
   historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [{
     id: 'draft-reply', role: 'assistant', content: 'Your evidence draft is ready to review in the Drafts panel.',
   }] });
   request.callbacks.onAgentStatus('drafting');
   request.callbacks.onDone('server-session', 'fake');
   request.resolve();
-  await pending;
+  await new Promise(setImmediate);
   assert.equal(parts().list.messages[0].id, 'draft-reply');
+});
+test('a stale server preview requires renewed review of the same selected sources', async t => {
+  localMode = localKnowledgeAvailable = true;
+  let previews = 0;
+  api.previewLocalWorkflow = async command => {
+    assert.deepEqual(command.knowledge_source_ids, ['policy-a', 'policy-b']);
+    return {
+      ...await defaultWorkflowPreview(command), output: 'Chat answer',
+      sources: [{ label: 'Policy A', revision: ++previews }, { label: 'Policy B', revision: 1 }],
+      token: String(previews).repeat(64),
+    };
+  };
+  t.after(() => {
+    localMode = localKnowledgeAvailable = false;
+    api.previewLocalWorkflow = defaultWorkflowPreview;
+  });
+  const panel = find(setup().tree, LocalKnowledgePanel).props;
+  panel.setActive(true);
+  panel.setSelection(['policy-a', 'policy-b']);
+  await parts().input.onSendMessage('Compare requirements in these two policy documents.');
+  assert.equal(requests.length, 0);
+  button(parts().tree, 'Start workflow').onClick();
+  const first = requests[0];
+  first.callbacks.onError('The sources changed.', { status: 409, code: 'LOCAL_WORKFLOW_PREVIEW_CHANGED' });
+  first.resolve();
+  await new Promise(setImmediate);
+  assert.equal(button(parts().tree, 'Start workflow'), undefined);
+  button(parts().tree, 'Review updated inputs').onClick();
+  await new Promise(setImmediate);
+  button(parts().tree, 'Start workflow').onClick();
+  const second = requests[1];
+  assert.equal(first.payload.turn_id, second.payload.turn_id);
+  assert.equal(second.payload.workflow_preview, '2'.repeat(64));
+  second.callbacks.onDone('server-session', 'fake');
+  second.resolve();
+  await new Promise(setImmediate);
+});
+test('chat reconciles a previewed comparison into a same-turn clarification and evidence answer', async t => {
+  localMode = localKnowledgeAvailable = true;
+  api.previewLocalWorkflow = async command => ({
+    ...await defaultWorkflowPreview(command), output: 'Chat answer', question: 'What should I compare or report?',
+  });
+  const continuations = [];
+  api.streamLocalClarification = (command, reply, callbacks, signal) => {
+    continuations.push({ command, reply });
+    return api.streamChat(command, callbacks, signal);
+  };
+  t.after(() => {
+    localMode = localKnowledgeAvailable = false;
+    api.previewLocalWorkflow = defaultWorkflowPreview;
+    delete api.streamLocalClarification;
+    historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [] });
+  });
+  const initial = setup();
+  await initial.input.onSendMessage('Compare these two policy documents.');
+  assert.equal(requests.length, 0);
+  button(parts().tree, 'Continue to clarification').onClick();
+  const first = requests[0];
+  const userMessage = {
+    id: first.payload.turn_id, role: 'user', content: first.payload.message,
+    localTurn: {
+      state: 'waiting_clarification', attempt: 1, model: 'fake', plan_revision: 1,
+      clarification: { revision: 1, count: 1, uses_image: false, question: 'What should I compare or report?',
+        options: [{ id: 'requirements', label: 'Requirements' }] },
+    },
+  };
+  historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [userMessage] });
+  first.callbacks.onDone('server-session', 'fake');
+  first.resolve();
+  await new Promise(setImmediate);
+  const clarify = find(parts().tree, WorkflowClarification).props;
+  assert.equal(clarify.clarification.revision, 1);
+  assert.equal(requests.length, 1);
+  clarify.resume(['requirements']);
+  assert.deepEqual(continuations.map(({ command, reply }) => [command.turn_id, command.attempt, reply]), [
+    [first.payload.turn_id, 1, { revision: 1, selection: ['requirements'], usesImage: false }],
+  ]);
+  const continued = requests[1];
+  continued.callbacks.onAgentStatus('retrieving_evidence');
+  assert.equal(parts().list.messages.at(-1).localAgentStatus, 'retrieving_evidence');
+  historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [
+    { ...userMessage, localTurn: { state: 'completed', attempt: 1, assistant_id: 'grounded-answer' } },
+    { id: 'grounded-answer', role: 'assistant', content: 'Cited answer',
+      localKnowledge: { state: 'grounded', citations: [] } },
+  ] });
+  continued.callbacks.onDone('server-session', 'fake');
+  continued.resolve();
+  await new Promise(setImmediate);
+  assert.equal(find(parts().tree, WorkflowClarification), undefined);
+  assert.equal(parts().list.messages.at(-1).content, 'Cited answer');
+  assert.equal(requests.length, 2);
 });
 test('a second submission from the same render cannot replace the active stream', async () => {
   const { input } = setup();

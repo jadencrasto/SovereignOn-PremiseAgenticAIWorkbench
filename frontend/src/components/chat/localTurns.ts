@@ -10,10 +10,19 @@ export interface LocalSubmission {
   knowledge_source_ids?: string[];
   image_id?: string;
   draft_turn_ids?: string[];
+  workflow_preview?: string;
 }
 
 export function isLocalDraftRequest(text: string): boolean {
-  return /^\s*(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\s+(?:(?:a|an|the|me)\s+){0,2}(?:(?:maintenance|inspection|comparison|evidence[- ]grounded)\s+){0,2}(?:report|spreadsheet|summary|document|docx|xlsx|pdf)\b/i.test(text);
+  const clauses = text.trim().split(/(?:,?\s+and\s+(?:then\s+)?|[.;]\s+|,\s+then\s+)(?=(?:create|draft|prepare|make|generate|write|build)\b)/i);
+  const clause = (clauses[1] ?? clauses[0]).replace(
+    /^(?:use|using)\s+[^\n]{0,270}\b(?:image|photo|picture|documents?|sources?)\b[^\n]{0,29}?\s+to\s+/i, '');
+  return /^(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\s+(?:(?:a|an|the|me)\s+){0,2}(?:(?:cited|short|observation|maintenance|inspection|comparison|evidence[- ]grounded)\s+){0,3}(?:report|spreadsheet|summary|document|docx|xlsx|pdf)\b/i.test(clause);
+}
+
+export function needsWorkflowPreview(text: string, scoped: boolean): boolean {
+  return isLocalDraftRequest(text) || (/^\s*(?:please\s+)?(?:compare|contrast|analy[sz]e)\b/i.test(text)
+    && (scoped || /\b(?:reports?|documents?|sources?|files?|records?|workbooks?)\b/i.test(text)));
 }
 
 export function createLocalSubmission(sessionId: string, message: string, model: string): LocalSubmission {
@@ -29,7 +38,10 @@ export function createLocalSubmission(sessionId: string, message: string, model:
 export function retryLocalSubmission(sessionId: string, message?: ChatMessage): LocalSubmission | null {
   const turn = message?.localTurn;
   if (!message || !turn || message.withheld || turn.state === 'completed' || turn.state === 'running' ||
-      turn.knowledge_scope_stale || turn.error_code === 'LOCAL_KNOWLEDGE_CHANGED') return null;
+      turn.state === 'waiting_clarification' || turn.knowledge_scope_stale ||
+      ['LOCAL_KNOWLEDGE_CHANGED', 'LOCAL_TOOL_UNAUTHORIZED', 'CONVERSATION_UNAVAILABLE',
+        'LOCAL_WORKFLOW_CANCELLED'].includes(turn.error_code ?? '') ||
+      (turn.plan_revision !== undefined && turn.attempt >= 3)) return null;
   const retry: LocalSubmission = { session_id: sessionId, turn_id: message.id, attempt: turn.attempt + 1,
     message: message.content, model: turn.model };
   if (turn.tools_enabled === false) retry.tools_enabled = false;

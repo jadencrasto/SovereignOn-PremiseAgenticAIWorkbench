@@ -11,7 +11,9 @@ from fastapi.responses import Response
 from backend.api.local_chat import _require_local_viewer
 from backend.auth.dependencies import get_current_user
 from backend.tools.local_draft_export import MIME, generate_export
-from backend.tools.local_drafts import DraftConflict, DraftEdit, DraftRevision, check_evidence, draft_origin, export_bytes
+from backend.tools.local_drafts import (
+    DraftConflict, DraftEdit, DraftRevision, check_evidence, draft_origin, draft_reply, export_bytes,
+)
 
 router = APIRouter(prefix='/api/chat/sessions/{session_id}/drafts')
 
@@ -44,14 +46,20 @@ def _draft(request, user, session_id, draft_id):
 def _preview(state, identity, draft):
     stale = check_evidence(state, draft.session, identity, draft)
     approved = state.local_drafts.is_approved(draft)
-    state_name = ('stale' if stale else 'draft' if not approved else
+    state_name = ('cancelled' if draft.cancelled else 'stale' if stale else 'draft' if not approved else
                   'exported' if draft.exported else 'approved')
     job = state.local_export_job
+    workflow = {}
+    if not draft.evidence:
+        reply = draft_reply(state.engine._memory, draft.session, draft)
+        if reply is not None:
+            workflow = {'workflow_steps': reply.extra_fields['local_workflow']['steps']}
     return {
         'id': draft.id, 'turn_id': draft.turn_id, 'format': draft.format, 'revision': draft.revision,
         'title': draft.title, 'summary': draft.summary, 'state': state_name,
         'export_digest': draft.export_digest if state_name == 'exported' else None,
         'exporting': bool(job and job.draft_id == draft.id and job.revision == draft.revision and not job.cancelled),
+        **workflow,
         'findings': [
             {'topic': 'Prior evidence', 'text': 'Evidence has changed or was removed. Create a new draft to use current evidence.',
              'kind': 'stale', 'coverage': row.coverage, 'turn_id': row.turn_id}
@@ -67,6 +75,8 @@ def _require_revision(row, revision):
 
 
 def _require_current(state, identity, draft):
+    if draft.cancelled:
+        raise HTTPException(409, 'This workflow draft was cancelled.')
     if check_evidence(state, draft.session, identity, draft):
         raise HTTPException(409, 'Draft evidence changed or was removed. Create a new draft.')
 
@@ -183,6 +193,23 @@ async def cancel_export(session_id: str, draft_id: str, body: DraftRevision, req
     job = state.local_export_job
     if job is not None and (job.draft_id, job.revision) == (draft_id, body.revision):
         job.cancelled = True
+    return _preview(state, identity, draft)
+
+
+@router.post('/{draft_id}/cancel-workflow')
+async def cancel_draft_workflow(session_id: str, draft_id: str, body: DraftRevision, request: Request,
+                                user=Depends(get_current_user)):
+    state, identity, draft = _draft(request, user, session_id, draft_id)
+    _require_revision(draft, body.revision)
+    if draft.evidence or draft.exported:
+        raise HTTPException(409, 'This workflow is not awaiting approval or export.')
+    if not draft.cancelled:
+        updated = draft.model_copy(update={'cancelled': True, 'approval': None})
+        _save(state, updated)
+        draft = updated
+        job = state.local_export_job
+        if job is not None and (job.draft_id, job.revision) == (draft.id, draft.revision):
+            job.cancelled = True
     return _preview(state, identity, draft)
 
 

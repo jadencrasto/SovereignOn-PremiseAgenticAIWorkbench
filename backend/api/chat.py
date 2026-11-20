@@ -162,6 +162,8 @@ async def chat(
         raise HTTPException(403, 'Local knowledge requires the local development profile.')
     if 'draft_turn_ids' in body.model_fields_set:
         raise HTTPException(403, 'Draft evidence requires the local development profile.')
+    if 'workflow_preview' in body.model_fields_set:
+        raise HTTPException(403, 'Workflow preview requires the local development profile.')
     if 'image_id' in body.model_fields_set:
         raise HTTPException(403, 'Local image attachments require the local development profile.')
     session_id = body.session_id or str(uuid.uuid4())
@@ -1960,6 +1962,13 @@ async def read_session(
                 if knowledge is None:
                     knowledge = {"state": "unavailable", "citations": []}
             if local_runs is not None and verified:
+                visual_ref = message.extra_fields.get('local_image_v1')
+                if visual_ref and 'local_workflow' in message.extra_fields:
+                    from backend.agent.local_workflow import workflow_image_current
+
+                    allowed = allowed and workflow_image_current(
+                        request.app.state, session_id, identity, visual_ref['turn_id'],
+                    )
                 source = message.extra_fields.get(LOCAL_NUMERIC_SOURCE_FIELD)
                 if source:
                     source_turn_number = turn_numbers.get(source['turn_id'])
@@ -1976,7 +1985,7 @@ async def read_session(
         if turn:
             turn_numbers[message.id] = len(turn_numbers) + 1
             try:
-                if 'image' in turn or 'draft_scope' in turn:
+                if 'image' in turn or 'draft_scope' in turn or 'workflow_intake' in turn:
                     turn = engine._memory.read_local_turn(session_id, identity, message.id)
                 turn = local_runs.reconcile(engine._memory, session_id, identity, message.id, turn)
                 public_turn = public_local_turn(turn)

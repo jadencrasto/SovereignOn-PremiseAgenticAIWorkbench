@@ -107,6 +107,7 @@ class ChatRequest(BaseModel):
     knowledge_source_ids: KnowledgeSourceIds | None = None
     image_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
     draft_turn_ids: EvidenceTurns | None = None
+    workflow_preview: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
 
 
 # ---------------------------------------------------------------------------

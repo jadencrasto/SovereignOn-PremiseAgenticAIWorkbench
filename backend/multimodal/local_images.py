@@ -243,6 +243,6 @@ class LocalImages:
 
 def refers_to_image(prompt):
     return re.search(
-        r'\b(?:this|that|attached|earlier|previous|same|above)\s+(?:image|photo|picture)\b'
+        r'\b(?:this|that|attached|earlier|previous|same|above)\s+(?:inspection\s+)?(?:image|photo|picture)\b'
         r'|^\s*(?:describe|analy[sz]e)\s+(?:the\s+)?(?:image|photo|picture)\b', prompt, re.I,
     ) is not None

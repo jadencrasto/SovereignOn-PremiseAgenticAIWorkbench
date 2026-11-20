@@ -34,13 +34,19 @@ class DraftScope(StrictModel):
     format: Format
     selection: EvidenceTurns | None = None
     evidence: EvidenceTurns
+    workflow: bool = False
 
     @model_validator(mode='after')
     def validate_selection(self):
+        if self.workflow and self.selection is None and not self.evidence:
+            return self
         if (not self.evidence or len(self.evidence) != len(set(self.evidence))
-                or (self.selection is not None and self.selection != self.evidence)):
+                or self.workflow or (self.selection is not None and self.selection != self.evidence)):
             raise ValueError('Invalid draft evidence selection')
         return self
+
+    def binding(self):
+        return self.model_dump(exclude=None if self.workflow else {'workflow'})
 
 
 class DraftRequest(StrictModel):
@@ -60,7 +66,7 @@ class Finding(StrictModel):
     turn_id: TurnId
     topic: str = Field(max_length=600)
     text: str = Field(min_length=1, max_length=8192)
-    kind: Literal['source_value', 'source_excerpt', 'visual_interpretation', 'missing', 'user_edited']
+    kind: Literal['source_value', 'source_excerpt', 'visual_interpretation', 'comparison', 'missing', 'user_edited']
     coverage: Literal['supported', 'conflict', 'incomplete', 'absent', 'visual']
     source: dict | None = None
     field: dict | None = None
@@ -86,10 +92,11 @@ class LocalDraft(StrictModel):
     # Recognize interrupted-L17 snapshots. Only the signed receipt grants approval.
     approved_revision: Revision | None = Field(default=None, exclude=True)
     approval: DraftApproval | None = None
-    evidence: list[EvidenceRef] = Field(min_length=1, max_length=5)
+    evidence: list[EvidenceRef] = Field(max_length=5)
     findings: list[Finding] = Field(min_length=1, max_length=MAX_FINDINGS)
     export_digest: Digest | None = None
     exported: str | None = Field(default=None, max_length=(MAX_EXPORT + 2) // 3 * 4)
+    cancelled: bool = False
 
 
 class DraftRevision(StrictModel):
@@ -116,18 +123,38 @@ class DraftConflict(ValueError):
     pass
 
 
+_ARTIFACT_CLAUSE = re.compile(r'^\s*(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\s+'
+                     r'(?:(?:a|an|the|me)\s+){0,2}(?:(?:cited|short|observation|maintenance|inspection|comparison|evidence[- ]grounded)\s+){0,3}'
+                     r'(report|spreadsheet|summary|document|docx|xlsx|pdf)\b', re.I)
+_ARTIFACT_CONTINUATION = re.compile(
+    r'(?:,?\s+and\s+(?:then\s+)?|[.;]\s+|,\s+then\s+)(?=(?:create|draft|prepare|make|generate|write|build)\b)',
+    re.I,
+)
+
+
+def artifact_clauses(prompt):
+    prompt = prompt.strip()
+    scoped = re.match(r'^(?:use|using)\s+(?:my|the)\s+(?:selected|registered)\s+'
+                      r'(?:documents|local sources)\s+to\s+(.+)$', prompt, re.I)
+    if scoped:
+        return ['', scoped[1]]
+    combined = re.match(r'^(?:use|using)\s+([^\n]{1,300}?)\s+to\s+(.+)$', prompt, re.I)
+    if combined and re.search(r'\b(?:image|photo|picture|documents?|sources?)\b', combined[1], re.I):
+        return [combined[1], combined[2]]
+    return _ARTIFACT_CONTINUATION.split(prompt, maxsplit=1)
+
+
 def artifact_intent(prompt):
-    match = re.match(r'^\s*(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\s+'
-                     r'(?:(?:a|an|the|me)\s+){0,2}(?:(?:maintenance|inspection|comparison|evidence[- ]grounded)\s+){0,2}'
-                     r'(report|spreadsheet|summary|document|docx|xlsx|pdf)\b', prompt, re.I)
+    clause = artifact_clauses(prompt)[-1]
+    match = _ARTIFACT_CLAUSE.match(clause)
     if not match:
         return None
     # Format hints select only an output type. The rest of the request has no
     # authority to name destinations, call tools or approve an export.
     word = match[1].lower()
-    if word in ('spreadsheet', 'xlsx') or re.search(r'\b(?:as|in)\s+(?:an?\s+)?xlsx\b', prompt, re.I):
+    if word in ('spreadsheet', 'xlsx') or re.search(r'\b(?:as|in)\s+(?:an?\s+)?xlsx\b', clause, re.I):
         return 'xlsx'
-    if word == 'pdf' or re.search(r'\b(?:as|in)\s+(?:a\s+)?pdf\b', prompt, re.I):
+    if word == 'pdf' or re.search(r'\b(?:as|in)\s+(?:a\s+)?pdf\b', clause, re.I):
         return 'pdf'
     return 'docx'
 
@@ -141,7 +168,7 @@ def _mac(key, payload):
 
 
 def _approval_mac(key, draft, approver, key_id):
-    content = draft.model_dump(exclude={'approval', 'export_digest', 'exported'})
+    content = draft.model_dump(exclude={'approval', 'export_digest', 'exported', 'cancelled'})
     payload = {'approver': approver, 'key_id': key_id, 'content': content}
     return hmac.new(key, b'local-draft-approval-v1\0' + _json(payload), hashlib.sha256).hexdigest()
 
@@ -283,11 +310,15 @@ def _source_findings(turn_id, receipt):
 
 
 def check_evidence(state, session, identity, draft):
+    if not draft.evidence:
+        from backend.agent.local_workflow import current_workflow_draft
+
+        return set() if current_workflow_draft(state, session, identity, draft) else {draft.turn_id}
     resolved = resolve_evidence(state, session, identity, [ref.turn_id for ref in draft.evidence])
     return {ref.turn_id for ref in draft.evidence if ref.turn_id not in resolved or resolved[ref.turn_id][0] != ref}
 
 
-def draft_origin(memory, session, draft):
+def draft_reply(memory, session, draft):
     from backend.agent.memory import LOCAL_TURN_FIELD
 
     history = memory.get_history(session)
@@ -295,11 +326,18 @@ def draft_origin(memory, session, draft):
         if turn.id == draft.turn_id:
             record = turn.extra_fields.get(LOCAL_TURN_FIELD, {})
             proof = reply.extra_fields.get('access_provenance_v1', {})
-            return (record.get('state') == 'completed' and record.get('assistant_id') == reply.id
+            if (record.get('state') == 'completed' and record.get('assistant_id') == reply.id
                     and isinstance(proof, dict) and proof.get('producer') == DRAFT_PRODUCER
                     and reply.extra_fields.get('local_draft_id') == draft.id
-                    and memory.verify_local_reply(session, reply))
-    return False
+                    and ('local_workflow' in reply.extra_fields) == (not draft.evidence)
+                    and memory.verify_local_reply(session, reply)):
+                return reply
+            break
+    return None
+
+
+def draft_origin(memory, session, draft):
+    return draft_reply(memory, session, draft) is not None
 
 
 async def assemble_draft(args: DraftRequest, *, session_id, user_id, step_id):
@@ -309,20 +347,31 @@ async def assemble_draft(args: DraftRequest, *, session_id, user_id, step_id):
     scope = local_draft_scope.get()
     if scope is None:
         raise PermissionError('Draft context unavailable')
-    state, identity, admitted = scope
+    state, identity, admitted, *workflow = scope
     if args != admitted or identity[0] != user_id or args.turn_id != step_id:
         raise PermissionError('Draft context does not match the admitted request')
-    resolved = resolve_evidence(state, session_id, identity, args.scope.evidence)
-    if len(resolved) != len(args.scope.evidence):
-        raise DraftConflict('Selected evidence is unavailable or stale.')
-    findings = [entry for ref in args.scope.evidence for entry in resolved[ref][1]]
+    if args.scope.workflow:
+        from backend.agent.local_workflow import WorkflowEvidence
+
+        if len(workflow) != 1 or not isinstance(workflow[0], WorkflowEvidence):
+            raise PermissionError('Verified workflow evidence is unavailable')
+        findings = list(workflow[0].findings)
+        evidence = []
+    else:
+        if workflow:
+            raise PermissionError('Unexpected workflow input')
+        resolved = resolve_evidence(state, session_id, identity, args.scope.evidence)
+        if len(resolved) != len(args.scope.evidence):
+            raise DraftConflict('Selected evidence is unavailable or stale.')
+        findings = [entry for ref in args.scope.evidence for entry in resolved[ref][1]]
+        evidence = [resolved[ref][0] for ref in args.scope.evidence]
     if not findings or len(findings) > MAX_FINDINGS:
         raise DraftConflict('Select a smaller set of evidence turns.')
     return LocalDraft(
         id=uuid4().hex, session=session_id, generation=identity[1], turn_id=args.turn_id,
         format=args.scope.format, title='Evidence comparison' if args.scope.format == 'xlsx' else 'Evidence report',
         summary='This draft presents source-attributed findings, available visual interpretations, and evidence gaps.',
-        evidence=[resolved[ref][0] for ref in args.scope.evidence], findings=findings,
+        evidence=evidence, findings=findings,
     ).model_dump()
 
 

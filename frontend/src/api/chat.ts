@@ -4,6 +4,7 @@ import type {
   ChatRequestPayload,
   ChatResponsePayload,
   LocalTurnState,
+  LocalWorkflowPreview,
   MultimodalChatRequestPayload,
   SourceReference,
   StreamChunkPayload,
@@ -17,6 +18,12 @@ export async function sendChatSync(
   return apiRequest<ChatResponsePayload>('/api/chat', {
     method: 'POST',
     body: JSON.stringify({ ...payload, stream: false }),
+  });
+}
+
+export function previewLocalWorkflow(payload: ChatRequestPayload, signal?: AbortSignal) {
+  return apiRequest<LocalWorkflowPreview>('/api/chat/workflow-preview', {
+    method: 'POST', body: JSON.stringify(payload), cache: 'no-store', signal,
   });
 }
 
@@ -44,6 +51,17 @@ export async function streamChat(
     callbacks,
     signal
   );
+}
+
+export async function streamLocalClarification(
+  turn: { session_id: string; turn_id: string; attempt: number },
+  reply: { revision: number; selection: string[]; usesImage: boolean },
+  callbacks: Parameters<typeof streamSSE>[2],
+  signal?: AbortSignal,
+): Promise<void> {
+  const path = `/api/chat/sessions/${encodeURIComponent(turn.session_id)}/turns/${encodeURIComponent(turn.turn_id)}/clarify`;
+  return streamSSE(path, { revision: reply.revision, selection: reply.selection }, callbacks, signal,
+    { ...turn, image_id: reply.usesImage ? 'attached' : undefined });
 }
 
 /**

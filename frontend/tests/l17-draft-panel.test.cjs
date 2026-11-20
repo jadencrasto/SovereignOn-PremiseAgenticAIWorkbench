@@ -58,12 +58,25 @@ function text(value) {
 
 const action = (tree, label) => nodes(tree).find(node => node.type === 'button' && text(node) === label);
 const tick = () => new Promise(setImmediate);
+
+test('reconciled workflow preview names completed steps and still waits for approval', async () => {
+  const view = panel(async () => ({ drafts: [{ ...draft, turn_id: 'completed-turn', workflow_steps: ['retrieve', 'vision', 'draft'] }] }));
+  view.props.reviewTurnId = 'completed-turn';
+  const tree = await view.reconcile();
+  assert.equal(tree.props.open, true);
+  assert.ok(nodes(tree).filter(node => node.type === 'details')[1].props.open);
+  assert.match(text(tree), /Source evidence checked · Image analyzed · Draft assembled · Awaiting your approval/);
+  assert.ok(action(tree, 'Approve revision 1'));
+  assert.equal(action(tree, 'Export locally'), undefined);
+});
+
 const draft = {
   id: 'draft-id', revision: 1, format: 'xlsx', title: 'Pressure comparison', summary: 'Two approved sources.',
   state: 'draft', exporting: false, findings: [
     { topic: 'Working pressure', text: '8 bar', kind: 'source_value', coverage: 'supported',
       source: { label: 'register.xlsx', revision: 2, excerpt: 'P-501 8 bar' },
-      field: { document_locator: { format: 'xlsx', sheet: 'Operating Register', cell: 'C4' } } },
+      field: { attribute: 'pressure', value: '8', unit: 'bar', equipment: ['P-501'], conditions: ['normal'],
+        document_locator: { format: 'xlsx', sheet: 'Operating Register', cell: 'C4' } } },
     { topic: 'Image analysis', text: 'A blue surface.', kind: 'visual_interpretation',
       image: { filename: 'equipment.png', sha256: 'abc123', model: 'llava:7b' } },
   ],
@@ -84,7 +97,8 @@ test('draft panel restores citations and image provenance, then edits, approves 
     return current;
   });
   let tree = await ui.reconcile();
-  for (const value of ['Operating Register!C4', 'P-501 8 bar', 'equipment.png', 'llava:7b', 'abc123']) {
+  for (const value of ['Operating Register!C4', 'P-501 8 bar', 'pressure · P-501 · normal',
+    'Source value · 8 bar', 'equipment.png', 'llava:7b', 'abc123']) {
     assert.ok(text(tree).includes(value));
   }
   assert.equal(action(tree, 'Export locally'), undefined);

@@ -6,15 +6,16 @@
  */
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import type { ChatMessage, ImageAttachment, SourceReference, StreamChunkPayload, StreamErrorInfo, ToolEvent } from '../../types';
+import type { ChatMessage, ImageAttachment, LocalWorkflowPreview, SourceReference, StreamChunkPayload, StreamErrorInfo, ToolEvent } from '../../types';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { LocalKnowledgePanel } from './LocalKnowledgePanel';
 import { LocalDraftPanel } from './LocalDraftPanel';
+import { WorkflowClarification } from './WorkflowClarification';
 import { useWorkbench } from '../../context/WorkbenchContext';
 import {
   createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, streamChatTextFiles,
-  cancelLocalTurn, guardChatCallbacks, type TextFileBatch, type TextFileLineRange,
+  cancelLocalTurn, guardChatCallbacks, previewLocalWorkflow, streamLocalClarification, type TextFileBatch, type TextFileLineRange,
   fetchLocalImages, removeLocalImage, uploadLocalImage, type LocalImageAttachment,
 } from '../../api/chat';
 import { useAuth } from '../../context/AuthContext';
@@ -24,7 +25,7 @@ import {
   ChatHistorySidebar, loadSession,
   type ChatSession,
 } from './ChatHistorySidebar';
-import { isLocalDraftRequest, latestLocalUser, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
+import { isLocalDraftRequest, latestLocalUser, needsWorkflowPreview, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
 import {
   Clock,
   Plus,
@@ -129,6 +130,9 @@ export const ChatView: React.FC = () => {
   const [removingImage, setRemovingImage] = useState(false);
   const [draftEvidence, setDraftEvidence] = useState<string[]>([]);
   const [draftsRefresh, setDraftsRefresh] = useState(0);
+  const [workflowReview, setWorkflowReview] = useState<{
+    command: LocalSubmission; preview?: LocalWorkflowPreview; stale?: boolean; error?: string;
+  }>();
   const pendingLocal = useRef<LocalSubmission | null>(null);
   const sendingLocal = useRef<LocalSubmission | null>(null);
   const historyRequest = useRef(0);
@@ -149,6 +153,7 @@ export const ChatView: React.FC = () => {
   const reusedImageId = selectedImage?.session === activeSessionId ? selectedImage?.id : undefined;
   const lastLocalUser = local ? latestLocalUser(messages) : undefined;
   const localRunning = lastLocalUser?.localTurn?.state === 'running';
+  const clarification = lastLocalUser?.localTurn?.clarification;
   const modelSelection = useRef({ selectedModel, selectedVisionModel, capabilities });
   const approvalsAllowed = permitsCapability(capabilities, 'approval_resume');
   const textDisabled = chatDisabled(capabilities, false, selectedModel);
@@ -172,6 +177,7 @@ export const ChatView: React.FC = () => {
     setLocalAccepted(false);
     setLocalStopping(false);
     setDraftEvidence([]);
+    setWorkflowReview(undefined);
     setUploadingImage(false);
     setSelectedImage(undefined);
   }, []);
@@ -234,7 +240,8 @@ export const ChatView: React.FC = () => {
     if (activeSessionId && !abortControllerRef.current) void refreshLocalHistory(activeSessionId);
   }, [activeSessionId, refreshLocalHistory]);
 
-  const runLocalSubmission = useCallback(async (command: LocalSubmission) => {
+  const runLocalSubmission = useCallback(async (command: LocalSubmission,
+    reply?: { revision: number; selection: string[]; usesImage: boolean }, reviewed?: LocalWorkflowPreview) => {
     if (abortControllerRef.current) return;
     const version = selectionVersion.current;
     const controller = new AbortController();
@@ -244,6 +251,7 @@ export const ChatView: React.FC = () => {
     abortControllerRef.current = controller;
     sendingLocal.current = command;
     pendingLocal.current = command;
+    setWorkflowReview(undefined);
     setLocalNotice('');
     setLocalAccepted(false);
     setIsStreaming(true);
@@ -254,10 +262,11 @@ export const ChatView: React.FC = () => {
         isStreaming: true, localPreview: true },
     ]);
     try {
-      await streamChat(command, guardChatCallbacks({
+      const callbacks = guardChatCallbacks({
         onAccepted: () => setLocalAccepted(true),
         onAgentStatus: (status: string, tool?: string) => {
-          if (status !== 'planning' && status !== 'tool_selected' && status !== 'analyzing_image' && status !== 'drafting') return;
+          if (status !== 'planning' && status !== 'tool_selected' && status !== 'analyzing_image' &&
+              status !== 'drafting' && status !== 'retrieving_evidence' && status !== 'comparing_evidence') return;
           const localSelectedTool = tool === 'calculator' || tool === 'unit_conversion' ? tool : undefined;
           setMessages(previous => previous.map(message =>
             message.id === previewId ? { ...message, localAgentStatus: status, localSelectedTool } : message));
@@ -270,16 +279,21 @@ export const ChatView: React.FC = () => {
         onDone: () => {},
         onError: (message: string, info?: StreamErrorInfo) => {
           if (info?.status === 401) handleSessionExpired();
-          if (info?.status && ['LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE', 'LOCAL_KNOWLEDGE_CHANGED',
+          if (info?.status && (reply || ['LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE', 'LOCAL_KNOWLEDGE_CHANGED',
             'LOCAL_KNOWLEDGE_QUESTION', 'LOCAL_IMAGE_UNAVAILABLE', 'LOCAL_VISION_BUSY',
             'LOCAL_IMAGE_REQUIRED', 'LOCAL_IMAGE_AMBIGUOUS', 'LOCAL_IMAGE_REQUEST_INVALID',
-            'LOCAL_DRAFT_REQUEST', 'LOCAL_DRAFT_EVIDENCE'].includes(info.code ?? '')) {
+            'LOCAL_DRAFT_REQUEST', 'LOCAL_DRAFT_EVIDENCE', 'TURN_CONFLICT', 'LOCAL_WORKFLOW_PREVIEW_CHANGED'].includes(info.code ?? ''))) {
             pendingLocal.current = null;
             addToast('info', message);
+            if (info.code === 'LOCAL_WORKFLOW_PREVIEW_CHANGED' && reviewed) {
+              setWorkflowReview({ command, preview: reviewed, stale: true });
+            }
           }
           // Even an error can race a completed write. History decides the outcome.
         },
-      }, current), controller.signal);
+      }, current);
+      if (reply) await streamLocalClarification(command, reply, callbacks, controller.signal);
+      else await streamChat(command, callbacks, controller.signal);
     } catch {
       // Network errors are reconciled by the same read-only history request.
     } finally {
@@ -296,6 +310,29 @@ export const ChatView: React.FC = () => {
       }
     }
   }, [addToast, handleSessionExpired, refreshLocalHistory, updateSessionCount]);
+
+  const reviewLocalWorkflow = useCallback(async (command: LocalSubmission) => {
+    if (abortControllerRef.current) return;
+    const version = selectionVersion.current;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    setWorkflowReview({ command });
+    setIsStreaming(true);
+    try {
+      const preview = await previewLocalWorkflow(command, controller.signal);
+      if (selectionVersion.current === version && !controller.signal.aborted) setWorkflowReview({ command, preview });
+    } catch (error) {
+      if (selectionVersion.current === version && !controller.signal.aborted) {
+        if ((error as {status?: number})?.status === 401) handleSessionExpired();
+        else setWorkflowReview({ command, error: error instanceof Error ? error.message : 'The task preview could not be loaded.' });
+      }
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setIsStreaming(false);
+      }
+    }
+  }, [addToast, handleSessionExpired]);
 
   useEffect(() => {
     updateSessionCount();
@@ -349,14 +386,12 @@ export const ChatView: React.FC = () => {
   const handleSendMessage = useCallback(
     async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange, batch?: TextFileBatch) => {
       if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current ||
-          (local && (localRunning || localNotice || pendingLocal.current || localStopping))) return;
+          (local && (localRunning || clarification || workflowReview || localNotice || pendingLocal.current || localStopping))) return;
       const isDraft = local && isLocalDraftRequest(text);
-      if (isDraft && image) {
-        addToast('info', 'Analyze the image first, then select the completed image turn in Drafts.');
-        return;
-      }
-      const visualQuestion = Boolean(image || (!isDraft && reusedImageId));
-      const knowledgeForTurn = knowledgeActive && !visualQuestion && !isDraft;
+      const useDraftHistory = isDraft && draftEvidence.length > 0 && !image && !reusedImageId &&
+        /^\s*(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\b/i.test(text);
+      const visualQuestion = Boolean(image || reusedImageId);
+      const knowledgeForTurn = knowledgeActive && !useDraftHistory && (!visualQuestion || isDraft);
       if (local && knowledgeForTurn && !knowledgeAvailable) {
         addToast('info', 'Local knowledge is unavailable. Switch to general chat or wait for it to reconnect.');
         return;
@@ -450,7 +485,7 @@ export const ChatView: React.FC = () => {
         }
       }
       if (local) {
-        let imageId = isDraft ? undefined : reusedImageId;
+        let imageId = reusedImageId;
         if (image) {
           const controller = new AbortController();
           const version = selectionVersion.current;
@@ -476,16 +511,20 @@ export const ChatView: React.FC = () => {
           }
         }
         const explicitlyScoped = /^\s*(?:according to|from|using|use)\s+(?:(?:my|the|our|your)\s+)?(?:registered\s+)?local\s+(?:knowledge(?:\s+sources)?|sources)\b/i.test(text);
-        const question = knowledgeForTurn && !explicitlyScoped
-          ? `According to my local sources, ${text}` : text;
+        const scopedDraft = isDraft && knowledgeForTurn && !knowledgeSelection && !imageId &&
+          /^(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\b/i.test(text.trim());
+        const question = scopedDraft ? `Use my selected documents to ${text.trim()}` :
+          knowledgeForTurn && !explicitlyScoped && !isDraft ? `According to my local sources, ${text}` : text;
         setSelectedImage(undefined);
-        await runLocalSubmission({
+        const command: LocalSubmission = {
           session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: question,
           model: imageId ? selectedVisionModel : selectedModel,
           ...(imageId ? { image_id: imageId } : {}),
-          ...(isDraft && draftEvidence.length ? { draft_turn_ids: draftEvidence } : {}),
+          ...(useDraftHistory ? { draft_turn_ids: draftEvidence } : {}),
           ...(knowledgeForTurn && knowledgeSelection ? { knowledge_source_ids: knowledgeSelection } : {}),
-        });
+        };
+        if (needsWorkflowPreview(text, knowledgeForTurn)) await reviewLocalWorkflow(command);
+        else await runLocalSubmission(command);
         return;
       }
       const userTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -805,7 +844,7 @@ export const ChatView: React.FC = () => {
         if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, localNotice, localStopping, runLocalSubmission, knowledgeAvailable, knowledgeActive, knowledgeSelection, reusedImageId, draftEvidence]
+    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, clarification, workflowReview, localNotice, localStopping, runLocalSubmission, reviewLocalWorkflow, knowledgeAvailable, knowledgeActive, knowledgeSelection, reusedImageId, draftEvidence]
   );
 
   /**
@@ -1003,7 +1042,7 @@ export const ChatView: React.FC = () => {
   const stopLocalResponse = async () => {
     const live = sendingLocal.current;
     const attempt = live && localAccepted ? live :
-      localRunning && lastLocalUser?.localTurn && {
+      (localRunning || clarification) && lastLocalUser?.localTurn && {
         session_id: activeSessionId, turn_id: lastLocalUser.id, attempt: lastLocalUser.localTurn.attempt,
       };
     if (!attempt || localStopping) return;
@@ -1037,7 +1076,7 @@ export const ChatView: React.FC = () => {
 
   const handleStopStream = () => {
     if (local) {
-      if (uploadingImage) {
+      if (uploadingImage || workflowReview && !sendingLocal.current) {
         abortControllerRef.current?.abort();
         return;
       }
@@ -1286,9 +1325,44 @@ export const ChatView: React.FC = () => {
       {local && <LocalKnowledgePanel available={knowledgeAvailable} active={knowledgeActive}
         setActive={setKnowledgeActive} selection={knowledgeSelection} setSelection={setKnowledgeSelection}
         onRevision={refreshAfterSourceChange} />}
+      {local && workflowReview?.command.session_id === activeSessionId && (
+        <section aria-label="Task preview" className="mx-5 my-2 max-h-[35vh] shrink-0 space-y-2 overflow-auto rounded border border-slate-200 px-3 py-2 text-sm">
+          <h2 className="font-medium">Review task</h2>
+          <p className="break-words">{workflowReview.preview?.objective ?? workflowReview.command.message}</p>
+          {!!workflowReview.preview?.sources.length && <p className="break-words">
+            {workflowReview.preview.sources_to_choose ? 'Available sources' : 'Sources'}{' · '}
+            {workflowReview.preview.sources.map(source => `${source.label} (rev. ${source.revision})`).join(', ')}
+          </p>}
+          {!!workflowReview.preview?.images.length && <p className="break-words">Image · {workflowReview.preview.images.join(', ')}</p>}
+          {workflowReview.preview && <p>{workflowReview.preview.steps.join(' → ')} · {workflowReview.preview.output}</p>}
+          {workflowReview.preview?.question && <p>{workflowReview.preview.question}</p>}
+          {workflowReview.stale && <p role="status">The reviewed inputs changed.</p>}
+          {workflowReview.error && <p role="alert">{workflowReview.error}</p>}
+          <div className="flex flex-wrap gap-3">
+            <button type="button" className="font-medium underline" disabled={isStreaming}
+              onClick={() => workflowReview.stale || !workflowReview.preview ? void reviewLocalWorkflow(workflowReview.command)
+                : void runLocalSubmission({ ...workflowReview.command, workflow_preview: workflowReview.preview.token },
+                  undefined, workflowReview.preview)}>
+              {workflowReview.stale ? 'Review updated inputs' : !workflowReview.preview ? 'Retry preview'
+                : workflowReview.preview.question ? 'Continue to clarification' : 'Start workflow'}
+            </button>
+            <button type="button" className="underline" disabled={isStreaming} onClick={() => setWorkflowReview(undefined)}>Dismiss preview</button>
+          </div>
+        </section>
+      )}
+      {local && clarification && lastLocalUser?.localTurn && <WorkflowClarification
+        key={`${lastLocalUser.id}:${clarification.revision}`} clarification={clarification}
+        busy={isStreaming || localStopping}
+        cancel={() => void stopLocalResponse()}
+        resume={selection => void runLocalSubmission({
+          session_id: activeSessionId, turn_id: lastLocalUser.id, attempt: lastLocalUser.localTurn!.attempt,
+          message: lastLocalUser.content, model: lastLocalUser.localTurn!.model,
+        }, { revision: clarification.revision, selection, usesImage: clarification.uses_image })}
+      />}
       {local && activeSessionId && <LocalDraftPanel key={activeSessionId} sessionId={activeSessionId}
         messages={messages} refreshKey={`${historyRevision}:${draftsRefresh}:${lastLocalUser?.id}:${lastLocalUser?.localTurn?.state}`}
-        selected={draftEvidence} onSelection={setDraftEvidence} />}
+        selected={draftEvidence} onSelection={setDraftEvidence}
+        reviewTurnId={lastLocalUser?.localTurn?.state === 'completed' ? lastLocalUser.id : undefined} />}
       {local && (savedImages.length > 0 || uploadingImage) && (
         <div className="flex flex-wrap items-center gap-3 border-t border-slate-200 px-5 py-2 text-xs text-slate-700">
           {uploadingImage && <span role="status">Uploading and validating image.</span>}
@@ -1331,7 +1405,7 @@ export const ChatView: React.FC = () => {
       <ChatInput
         key={activeSessionId ? activeSessionId + ':' + draftRevision : 'new-draft-' + draftRevision}
         onSendMessage={handleSendMessage}
-        sendBlocked={(!local && textDisabled) || restoring || (local && Boolean(localNotice || localStopping || (reusedImageId && imageDisabled)))}
+        sendBlocked={(!local && textDisabled) || restoring || (local && Boolean(workflowReview || clarification || localNotice || localStopping || (reusedImageId && imageDisabled)))}
         imageBlocked={imageDisabled || restoring}
         textOnly={local}
         localImage={local}

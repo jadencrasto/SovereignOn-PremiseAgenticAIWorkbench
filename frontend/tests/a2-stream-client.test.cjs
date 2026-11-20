@@ -353,3 +353,19 @@ test('visual status is accepted only for an identified image request', async () 
   assert.deepEqual(events, useImage ? [['analyzing_image'], ['done','s']] : [['error','Invalid stream response']]);
  }
 });
+
+test('an image workflow streams evidence and draft progress on the same attempt', async () => {
+ const turn = {session_id:'s', turn_id:'image-workflow', attempt:2};
+ const statuses = ['planning', 'retrieving_evidence', 'comparing_evidence', 'analyzing_image', 'drafting'];
+ const wire = [
+  {type:'accepted', content:''},
+  ...statuses.map(content => ({type:'agent_status', content})),
+  {type:'done', content:''},
+ ].map((event, index) => 'data: ' + JSON.stringify({...turn, ...event, sequence:index + 1}) + '\n\n');
+ const events = [];
+ global.fetch = async () => response(wire);
+ await streamSSE('/api/chat', {...turn, image_id:'owned-image', knowledge_source_ids:['owned-source']}, {
+  ...callbacks(events), onAgentStatus: status => events.push([status]),
+ });
+ assert.deepEqual(events, [...statuses.map(status => [status]), ['done','s']]);
+});

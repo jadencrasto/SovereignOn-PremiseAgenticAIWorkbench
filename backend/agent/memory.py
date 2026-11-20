@@ -96,6 +96,18 @@ def public_local_turn(record):
         public['image_id'] = record['image']['ref']['image_id']
     if 'draft_scope' in record:
         public['draft_turn_ids'] = record['draft_scope']['scope']['selection']
+    if 'workflow_intake' in record:
+        from backend.agent.workflow_intake import WorkflowIntake
+
+        intake = WorkflowIntake.model_validate(record['workflow_intake']['intake'])
+        public['plan_revision'] = intake.revision
+        if record['state'] == 'waiting_clarification':
+            public['clarification'] = intake.clarification()
+            if not intake.choose_sources:
+                public['knowledge_scope'] = intake.scope.model_dump()
+    if 'workflow_checkpoint' in record:
+        checkpoint = record['workflow_checkpoint']['checkpoint']
+        public['workflow_progress'] = list(checkpoint.get('steps', ['evidence']))
     return public
 
 
@@ -321,6 +333,12 @@ class ConversationMemory:
                 if 'draft_scope' in turn:
                     self._verified_draft_scope(sid, (owner, active[sid]), message)
                     fields.add('draft_scope')
+                if 'workflow_checkpoint' in turn and state != 'completed':
+                    self._verified_workflow_checkpoint(sid, (owner, active[sid]), message)
+                    fields.add('workflow_checkpoint')
+                if 'workflow_intake' in turn:
+                    self._verified_workflow_intake(sid, (owner, active[sid]), message)
+                    fields.add('workflow_intake')
                 if state == 'completed' and set(turn) == fields | {'assistant_id'}:
                     expected_assistant = turn['assistant_id']
                     if not isinstance(expected_assistant, str) or not expected_assistant:
@@ -329,6 +347,9 @@ class ConversationMemory:
                     turn.update(state='interrupted', error_code='TURN_INTERRUPTED')
                     conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
                     changed = True
+                elif (state == 'waiting_clarification' and set(turn) == fields and 'workflow_intake' in fields
+                      and index == len(conv.messages) - 1):
+                    continue
                 elif (state not in ('failed', 'cancelled', 'interrupted') or set(turn) != fields | {'error_code'}
                       or not isinstance(turn['error_code'], str) or not re.fullmatch(r'[A-Z_]{1,50}', turn['error_code'])):
                     raise ValueError('Invalid local attempt state')
@@ -568,6 +589,8 @@ class ConversationMemory:
             fields.append(message.extra_fields[_LOCAL_IMAGE_FIELD])
         if 'local_draft_id' in message.extra_fields:
             fields.append(message.extra_fields['local_draft_id'])
+        if 'local_workflow' in message.extra_fields:
+            fields.append(message.extra_fields['local_workflow'])
         payload = json.dumps(fields, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
@@ -581,19 +604,31 @@ class ConversationMemory:
         allowed_fields = {'access_provenance_v1', 'response_state_v1'}
         visual = isinstance(proof, dict) and proof.get('producer') == LOCAL_VISION_PRODUCER
         draft = isinstance(proof, dict) and proof.get('producer') == DRAFT_PRODUCER
+        workflow = 'local_workflow' in message.extra_fields
         if draft:
             draft_id = message.extra_fields.get('local_draft_id')
-            if (plain_only or proof.get('kind') != _PLAIN_CHAT or status != 'completed'
+            if (plain_only or proof.get('kind') not in ((_PLAIN_CHAT, _KNOWLEDGE) if workflow else (_PLAIN_CHAT,))
+                    or status != 'completed'
                     or not isinstance(draft_id, str) or not re.fullmatch(r'[0-9a-f]{32}', draft_id)):
                 return False
             allowed_fields.add('local_draft_id')
+            if workflow:
+                from backend.agent.local_workflow import WorkflowReceipt
+
+                try:
+                    WorkflowReceipt.model_validate(message.extra_fields['local_workflow'])
+                except ValueError:
+                    return False
+                allowed_fields.add('local_workflow')
+                visual = _LOCAL_IMAGE_FIELD in message.extra_fields
         if visual:
-            if plain_only or proof.get('kind') != _PLAIN_CHAT or status != 'completed':
+            if plain_only or (not workflow and proof.get('kind') != _PLAIN_CHAT) or status != 'completed':
                 return False
             allowed_fields.add(_LOCAL_IMAGE_FIELD)
         knowledge_claim = None
         if isinstance(proof, dict) and proof.get('kind') == _KNOWLEDGE:
-            if proof.get('producer') != KNOWLEDGE_PRODUCER or KNOWLEDGE_FIELD not in message.extra_fields:
+            if (not (proof.get('producer') == KNOWLEDGE_PRODUCER or (draft and workflow))
+                    or KNOWLEDGE_FIELD not in message.extra_fields):
                 return False
             try:
                 knowledge_claim = KnowledgeReceipt.model_validate(message.extra_fields[KNOWLEDGE_FIELD])
@@ -661,7 +696,10 @@ class ConversationMemory:
                     or record.get('assistant_id') != message.id):
                 return False
             try:
-                if self._verified_draft_scope(session_id, identity, turn) is None:
+                scope = self._verified_draft_scope(session_id, identity, turn)
+                if (scope is None or scope.workflow != workflow
+                        or (workflow and (visual != ('image' in record)
+                                          or (knowledge_claim is not None) != ('knowledge_scope' in record)))):
                     return False
             except (ValueError, KeyError, TypeError):
                 return False
@@ -757,13 +795,21 @@ class ConversationMemory:
 
     @_synchronized
     def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model, *, tools_enabled=True,
-                         knowledge_scope=None, image_ref=None, draft_scope=None):
+                         knowledge_scope=None, image_ref=None, draft_scope=None, intake=None, clarification=None):
         """Atomically persist admission or return the existing attempt's state."""
         if self.stream_identity(session_id) != identity:
             raise PermissionError('Conversation unavailable')
-        if image_ref is not None and (tools_enabled or knowledge_scope is not None):
+        workflow = draft_scope is not None and draft_scope.workflow
+        answer_only = bool(intake and intake.answer_only)
+        waiting = bool(intake and intake.reason)
+        if intake is not None and (not tools_enabled or (waiting and (knowledge_scope or image_ref or draft_scope))
+                                   or (not waiting and not workflow and not (answer_only and knowledge_scope
+                                                                          and not image_ref and not draft_scope))):
+            raise ValueError('Invalid workflow plan')
+        if image_ref is not None and not workflow and (tools_enabled or knowledge_scope is not None):
             raise ValueError('Invalid mixed image turn')
-        if draft_scope is not None and (not tools_enabled or image_ref is not None or knowledge_scope is not None):
+        if draft_scope is not None and (not tools_enabled
+                or ((image_ref is not None or knowledge_scope is not None) != workflow)):
             raise ValueError('Invalid mixed draft turn')
         conv = self._store[session_id]
         turn = next((message for message in conv.messages if message.id == turn_id), None)
@@ -773,27 +819,40 @@ class ConversationMemory:
                 raise LocalTurnConflict('Turn ID is already bound to a different submission.')
             if record.get('tools_enabled', tools_enabled) is not tools_enabled:
                 raise LocalTurnConflict('Turn ID is already bound to a different tool preference.')
-            if self._verified_knowledge_scope(session_id, identity, turn) != knowledge_scope:
+            previous_intake = self._verified_workflow_intake(session_id, identity, turn)
+            if clarification is not None:
+                from backend.agent.workflow_intake import clarify_intake
+
+                if (previous_intake is None or record['state'] != 'waiting_clarification' or attempt != record['attempt']
+                        or turn is not conv.messages[-1] or intake != clarify_intake(previous_intake, clarification)):
+                    raise LocalTurnConflict('The clarification has changed. Refresh conversation history.')
+            elif previous_intake != intake:
+                raise LocalTurnConflict('Turn ID is already bound to a different workflow plan.')
+            elif self._verified_knowledge_scope(session_id, identity, turn) != knowledge_scope:
                 raise LocalTurnConflict('Turn ID is already bound to a different local source scope.')
-            if self._verified_local_image(session_id, identity, turn) != image_ref:
+            elif self._verified_local_image(session_id, identity, turn) != image_ref:
                 raise LocalTurnConflict('Turn ID is already bound to a different image.')
-            if self._verified_draft_scope(session_id, identity, turn) != draft_scope:
+            elif self._verified_draft_scope(session_id, identity, turn) != draft_scope:
                 raise LocalTurnConflict('Turn ID is already bound to a different draft scope.')
-            if attempt == record['attempt']:
+            if clarification is None and attempt == record['attempt']:
                 return dict(record), False
-            if (attempt != record['attempt'] + 1 or record['state'] not in {'failed', 'cancelled', 'interrupted'}
-                    or turn is not conv.messages[-1]):
+            if clarification is None and (
+                attempt != record['attempt'] + 1 or record['state'] not in {'failed', 'cancelled', 'interrupted'}
+                or turn is not conv.messages[-1] or waiting
+            ):
                 raise LocalTurnConflict('Only the latest unsuccessful turn can be retried with the next attempt.')
         else:
-            if attempt != 1:
+            if attempt != 1 or clarification is not None:
                 raise LocalTurnConflict('A new turn must start at attempt 1.')
-            if any(message.extra_fields.get(LOCAL_TURN_FIELD, {}).get('state') == 'running'
+            if any(message.extra_fields.get(LOCAL_TURN_FIELD, {}).get('state') in ('running', 'waiting_clarification')
                    for message in conv.messages):
-                raise LocalTurnConflict('A response is already running in this conversation.')
+                raise LocalTurnConflict('Finish or cancel the current response before starting another.')
             turn = conv.add_message('user', content)
             turn.id = turn_id
+        checkpoint = self._verified_workflow_checkpoint(session_id, identity, turn) if workflow or answer_only else None
         progress = self._verified_local_progress(session_id, identity, turn)
-        record = {'attempt': attempt, 'model': model, 'state': 'running', 'tools_enabled': tools_enabled}
+        record = {'attempt': attempt, 'model': model, 'state': 'waiting_clarification' if waiting else 'running',
+                  'tools_enabled': tools_enabled}
         prior_tool = turn.extra_fields.get(LOCAL_TURN_FIELD, {}).get('numeric_tool')
         if prior_tool is not None:
             record['numeric_tool'] = prior_tool
@@ -810,12 +869,19 @@ class ConversationMemory:
                 'ref': ref, 'mac': self._local_image_mac(session_id, identity, turn, record, ref),
             }
         if draft_scope is not None:
-            scope = draft_scope.model_dump()
+            scope = draft_scope.binding()
             record['draft_scope'] = {'scope': scope, 'mac': self._draft_scope_mac(session_id, identity, turn, record, scope)}
+        if checkpoint is not None:
+            record['workflow_checkpoint'] = turn.extra_fields[LOCAL_TURN_FIELD]['workflow_checkpoint']
+        if intake is not None:
+            payload = intake.binding()
+            record['workflow_intake'] = {
+                'intake': payload, 'mac': self._workflow_intake_mac(session_id, identity, turn, record, payload),
+            }
         turn.extra_fields[LOCAL_TURN_FIELD] = record
         conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
         self._save()
-        return dict(record), True
+        return dict(record), not waiting
 
     @_synchronized
     def read_local_turn(self, session_id, identity, turn_id):
@@ -823,7 +889,104 @@ class ConversationMemory:
         self._verified_knowledge_scope(session_id, identity, turn)
         self._verified_local_image(session_id, identity, turn)
         self._verified_draft_scope(session_id, identity, turn)
+        self._verified_workflow_intake(session_id, identity, turn)
+        self._verified_workflow_checkpoint(session_id, identity, turn)
         return dict(turn.extra_fields[LOCAL_TURN_FIELD])
+
+    def _workflow_intake_mac(self, session_id, identity, turn, record, payload):
+        from backend.tools.local_drafts import _json
+
+        fields = ['local-workflow-intake-v1', session_id, *identity, turn.id, turn.content,
+                  record['model'], record['attempt'], payload]
+        return hmac.new(self._provenance_key[1], _json(fields), hashlib.sha256).hexdigest()
+
+    def _verified_workflow_intake(self, session_id, identity, turn):
+        record = turn.extra_fields.get(LOCAL_TURN_FIELD, {})
+        if 'workflow_intake' not in record:
+            return None
+        binding = record['workflow_intake']
+        from backend.agent.workflow_intake import WorkflowIntake
+
+        if (not isinstance(binding, dict) or binding.keys() != {'intake', 'mac'}
+                or not isinstance(binding['mac'], str) or record.get('tools_enabled') is not True):
+            raise ValueError('Invalid local workflow plan')
+        intake = WorkflowIntake.model_validate(binding['intake'])
+        expected = self._workflow_intake_mac(session_id, identity, turn, record, intake.binding())
+        if not hmac.compare_digest(binding['mac'], expected):
+            raise ValueError('Invalid local workflow plan proof')
+        if intake.reason:
+            if (record['state'] not in ('waiting_clarification', 'cancelled')
+                    or {'knowledge_scope', 'image', 'draft_scope', 'workflow_checkpoint',
+                        'calculator_progress', 'numeric_tool'} & record.keys()):
+                raise ValueError('Invalid clarification state')
+        else:
+            scope = self._verified_draft_scope(session_id, identity, turn)
+            expected_draft = (not scope and not intake.image and not intake.format) if intake.answer_only else (
+                scope and scope.workflow and scope.format == intake.format)
+            if (record['state'] == 'waiting_clarification' or not expected_draft
+                    or self._verified_knowledge_scope(session_id, identity, turn) != intake.scope
+                    or self._verified_local_image(session_id, identity, turn) != intake.image):
+                raise ValueError('Invalid workflow execution scope')
+        return intake
+
+    def _workflow_checkpoint_mac(self, session_id, identity, turn, record, checkpoint):
+        fields = ['local-workflow-checkpoint-v1', session_id, *identity, turn.id, turn.content, record['model'],
+                  record.get('draft_scope', {}).get('scope'), record.get('knowledge_scope', {}).get('scope'),
+                  record.get('image', {}).get('ref'), checkpoint]
+        if 'workflow_intake' in record:
+            fields.append(record['workflow_intake']['intake'])
+        payload = json.dumps(
+            fields,
+            sort_keys=True, ensure_ascii=True, separators=(',', ':'),
+        ).encode('ascii')
+        return hmac.new(self._provenance_key[1], payload, hashlib.sha256).hexdigest()
+
+    def _verified_workflow_checkpoint(self, session_id, identity, turn):
+        from backend.agent.local_workflow import WorkflowCheckpoint
+
+        record = turn.extra_fields.get(LOCAL_TURN_FIELD, {})
+        if 'workflow_checkpoint' not in record:
+            return None
+        binding = record['workflow_checkpoint']
+        scope = self._verified_draft_scope(session_id, identity, turn)
+        intake = self._verified_workflow_intake(session_id, identity, turn)
+        if (not (scope and scope.workflow or intake and intake.answer_only and not intake.reason)
+                or not isinstance(binding, dict)
+                or binding.keys() != {'checkpoint', 'mac'} or not isinstance(binding['mac'], str)):
+            raise ValueError('Invalid local workflow checkpoint binding')
+        checkpoint = WorkflowCheckpoint.model_validate(binding['checkpoint'])
+        if not hmac.compare_digest(binding['mac'], self._workflow_checkpoint_mac(
+                session_id, identity, turn, record, checkpoint.binding())):
+            raise ValueError('Invalid local workflow checkpoint proof')
+        if checkpoint.steps and (('retrieve' in checkpoint.steps and 'knowledge_scope' not in record)
+                                 or ('vision' in checkpoint.steps and 'image' not in record)):
+            raise ValueError('Checkpoint includes an unplanned workflow step')
+        return checkpoint
+
+    @_synchronized
+    def workflow_checkpoint(self, session_id, identity, turn_id, attempt, checkpoint=None):
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        scope = self._verified_draft_scope(session_id, identity, turn)
+        intake = self._verified_workflow_intake(session_id, identity, turn)
+        if (record['attempt'] != attempt or record['state'] != 'running'
+                or not (scope and scope.workflow or intake and intake.answer_only and not intake.reason)):
+            raise LocalTurnConflict('Workflow attempt is no longer active.')
+        previous = self._verified_workflow_checkpoint(session_id, identity, turn)
+        if checkpoint is None:
+            return previous
+        if previous is not None and (not previous.steps or not checkpoint.steps
+                or checkpoint.steps[:-1] != previous.steps
+                or checkpoint.knowledge != previous.knowledge
+                or checkpoint.findings[:len(previous.findings)] != previous.findings
+                or checkpoint.conversions[:len(previous.conversions)] != previous.conversions
+                or not checkpoint.answer.startswith(previous.answer)):
+            raise LocalTurnConflict('The checkpoint does not extend completed workflow evidence.')
+        payload = checkpoint.binding()
+        record['workflow_checkpoint'] = {
+            'checkpoint': payload, 'mac': self._workflow_checkpoint_mac(session_id, identity, turn, record, payload),
+        }
+        self._save()
 
     def _draft_scope_mac(self, session_id, identity, turn, record, scope):
         payload = json.dumps(['local-draft-turn-v1', session_id, *identity, turn.id, turn.content,
@@ -840,10 +1003,12 @@ class ConversationMemory:
         binding = record['draft_scope']
         if (not isinstance(binding, dict) or binding.keys() != {'scope', 'mac'}
                 or not isinstance(binding['mac'], str) or record.get('tools_enabled') is not True
-                or {'knowledge_scope', 'image', 'calculator_progress', 'numeric_tool'} & record.keys()):
+                or {'calculator_progress', 'numeric_tool'} & record.keys()):
             raise ValueError('Invalid local draft binding')
         scope = DraftScope.model_validate(binding['scope'])
-        expected = self._draft_scope_mac(session_id, identity, turn, record, scope.model_dump())
+        if bool({'knowledge_scope', 'image'} & record.keys()) != scope.workflow:
+            raise ValueError('Invalid local workflow binding')
+        expected = self._draft_scope_mac(session_id, identity, turn, record, scope.binding())
         if not hmac.compare_digest(binding['mac'], expected):
             raise ValueError('Invalid local draft proof')
         return scope
@@ -861,9 +1026,12 @@ class ConversationMemory:
         from backend.multimodal.local_images import LocalImageRef
 
         binding = record['image']
+        workflow = self._verified_draft_scope(session_id, identity, turn)
         if (not isinstance(binding, dict) or binding.keys() != {'ref', 'mac'}
-                or not isinstance(binding['mac'], str) or record.get('tools_enabled') is not False
-                or {'knowledge_scope', 'calculator_progress', 'numeric_tool'} & record.keys()):
+                or not isinstance(binding['mac'], str)
+                or record.get('tools_enabled') is not bool(workflow and workflow.workflow)
+                or {'calculator_progress', 'numeric_tool'} & record.keys()
+                or ('knowledge_scope' in record and not workflow)):
             raise ValueError('Invalid local image binding')
         ref = LocalImageRef.model_validate(binding['ref'])
         expected = self._local_image_mac(session_id, identity, turn, record, ref.model_dump())
@@ -897,7 +1065,8 @@ class ConversationMemory:
         """Store an unsuccessful terminal state without inserting an assistant message."""
         turn = self._owned_local_turn(session_id, identity, turn_id)
         record = turn.extra_fields[LOCAL_TURN_FIELD]
-        if record['attempt'] == attempt and record['state'] == 'running':
+        if record['attempt'] == attempt and (record['state'] == 'running'
+                or record['state'] == 'waiting_clarification' and state == 'cancelled'):
             record.update(state=state, error_code=error_code)
             self._store[session_id].extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
             self._save()
@@ -1078,7 +1247,7 @@ class ConversationMemory:
     def record_plain_response(
         self, session_id, identity, content, *, status=None, producer=None,
         access_provenance=None, calculation=False, local_turn=None, local_plan_digest=None, local_numeric_source=None,
-        local_knowledge=None, local_draft_id=None,
+        local_knowledge=None, local_draft_id=None, local_workflow=None,
     ):
         """Finalize the original live conversation and authenticate only eligible output."""
         from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KNOWLEDGE_PRODUCER, KnowledgeReceipt
@@ -1088,8 +1257,15 @@ class ConversationMemory:
                                            or not re.fullmatch(r'[0-9a-f]{32}', local_draft_id)):
             raise ValueError('Invalid local draft response')
 
+        if local_workflow is not None:
+            from backend.agent.local_workflow import WorkflowReceipt
+
+            if local_draft_id is None:
+                raise ValueError('Workflow requires a draft')
+            local_workflow = WorkflowReceipt.model_validate(local_workflow).model_dump()
         if local_knowledge is not None:
-            if (local_turn is None or producer != KNOWLEDGE_PRODUCER or local_plan_digest is not None
+            if (local_turn is None or not (producer == KNOWLEDGE_PRODUCER or local_workflow is not None)
+                    or local_plan_digest is not None
                     or local_numeric_source is not None or calculation or status is not None):
                 raise ValueError('Invalid local knowledge response')
         if (status not in (None, 'interrupted', 'failed') or not isinstance(content, str)
@@ -1113,10 +1289,12 @@ class ConversationMemory:
                     or not producer or status is not None or not content.strip()):
                 raise LocalTurnConflict('Turn is no longer eligible to complete.')
             image = self._verified_local_image(session_id, identity, turn)
-            if (image is not None) != (producer == LOCAL_VISION_PRODUCER):
+            if local_workflow is None and (image is not None) != (producer == LOCAL_VISION_PRODUCER):
                 raise LocalTurnConflict('Response does not match the admitted image turn.')
-            if ((self._verified_draft_scope(session_id, identity, turn) is not None)
-                    != (producer == DRAFT_PRODUCER and local_draft_id is not None)):
+            scope = self._verified_draft_scope(session_id, identity, turn)
+            if ((scope is not None) != (producer == DRAFT_PRODUCER and local_draft_id is not None)
+                    or bool(scope and scope.workflow) != (local_workflow is not None)
+                    or (scope and scope.workflow and (local_knowledge is not None) != ('knowledge_scope' in record))):
                 raise LocalTurnConflict('Response does not match the admitted draft turn.')
             if local_plan_digest is not None:
                 steps = self.local_calculator_receipts(session_id, identity, turn_id, attempt, local_plan_digest)
@@ -1139,6 +1317,8 @@ class ConversationMemory:
         msg = conv.add_message('assistant', content)
         if local_draft_id is not None:
             msg.extra_fields['local_draft_id'] = local_draft_id
+        if local_workflow is not None:
+            msg.extra_fields['local_workflow'] = local_workflow
         if local_turn is not None and image is not None:
             msg.extra_fields[_LOCAL_IMAGE_FIELD] = {
                 'turn_id': turn_id, 'attempt': attempt, 'image_id': image.image_id, 'sha256': image.normalized_sha256,
@@ -1171,6 +1351,7 @@ class ConversationMemory:
             msg.extra_fields['access_provenance_v1'] = access_provenance
         if local_turn is not None:
             record.pop('calculator_progress', None)
+            record.pop('workflow_checkpoint', None)
             record.update(state='completed', assistant_id=msg.id)
         conv.extra_fields['updated_at'] = msg.created_at
         self._save()

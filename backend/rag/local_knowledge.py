@@ -528,6 +528,11 @@ class LocalKnowledge:
         source = self._sources.get(ref.source_id)
         return source is not None and source.revision == ref.revision and source.digest == ref.digest
 
+    def workflow_pumps(self, owner, scope):
+        self.check_scope(owner, scope)
+        return sorted({tag for ref in scope.sources for passage in self._sources[ref.source_id].passages
+                       if passage.context.searchable for tag in passage.equipment() if re.fullmatch(r'P[- ]?\d+', tag)})
+
     def _question(self, question, source_ids=None):
         known = {tag for source in self._sources.values() if source_ids is None or source.id in source_ids
                  for passage in source.passages if passage.context.searchable for tag in passage.equipment()}
@@ -548,6 +553,9 @@ class LocalKnowledge:
         if values:
             query -= {'equivalent', 'match', 'correspond', 'value', 'listed', 'specified', 'equal', 'equals'}
         fact = requested_fact(question, values, navigation=navigation)
+        if fact and fact.attribute == 'requirements':
+            query -= {'requirement', 'require', 'two', '2', 'policy', 'report', 'file', 'record',
+                      'summarize', 'summarise', 'their', 'key', 'important', 'selected', 'registered'}
         return RetrievalQuestion(query, requested, clarification, conditions(question), quantities(question), values, fact)
 
     def retrieve(self, owner, question, source_ids=None):
@@ -556,7 +564,8 @@ class LocalKnowledge:
             return ()
         target = self._question(question, source_ids)
         if (target.clarification or len(target.terms) > 32
-                or not (target.terms or target.requested_entities or target.measurements)):
+                or not (target.terms or target.requested_entities or target.measurements
+                        or target.fact and target.fact.attribute == 'requirements')):
             return ()
         ranked = []
         for position, source in enumerate(self._sources.values()):
@@ -801,7 +810,10 @@ class LocalKnowledge:
                                 quotes.append(f'{label}: "{view["value"]}"{display_unit} [{number}]')
                         if dense:
                             continue
-                    quotes.append(f'“{item.text}” [{number}]')
+                    if target.fact and target.fact.attribute == 'requirements':
+                        quotes.append(f'{item.filename}: "{item.text}" [{number}]')
+                    else:
+                        quotes.append(f'“{item.text}” [{number}]')
             else:
                 state = 'incomplete' if eligible or target.clarification else 'absent'
                 intro = target.clarification or INSUFFICIENT

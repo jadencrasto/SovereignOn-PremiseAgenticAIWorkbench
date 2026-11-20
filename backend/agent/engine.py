@@ -384,8 +384,19 @@ class AgentEngine:
         )
         from backend.rag.local_knowledge import knowledge_question
 
+        if getattr(run, 'answer_only', False):
+            from backend.agent.local_workflow import finish_workflow
+
+            await finish_workflow(self, run, message, model)
+            return
+
         if run.draft_scope is not None:
-            await self._finish_local_draft(run)
+            if run.draft_scope.workflow:
+                from backend.agent.local_workflow import finish_workflow
+
+                await finish_workflow(self, run, message, model)
+            else:
+                await self._finish_local_draft(run)
             return
 
         if run.image_ref is not None:
@@ -744,6 +755,14 @@ class AgentEngine:
 
     async def _finish_local_image(self, run, question, model):
         from backend.agent.memory import LOCAL_VISION_PRODUCER
+
+        answer = await self._local_image_observation(run, question, model)
+        self._memory.record_plain_response(
+            run.session_id, run.identity, 'Model-generated image observations\n\n' + answer,
+            producer=LOCAL_VISION_PRODUCER, local_turn=(run.turn_id, run.attempt),
+        )
+
+    async def _local_image_observation(self, run, question, model):
         from backend.multimodal.service import MultimodalService
 
         run.emit('agent_status', 'analyzing_image')
@@ -766,10 +785,7 @@ class AgentEngine:
         if len(answer) > 8192:
             raise LocalToolError('LOCAL_VISION_FAILED')
         run.image_payload()
-        self._memory.record_plain_response(
-            run.session_id, run.identity, 'Model-generated image observations\n\n' + answer.strip(),
-            producer=LOCAL_VISION_PRODUCER, local_turn=(run.turn_id, run.attempt),
-        )
+        return answer.strip()
 
     async def _finish_local_knowledge(self, run, question, model):
         """Select exact scoped evidence through Ollama without a tool-capable plan."""

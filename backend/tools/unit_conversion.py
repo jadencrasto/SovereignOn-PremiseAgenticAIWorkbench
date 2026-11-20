@@ -1,5 +1,6 @@
 """Deterministic, local conversion of common engineering units."""
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 from math import isfinite
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
@@ -90,6 +91,24 @@ def unit_scale_factors(from_unit: str, to_unit: str, *, local=False) -> tuple[De
     if source is None or target is None or source[0] != target[0]:
         raise ValueError('Incompatible or invalid units')
     return source[1], target[1]
+
+
+def exact_local_order(left: Decimal, left_unit: LocalUnit, right: Decimal, right_unit: LocalUnit) -> int:
+    """Compare exact source decimals without rounding at a unit-conversion boundary."""
+    if (local_unit_dimension(left_unit) != local_unit_dimension(right_unit)
+            or (left_unit in _DIFFERENCE) != (right_unit in _DIFFERENCE)):
+        raise ValueError('Incompatible or invalid units')
+
+    def base(value, unit):
+        if unit in _ABSOLUTE_ZERO or unit in _DIFFERENCE:
+            validate_absolute_temperature(value, unit)
+            offset = _ABSOLUTE_ZERO.get(unit, 0)
+            kelvin_scale = Fraction(5, 9) if unit.endswith('F') else 1
+            return (Fraction(value) - Fraction(offset)) * kelvin_scale
+        return Fraction(value) * Fraction(_LOCAL_UNITS[unit][1])
+
+    first, second = base(left, left_unit), base(right, right_unit)
+    return (first > second) - (first < second)
 
 
 def _convert_temperature(value: Decimal, source: str, target: str) -> Decimal:

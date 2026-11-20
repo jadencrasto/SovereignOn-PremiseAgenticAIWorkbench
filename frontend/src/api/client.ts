@@ -85,7 +85,8 @@ export async function streamSSE(
     onApprovalResolved?: (status: string, approvalData?: any) => void;
     onTaskStatus?: (status: string, taskId: string) => void;
   },
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  localIdentity?: { session_id: string; turn_id: string; attempt: number; image_id?: string },
 ): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
@@ -116,7 +117,8 @@ export async function streamSSE(
   let buffer = '';
   let terminal = false;
   let sequence = 0;
-  const identified = typeof payload.turn_id === 'string';
+  const turn = localIdentity ?? payload;
+  const identified = typeof turn.turn_id === 'string';
 
   try {
     while (true) {
@@ -137,17 +139,18 @@ export async function streamSSE(
           if (terminal) continue;
 
           if (identified) {
-            if (chunk.session_id !== payload.session_id || chunk.turn_id !== payload.turn_id ||
-                chunk.attempt !== payload.attempt || typeof chunk.sequence !== 'number' ||
+            if (chunk.session_id !== turn.session_id || chunk.turn_id !== turn.turn_id ||
+                chunk.attempt !== turn.attempt || typeof chunk.sequence !== 'number' ||
                 !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
                 typeof chunk.content !== 'string') throw new Error('Invalid turn event');
             if (chunk.sequence <= sequence) continue;
-            const visionTurn = Boolean(payload.image_id);
+            const visionTurn = Boolean(turn.image_id);
             const approvedTool = chunk.tool === 'calculator' || chunk.tool === 'unit_conversion';
             const localStatus = chunk.type === 'agent_status' &&
-              (visionTurn ? chunk.content === 'analyzing_image' && chunk.tool === undefined :
-                (((chunk.content === 'planning' || chunk.content === 'drafting') && chunk.tool === undefined) ||
-                 (chunk.content === 'tool_selected' && (approvedTool || chunk.tool === undefined)))) &&
+              ((['planning', 'drafting', 'retrieving_evidence', 'comparing_evidence'].includes(chunk.content) &&
+                chunk.tool === undefined) ||
+               (visionTurn && chunk.content === 'analyzing_image' && chunk.tool === undefined) ||
+               (!visionTurn && chunk.content === 'tool_selected' && (approvedTool || chunk.tool === undefined))) &&
               chunk.tool_args === undefined && chunk.summary === undefined;
             const localTool = !visionTurn && (chunk.type === 'tool_start' || chunk.type === 'tool_result') &&
               approvedTool && chunk.content === '' &&

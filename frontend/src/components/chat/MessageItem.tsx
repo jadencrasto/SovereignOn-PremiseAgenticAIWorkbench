@@ -247,10 +247,17 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 LOCAL_KNOWLEDGE_QUESTION: 'Ask a local knowledge question of 1 to 600 characters with at most four parts.',
                 LOCAL_KNOWLEDGE_CHANGED: 'Selected local sources changed. Submit a new question with current sources.',
               } as Record<string, string>)[message.localTurn.error_code || ''] || 'The response could not be completed.'
-                : { running: 'Response running', cancelled: 'Response cancelled',
+                : { running: 'Response running', cancelled: 'Response cancelled', waiting_clarification: 'Waiting for your choice',
                     interrupted: 'Response interrupted' }[message.localTurn.state]}
             </p>
           )}
+          {message.localTurn?.workflow_progress?.length && !message.withheld ? (
+            <p className="mt-1 text-xs text-slate-600">
+              {'Completed work: '}{message.localTurn.workflow_progress.map(step => ({
+                retrieve: 'source retrieval', compare: 'comparison', vision: 'image analysis', evidence: 'evidence preparation',
+              })[step]).join(', ')}
+            </p>
+          ) : null}
           {message.localTurn?.knowledge_scope && !message.withheld && (
             <p className="mt-2 break-words text-xs text-slate-600">
               {message.localTurn.knowledge_scope.mode === 'all' ? 'All local sources at submission' : 'Selected local sources'}
@@ -392,6 +399,8 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                       reasoning: 'Preparing image answer…',
                     }[message.imageProgress] : message.localAgentStatus === 'drafting' ? 'Assembling evidence draft.'
                       : message.localAgentStatus === 'analyzing_image' ? 'Analyzing image.'
+                      : message.localAgentStatus === 'retrieving_evidence' ? 'Checking selected sources.'
+                      : message.localAgentStatus === 'comparing_evidence' ? 'Comparing cited measurements.'
                       : message.localAgentStatus === 'planning' ? 'Planning…'
                       : message.localAgentStatus === 'tool_selected' && !hasToolEvents
                         ? (message.localSelectedTool === 'unit_conversion' ? 'Unit conversion selected' : 'Calculator selected')
@@ -426,7 +435,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 })[part.state]}</span>
                 {' · '}{part.question}
                 {part.citations.map(number => (
-                  <a key={number} className="ml-1 underline" href={`#evidence-${message.id}-${number}`}>[{number}]</a>
+                  <a key={number} className="ml-1 underline" href={`#evidence-${message.id}-${number}`}
+                    onClick={() => {
+                      const source = document.getElementById(`evidence-${message.id}-${number}`) as HTMLDetailsElement | null;
+                      if (source) source.open = true;
+                    }}>[{number}]</a>
                 ))}
                 {part.fields?.length ? (
                   <ul aria-label="Attributed source values" className="mt-1 space-y-1 text-slate-700">
@@ -436,7 +449,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                         {' · '}{field.header || field.attribute.replaceAll('_', ' ')}
                         {[...field.equipment, ...field.conditions].map(label => ` · ${label}`).join('')}
                         {' · '}
-                        <a className="underline" href={`#evidence-${message.id}-${field.citation}`}>
+                        <a className="underline" href={`#evidence-${message.id}-${field.citation}`}
+                          onClick={() => {
+                            const source = document.getElementById(`evidence-${message.id}-${field.citation}`) as HTMLDetailsElement | null;
+                            if (source) source.open = true;
+                          }}>
                           {field.document_locator ? documentPosition(field.document_locator)
                             : `line ${field.line}${field.column !== undefined ? `, column ${field.column}` : ''}`}
                         </a>

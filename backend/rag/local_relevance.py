@@ -72,9 +72,9 @@ _CONDITION = re.compile('|'.join(rf'(?P<{name}>\b{pattern}\b)' for name, pattern
 _CONDITION_GROUPS = ({'normal', 'warning', 'alarm', 'startup', 'shutdown', 'steady', 'design', 'rated'},
                      {'minimum', 'maximum'})
 _QUANTITIES = {
-    'pressure': r'pressure',
+    'pressure': r'pressures?',
     'temperature_difference': r'(?:temperature|thermal)[ -]+(?:difference|differential)',
-    'temperature': r'temperature|thermal',
+    'temperature': r'temperatures?|thermal',
     'flow': r'flow(?:[ -]rate)?',
     'time': r'intervals?|frequenc(?:y|ies)|cadence|how (?:often|frequently)',
     'volume': r'(?:tank|vessel)[ -]capacity|volume',
@@ -110,6 +110,7 @@ _PROCEDURE_ACTION = re.compile(
     r'(?:^|[:;.!?])\s*(?:[-*+]\s+|\d+[.)]\s+)?'
     r'(?:inspect|check|examine|verify|test|replace|service|calibrate|lubricate|clean|tighten)\b', re.I,
 )
+_REQUIREMENT_STATEMENT = re.compile(r'\b(?:must|shall|is required to|are required to|is prohibited)\b', re.I)
 _INSPECTION = re.compile(r'\b(?:inspect(?:ion|ions)?|check|examine|verify|test)\b', re.I)
 _REPETITION = re.compile(r'\b(?:every|each)\s*$', re.I)
 _BOUND = re.compile(r'\b(?:limits?|thresholds?|setpoints?)\b', re.I)
@@ -162,6 +163,8 @@ def requested_fact(question, values, *, navigation=False):
             attribute, fact_components(text),
             inspection=attribute == 'time' and bool(_INSPECTION.search(text)), bound=bool(_BOUND.search(text)),
         )
+    if not attributes and re.search(r'\brequirements?\b', text, re.I):
+        return RequestedFact('requirements', frozenset())
     if not attributes and (navigation or _TOPIC_SEARCH.search(text)):
         return None
     return RequestedFact('unrecognized', frozenset())
@@ -467,6 +470,8 @@ def fact_evidence(fact, text, table_header, headings, values, qualified):
     """Keep only evidence with the requested value type and an attributable subject."""
     if fact.attribute == 'unrecognized':
         return False, [], frozenset()
+    if fact.attribute == 'requirements':
+        return bool(not table_header and _REQUIREMENT_STATEMENT.search(text)), [], frozenset()
     heading_component = next((item for heading in reversed(headings) if (item := fact_components(heading))), frozenset())
 
     def matching_components(label):
@@ -512,7 +517,9 @@ def fact_evidence(fact, text, table_header, headings, values, qualified):
         if (not markers and not header
                 and _VALUE_ONLY.fullmatch(clause[:value.start - position] + clause[value.end - position:])):
             markers = heading_fields
-        if fact.attribute not in markers:
+        labeled_bound = (fact.attribute == 'limit' and value.dimension in markers
+                         and any(_BOUND_CONDITIONS & conditions(part) for part in (subject, *headings)))
+        if fact.attribute not in markers and not labeled_bound:
             continue
         if fact.inspection and not _INSPECTION.search(f'{subject} {" ".join(headings)}'):
             continue

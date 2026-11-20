@@ -123,7 +123,7 @@ export interface ChatMessage {
   localPreview?: boolean;
   numericSourceTurn?: number;
   numericSecondarySourceTurn?: number;
-  localAgentStatus?: 'planning' | 'tool_selected' | 'analyzing_image' | 'drafting';
+  localAgentStatus?: 'planning' | 'tool_selected' | 'analyzing_image' | 'drafting' | 'retrieving_evidence' | 'comparing_evidence';
   localSelectedTool?: 'calculator' | 'unit_conversion';
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   // Request-scoped image previews and metadata for both attachment types.
@@ -145,9 +145,32 @@ export interface LocalTurnState {
   attempt: number;
   tools_enabled?: false;
   model: string;
-  state: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  state: 'running' | 'waiting_clarification' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  plan_revision?: number;
+  workflow_progress?: ('retrieve' | 'compare' | 'vision' | 'evidence')[];
+  clarification?: LocalClarification;
   error_code?: string;
   assistant_id?: string;
+}
+
+export interface LocalClarification {
+  revision: number;
+  reason: 'sources' | 'image' | 'equipment' | 'measurement' | 'format';
+  question: string;
+  count: number;
+  uses_image: boolean;
+  options: { id: string; label: string }[];
+}
+
+export interface LocalWorkflowPreview {
+  objective: string;
+  sources: { label: string; revision: number }[];
+  images: string[];
+  steps: string[];
+  output: string;
+  sources_to_choose: boolean;
+  question: string | null;
+  token: string;
 }
 
 export type FileComparisonSource = {
@@ -157,6 +180,8 @@ export type FileComparisonSource = {
 } & ({ role: 'limits'; mime_type: 'text/plain' } | { role: 'measurements'; mime_type: 'text/csv' | 'application/json' });
 
 export interface ChatRequestPayload {
+  workflow_preview?: string;
+  knowledge_source_ids?: string[];
   draft_turn_ids?: string[];
   image_id?: string;
   session_id?: string;
