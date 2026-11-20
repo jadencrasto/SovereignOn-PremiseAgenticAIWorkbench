@@ -23,6 +23,7 @@ import threading
 import re
 import time
 from collections import OrderedDict
+from heapq import nlargest
 from backend.agent.numeric_receipts import NumericReceipt
 from functools import wraps
 from dataclasses import dataclass, field
@@ -43,6 +44,12 @@ _KNOWLEDGE = 'local_source_grounded'
 _PROVENANCE_VERSION = 3
 LOCAL_TURN_FIELD = 'local_turn_v1'
 LOCAL_PLAN_LIMIT = 3
+LOCAL_WORKFLOW_NONRETRYABLE = frozenset({
+    'LOCAL_TOOL_UNAUTHORIZED', 'CONVERSATION_UNAVAILABLE', 'LOCAL_KNOWLEDGE_CHANGED',
+    'LOCAL_IMAGE_UNAVAILABLE', 'LOCAL_WORKFLOW_CANCELLED', 'LOCAL_DRAFT_EVIDENCE',
+    'LOCAL_DRAFT_STALE_REVISION', 'LOCAL_DRAFT_TARGET_INVALID',
+    'LOCAL_DRAFT_EDIT_INVALID', 'LOCAL_DRAFT_UNSUPPORTED_EVIDENCE',
+})
 _LOCAL_CALCULATOR = 'local-verified-calculator'
 _LOCAL_CONVERSION = 'local-verified-unit-conversion'
 _LOCAL_NUMERIC_FIELD = 'numeric_result_v1'
@@ -95,7 +102,12 @@ def public_local_turn(record):
     if 'image' in record:
         public['image_id'] = record['image']['ref']['image_id']
     if 'draft_scope' in record:
-        public['draft_turn_ids'] = record['draft_scope']['scope']['selection']
+        scope = record['draft_scope']['scope']
+        public['draft_turn_ids'] = scope['selection']
+        if refinement := scope.get('refinement'):
+            public['draft_target'] = refinement['target']
+            if sources := refinement['sources']:
+                public['draft_source_ids'] = [entry['source_id'] for entry in sources['sources']]
     if 'workflow_intake' in record:
         from backend.agent.workflow_intake import WorkflowIntake
 
@@ -109,6 +121,10 @@ def public_local_turn(record):
         checkpoint = record['workflow_checkpoint']['checkpoint']
         public['workflow_progress'] = list(checkpoint.get('steps', ['evidence']))
     return public
+
+
+def is_local_workflow(record):
+    return 'workflow_intake' in record or 'draft_scope' in record
 
 
 def safe_tool_history(events):
@@ -892,6 +908,97 @@ class ConversationMemory:
         self._verified_workflow_intake(session_id, identity, turn)
         self._verified_workflow_checkpoint(session_id, identity, turn)
         return dict(turn.extra_fields[LOCAL_TURN_FIELD])
+
+    def local_workflow_page(self, owner, status, query, limit, offset):
+        if self._current_owner() != owner:
+            raise PermissionError('Workflow history unavailable')
+        if self._sqlite_store is not None:
+            return self._sqlite_store.workflow_page(owner, status, query, limit, offset)
+
+        # Disposable mode has one process-owned conversation cache. Read it
+        # without reloading its transient transcript file or copying messages.
+        def candidates():
+            for conv in self._store.values():
+                if conv.owner_id != owner or not self._binding_active(conv, owner):
+                    continue
+                title = conv.extra_fields.get('title')
+                for index, message in enumerate(conv.messages):
+                    record = message.extra_fields.get(LOCAL_TURN_FIELD, {})
+                    if (message.role != 'user' or not is_local_workflow(record)
+                            or status and record['state'] != status
+                            or query not in message.content.lower() and query not in (title or '').lower()):
+                        continue
+                    updated = message.created_at
+                    if index == len(conv.messages) - 1:
+                        updated = conv.extra_fields['updated_at']
+                    elif record['state'] == 'completed':
+                        updated = conv.messages[index + 1].created_at
+                    yield (conv.session_id, message.id, title, message.content[:180], record['state'],
+                           message.created_at, updated)
+
+        with self._lock:
+            return nlargest(offset + limit, candidates(),
+                            key=lambda row: (row[6], row[5], row[0], row[1]))[offset:]
+
+    @_synchronized
+    def read_local_workflow(self, session_id, identity, turn_id):
+        from backend.rag.local_knowledge import KNOWLEDGE_FIELD
+
+        record = self.read_local_turn(session_id, identity, turn_id)
+        if not is_local_workflow(record):
+            raise KeyError(turn_id)
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        conv = self._store[session_id]
+        steps = public_local_turn(record).get('workflow_progress', [])
+        updated = turn.created_at
+        if record['state'] == 'completed':
+            reply = next((message for message in conv.messages if message.id == record['assistant_id']), None)
+            if reply is None or not self.verify_local_reply(session_id, reply):
+                raise ValueError('Invalid workflow reply')
+            steps = reply.extra_fields.get('local_workflow', {}).get('steps', steps)
+            if not steps and reply.extra_fields.get(KNOWLEDGE_FIELD):
+                steps = ['retrieve']
+            updated = reply.created_at
+        latest = turn is conv.messages[-1]
+        if latest:
+            updated = conv.extra_fields['updated_at']
+        info = (session_id, turn_id, conv.extra_fields.get('title'), turn.content, record['state'], turn.created_at, updated)
+        return info, record, steps, latest
+
+    @_synchronized
+    def pending_attachment(self, session_id, identity, turn_id, revision, kind):
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        intake = self._verified_workflow_intake(session_id, identity, turn)
+        if (record['state'] != 'waiting_clarification' or intake is None
+                or turn is not self._store[session_id].messages[-1]):
+            raise LocalTurnConflict('This workflow is no longer waiting for clarification.')
+        if intake.revision != revision:
+            raise LocalTurnConflict('The clarification has changed. Refresh the conversation before uploading again.')
+        if intake.reason != {'document': 'sources', 'image': 'image'}[kind]:
+            raise LocalTurnConflict('This clarification does not accept that attachment type.')
+        return intake
+
+    @_synchronized
+    def record_clarification_attachment(self, session_id, identity, turn_id, revision, kind, attachment):
+        from backend.agent.workflow_intake import add_clarification_attachment
+
+        intake = self.pending_attachment(session_id, identity, turn_id, revision, kind)
+        updated = add_clarification_attachment(intake, attachment)
+        turn = self._owned_local_turn(session_id, identity, turn_id)
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if updated != intake:
+            previous = record['workflow_intake']
+            payload = updated.binding()
+            record['workflow_intake'] = {
+                'intake': payload, 'mac': self._workflow_intake_mac(session_id, identity, turn, record, payload),
+            }
+            try:
+                self._save()
+            except Exception:
+                record['workflow_intake'] = previous
+                raise
+        return public_local_turn(record)
 
     def _workflow_intake_mac(self, session_id, identity, turn, record, payload):
         from backend.tools.local_drafts import _json

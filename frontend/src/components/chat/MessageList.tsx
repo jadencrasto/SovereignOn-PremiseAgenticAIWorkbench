@@ -11,6 +11,7 @@ import { ArrowUpRight } from 'lucide-react';
 
 interface MessageListProps {
   messages: ChatMessage[];
+  focusMessageId?: string;
   onSelectPrompt?: (prompt: string) => void;
   onRetry?: (content: string) => void;
   onApprove?: (taskId: string) => void;
@@ -19,12 +20,14 @@ interface MessageListProps {
 
 export const MessageList: React.FC<MessageListProps> = ({
   messages,
+  focusMessageId,
   onSelectPrompt,
   onRetry,
   onApprove,
   onReject,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const focusedMessageRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef<boolean>(true);
 
@@ -39,7 +42,7 @@ export const MessageList: React.FC<MessageListProps> = ({
 
   // Auto-scroll: instant during streaming for reliable tracking, smooth otherwise
   useEffect(() => {
-    if (!isNearBottomRef.current || !scrollContainerRef.current) return;
+    if (focusMessageId || !isNearBottomRef.current || !scrollContainerRef.current) return;
     const el = scrollContainerRef.current;
     const isStreaming = messages.some((m) => m.isStreaming);
     if (isStreaming) {
@@ -50,7 +53,11 @@ export const MessageList: React.FC<MessageListProps> = ({
     } else {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages]);
+  }, [messages, focusMessageId]);
+
+  useEffect(() => {
+    if (focusMessageId) focusedMessageRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [focusMessageId]);
 
   if (messages.length === 0) {
     return (
@@ -149,15 +156,18 @@ export const MessageList: React.FC<MessageListProps> = ({
       onScroll={handleScroll}
       className="flex-1 min-h-0 overflow-y-auto px-4 py-6 pb-8 space-y-4 bg-slate-50 font-sans"
     >
-      {messages.map((message) => (
-        <MessageItem
+      {messages.map(message => {
+        const row = <MessageItem
           key={message.id}
           message={message}
           onRetry={onRetry}
           onApprove={onApprove}
           onReject={onReject}
-        />
-      ))}
+        />;
+        return message.id === focusMessageId
+          ? <div key={message.id} ref={focusedMessageRef}>{row}</div>
+          : row;
+      })}
       <div ref={bottomRef} />
     </div>
   );

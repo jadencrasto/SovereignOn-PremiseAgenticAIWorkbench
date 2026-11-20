@@ -60,3 +60,45 @@ test('continuation sends only the revision and typed choices while binding respo
   assert.deepEqual(observed[1], { revision: 2, selection: ['xlsx'] });
   assert.deepEqual(observed[4], { ...turn, image_id: 'attached' });
 });
+
+test('the paused file control restricts formats and never confirms a workflow by itself', () => {
+  const jsx = (type, props) => ({ type, props });
+  const { WorkflowClarification } = load('../src/components/chat/WorkflowClarification.tsx', {
+    react: { useState: () => [[], () => {}] },
+    'react/jsx-runtime': { jsx, jsxs: jsx },
+  });
+  const actions = [];
+  const file = { name: 'maintenance.pdf' };
+  const controls = (reason, other = {}) => nodes(WorkflowClarification({
+    clarification: { reason, count: 1, options: [], question: 'Choose an attachment.' },
+    upload: entry => actions.push(entry), cancelUpload: () => actions.push('cancelled'),
+    retryUpload: () => actions.push('retried'), resume: () => actions.push('continued'), ...other,
+  }));
+  const choose = reason => controls(reason).find(node => node.props.type === 'file');
+  const input = choose('sources');
+  assert.equal(input.props.accept, '.txt,.md,.pdf,.docx,.xlsx');
+  assert.equal(choose('image').props.accept, '.png,.jpg,.jpeg,.webp');
+  assert.equal(choose('format'), undefined);
+  input.props.onChange({ currentTarget: { files: [file], value: file.name } });
+  controls('sources', { uploading: true }).find(node => node.props.children === 'Cancel upload').props.onClick();
+  controls('sources', { uploadError: 'The file could not be read.' })
+    .find(node => node.props.children === 'Retry upload').props.onClick();
+  assert.deepEqual(actions, [file, 'cancelled', 'retried']);
+});
+
+test('attachment upload sends only the bytes and owned clarification coordinates', async () => {
+  let observed;
+  const { uploadClarificationAttachment } = load('../src/api/chat.ts', {
+    './client': { apiRequest: async (...args) => { observed = args; return { turn: {} }; } },
+  });
+  const file = { name: 'notes & limits.pdf' };
+  const signal = new AbortController().signal;
+  await uploadClarificationAttachment({ session_id: 'current', turn_id: 'same-turn' }, 4, 'document', file, signal);
+  const [route, init] = observed;
+  const [endpoint, query] = route.split('?');
+  assert.equal(endpoint, '/api/chat/sessions/current/turns/same-turn/clarify/attachment');
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(query)), { revision: '4', kind: 'document', filename: file.name });
+  assert.equal(init.body, file);
+  assert.equal(init.signal, signal);
+  assert.equal(init.method, 'POST');
+});

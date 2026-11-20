@@ -44,16 +44,20 @@ def test_local_profile_requires_explicit_opt_in_and_rejects_supervised_selection
 
 
 @pytest.mark.parametrize(("operation", "code"), [
+    ("create", 10013),
     ("bind", 10048),
     ("listen", 10013),
     ("connect", 10013),
     ("accept", 10060),
+    ("set nonblocking mode", 10013),
 ])
 def test_local_launcher_names_failed_operation_before_starting_uvicorn(monkeypatch, capsys, operation, code):
     from backend import __main__ as cli
     from backend import main
 
     listener = MagicMock()
+    probe = MagicMock()
+    listener.accept.return_value = (probe, ('127.0.0.1', 0))
     socket_context = MagicMock()
     socket_context.__enter__.return_value = listener
     open_socket = MagicMock(return_value=socket_context)
@@ -65,7 +69,9 @@ def test_local_launcher_names_failed_operation_before_starting_uvicorn(monkeypat
     monkeypatch.setattr(socket, "socket", open_socket)
     monkeypatch.setattr(socket, "create_connection", connect)
     monkeypatch.setattr(cli.uvicorn, "Server", server)
-    failure = connect if operation == "connect" else getattr(listener, operation)
+    failure = {"create": open_socket, "connect": connect, "set nonblocking mode": listener.setblocking}.get(operation)
+    if failure is None:
+        failure = getattr(listener, operation)
     failure.side_effect = OSError(f"[WinError {code}] synthetic socket failure")
 
     with pytest.raises(SystemExit) as exc:
@@ -74,12 +80,17 @@ def test_local_launcher_names_failed_operation_before_starting_uvicorn(monkeypat
     assert exc.value.code == 2
     assert f"Local listener {operation} failed (127.0.0.1:8000): [WinError {code}]" in capsys.readouterr().err
     open_socket.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
-    socket_context.__exit__.assert_called_once()
+    if operation == "create":
+        socket_context.__exit__.assert_not_called()
+    else:
+        socket_context.__exit__.assert_called_once()
     server.assert_not_called()
     if operation in {"connect", "accept"}:
         listener.bind.assert_called_once_with(("127.0.0.1", 8000))
         listener.listen.assert_called_once()
         connect.assert_called_once_with(("127.0.0.1", 8000), timeout=2)
+    if operation == "set nonblocking mode":
+        probe.close.assert_called_once()
 
 
 @pytest.mark.parametrize(("overrides", "error"), [

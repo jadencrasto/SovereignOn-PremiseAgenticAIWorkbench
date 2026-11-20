@@ -17,7 +17,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -55,6 +55,7 @@ class XlsxReportInput(BaseModel):
         default="",
         description="Executive summary notes or regulatory citations included in the header block.",
     )
+    comparison_rows: list[Annotated[int, Field(strict=True, ge=0, lt=48)]] | None = Field(default=None, max_length=48)
     overwrite: bool = Field(
         default=True,
         description="Whether to overwrite if file exists.",
@@ -99,6 +100,15 @@ class XlsxReportInput(BaseModel):
             else:
                 data["rows"] = [r if isinstance(r, list) else [r] for r in data["rows"]]
         return data
+
+    @model_validator(mode='after')
+    def _validate_comparison_rows(self):
+        if self.comparison_rows is not None and (
+                not self.comparison_rows or len(self.rows) > 48
+                or len(set(self.comparison_rows)) != len(self.comparison_rows)
+                or any(index >= len(self.rows) for index in self.comparison_rows)):
+            raise ValueError('Invalid comparison row selection')
+        return self
 
 
 def create_xlsx_report(sandbox_dir: Path) -> callable:
@@ -225,6 +235,14 @@ def create_xlsx_report(sandbox_dir: Path) -> callable:
                 else:
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 18)
 
+
+            if args.comparison_rows:
+                comparison = wb.copy_worksheet(ws)
+                comparison.title = 'Comparison'
+                selected = set(args.comparison_rows)
+                for index in reversed(range(len(args.rows))):
+                    if index not in selected:
+                        comparison.delete_rows(header_row + 1 + index)
 
             # An incomplete file remains quarantined if writing fails.
             from backend.tools.artifact_storage import create_artifact_file

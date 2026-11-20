@@ -143,3 +143,30 @@ test('draft panel cancels a pending export, shows the error and lets the owner r
   await tick();
   assert.ok(text(ui.render()).includes('Download XLSX'));
 });
+
+test('revision comparison is read-only and chat receives the current draft revision', async () => {
+  const targets = [];
+  const routes = [];
+  const current = { ...draft, revision: 2, history: [1], change: {
+    parent: 1, operation: 'shorten', sections: ['Executive summary'], added: 0, removed: 0, unverified: 0,
+  } };
+  const ui = panel(async url => {
+    routes.push(url);
+    if (url.endsWith('/drafts')) return { drafts: [current] };
+    assert.ok(url.endsWith('/draft-id/revisions/1'));
+    return { ...draft, historical: true, state: 'exported', summary: 'Earlier wording.' };
+  });
+  ui.props.onDraftTarget = target => targets.push(target);
+  const tree = await ui.reconcile();
+  action(tree, 'Refine this draft').props.onClick();
+  assert.deepEqual(targets, [{ id: 'draft-id', revision: 2 }]);
+  nodes(tree).find(node => node.type === 'select').props.onChange({ target: { value: '1' } });
+  await tick();
+  const showing = ui.render();
+  assert.match(text(showing), /Revision 1.*read-only/);
+  assert.match(text(showing), /Earlier wording/);
+  assert.equal(action(showing, 'Approve revision 1'), undefined);
+  assert.equal(nodes(showing).some(node => node.type === 'a'), false);
+  assert.ok(action(showing, 'Approve revision 2'));
+  assert.equal(routes.length, 2);
+});

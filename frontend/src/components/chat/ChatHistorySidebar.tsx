@@ -9,6 +9,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { clearSession, fetchSessions, fetchSession, legacyExportAllowed, localImageUrl, renameSession } from '../../api/chat';
 import { ApiError } from '../../api/client';
 import { loadOwnedHistory, deleteOwnedHistory } from './historyRequests';
+import { WorkflowLibrary } from './WorkflowLibrary';
 import type { ChatMessage } from '../../types';
 import {
   MessageSquare,
@@ -75,6 +76,7 @@ interface ChatHistorySidebarProps {
   onRenamed?: (id: string, title: string) => void;
   onDeleted?: () => void;
   refreshKey?: number;
+  workflows?: Omit<React.ComponentProps<typeof WorkflowLibrary>, 'refreshKey'>;
 }
 
 export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
@@ -86,6 +88,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   onRenamed,
   onDeleted,
   refreshKey = 0,
+  workflows,
 }) => {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -95,6 +98,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [canExportLegacy, setCanExportLegacy] = useState(false);
+  const [showWorkflows, setShowWorkflows] = useState(false);
   const generation = useRef(0);
   const listGeneration = useRef(0);
   const currentSessionRef = useRef(currentSessionId);
@@ -103,7 +107,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   // A background list refresh should not cancel an explicit conversation selection.
   useEffect(() => () => { generation.current++; }, [isOpen]);
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || showWorkflows) return;
     const current = ++listGeneration.current;
     const action = generation.current;
     const isCurrent = () => listGeneration.current === current && generation.current === action;
@@ -123,7 +127,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
       }
     })();
     return () => { listGeneration.current++; };
-  }, [isOpen, refreshKey]);
+  }, [isOpen, refreshKey, showWorkflows]);
 
   const filteredSessions = useMemo(() => {
     return sessions.filter((s) => {
@@ -264,9 +268,9 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
         <div className="flex items-center gap-2">
           <Clock className="w-4 h-4 text-blue-500" />
           <h2 className="text-sm font-semibold text-slate-800 tracking-tight">Chat History</h2>
-          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 border border-slate-300">
+          {!showWorkflows && <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 border border-slate-300">
             {sessions.length} sessions
-          </span>
+          </span>}
         </div>
 
         <button
@@ -292,6 +296,13 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
         </button>
       </div>
 
+      {workflows && <nav aria-label="History views" className="flex gap-2 border-b border-slate-100 px-3 py-2 text-sm">
+        <button type="button" className="rounded px-2 py-1 aria-pressed:bg-slate-100"
+          aria-pressed={!showWorkflows} onClick={() => setShowWorkflows(false)}>Conversations</button>
+        <button type="button" className="rounded px-2 py-1 aria-pressed:bg-slate-100"
+          aria-pressed={showWorkflows} onClick={() => setShowWorkflows(true)}>Workflows</button>
+      </nav>}
+      {showWorkflows && workflows ? <WorkflowLibrary {...workflows} refreshKey={refreshKey} /> : <>
       {/* Search Input */}
       <div className="px-3 pt-3 pb-2">
         <div className="relative">
@@ -485,6 +496,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
           </button>
         </div>
       )}
+      </>}
     </div>
   );
 };

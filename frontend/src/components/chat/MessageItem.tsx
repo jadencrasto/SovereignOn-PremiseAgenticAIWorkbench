@@ -219,6 +219,10 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
           {message.localTurn && message.localTurn.state !== 'completed' && (
             <p role="status" className="mt-1 text-xs text-slate-600">
               {message.localTurn.state === 'failed' ? ({
+                LOCAL_DRAFT_UNSUPPORTED_EVIDENCE: 'The selected sources do not support that finding. The draft is unchanged.',
+                LOCAL_DRAFT_STALE_REVISION: 'Review the current draft revision and resend your edit.',
+                LOCAL_DRAFT_EDIT_INVALID: 'Check the section, finding number, or evidence selection in Drafts.',
+                LOCAL_DRAFT_TARGET_INVALID: 'This draft is unavailable in the current conversation.',
                 OLLAMA_UNAVAILABLE: 'Ollama is unavailable. Start it and retry.',
                 MODEL_UNAVAILABLE: 'The selected local model is unavailable.',
                 MODEL_TIMEOUT: 'Ollama timed out.',
@@ -399,6 +403,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                       reasoning: 'Preparing image answer…',
                     }[message.imageProgress] : message.localAgentStatus === 'drafting' ? 'Assembling evidence draft.'
                       : message.localAgentStatus === 'analyzing_image' ? 'Analyzing image.'
+                      : message.localAgentStatus === 'awaiting_model' ? 'Waiting for Ollama to respond.'
                       : message.localAgentStatus === 'retrieving_evidence' ? 'Checking selected sources.'
                       : message.localAgentStatus === 'comparing_evidence' ? 'Comparing cited measurements.'
                       : message.localAgentStatus === 'planning' ? 'Planning…'

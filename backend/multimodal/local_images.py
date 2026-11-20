@@ -176,13 +176,16 @@ class LocalImages:
                 if (key is None or not hmac.compare_digest(envelope['mac'], self._mac(key, payload))
                         or payload['owner'] != owner or len(payload['images']) > MAX_IMAGES):
                     raise ValueError
-                for session, generation, data, encoded in payload['images']:
+                for row in payload['images']:
+                    session, generation, data, encoded, *scope = row
+                    turn = scope[0] if scope else None
                     ref = LocalImageRef.model_validate(data)
                     if (not isinstance(session, str) or not isinstance(generation, str)
+                            or len(scope) > 1 or (scope and LocalImageRef.image_uuid(turn) != turn)
                             or ref.image_id in self._images or image_format(ref.filename) != ref.format
                             or hashlib.sha256(_validated_jpeg(encoded)).hexdigest() != ref.normalized_sha256):
                         raise ValueError
-                    self._images[ref.image_id] = (session, generation, ref, encoded)
+                    self._images[ref.image_id] = (session, generation, ref, encoded, turn)
             except (KeyError, TypeError, ValueError, RecursionError, TextFileError):
                 raise ValueError('Invalid durable local image storage') from None
 
@@ -197,8 +200,8 @@ class LocalImages:
     def _save(self, images):
         if self.path is not None:
             payload = {'owner': self.owner, 'images': [
-                [session, generation, ref.model_dump(), content]
-                for session, generation, ref, content in images.values()
+                [session, generation, ref.model_dump(), content] + ([turn] if turn else [])
+                for session, generation, ref, content, turn in images.values()
             ]}
             key_id, key = self.keys.signing_key()
             write_local_snapshot(self.path, self._encode({'payload': payload, 'key': key_id, 'mac': self._mac(key, payload)}))
@@ -207,22 +210,27 @@ class LocalImages:
     def list(self, session, identity):
         if identity[0] != self.owner:
             raise PermissionError('Image unavailable')
-        return [ref for sid, generation, ref, _ in self._images.values() if (sid, generation) == (session, identity[1])]
+        return [ref for sid, generation, ref, _, turn in self._images.values()
+                if not turn and (sid, generation) == (session, identity[1])]
 
-    def register(self, session, identity, ref, encoded):
-        for previous in self.list(session, identity):
-            if (previous.filename, previous.sha256) == (ref.filename, ref.sha256):
+    def register(self, session, identity, ref, encoded, *, turn_id=None):
+        if identity[0] != self.owner:
+            raise PermissionError('Image unavailable')
+        for sid, generation, previous, _, turn in self._images.values():
+            if ((sid, generation, turn) == (session, identity[1], turn_id) and previous.sha256 == ref.sha256
+                    and (turn_id is not None or previous.filename == ref.filename)):
                 return previous
         if len(self._images) >= MAX_IMAGES:
             raise TextFileError('Local image storage is full. Remove an attachment and try again.', status=413)
-        self._save({**self._images, ref.image_id: (session, identity[1], ref, encoded)})
+        self._save({**self._images, ref.image_id: (session, identity[1], ref, encoded, turn_id)})
         return ref
 
-    def get(self, session, identity, image_id):
+    def get(self, session, identity, image_id, *, turn_id=None):
         entry = self._images.get(image_id)
-        if entry is None or identity[0] != self.owner or entry[:2] != (session, identity[1]):
+        if (entry is None or identity[0] != self.owner or entry[:2] != (session, identity[1])
+                or (turn_id is not None and entry[4] not in (None, turn_id))):
             raise KeyError(image_id)
-        return entry[2:]
+        return entry[2:4]
 
     def remove(self, session, identity, image_id):
         self.get(session, identity, image_id)

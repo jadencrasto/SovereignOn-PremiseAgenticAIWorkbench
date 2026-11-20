@@ -160,7 +160,7 @@ async def chat(
         return await submit_local_chat(body, request, engine, model_router)
     if 'knowledge_source_ids' in body.model_fields_set:
         raise HTTPException(403, 'Local knowledge requires the local development profile.')
-    if 'draft_turn_ids' in body.model_fields_set:
+    if {'draft_turn_ids', 'draft_target'} & body.model_fields_set:
         raise HTTPException(403, 'Draft evidence requires the local development profile.')
     if 'workflow_preview' in body.model_fields_set:
         raise HTTPException(403, 'Workflow preview requires the local development profile.')
@@ -2066,6 +2066,10 @@ async def clear_session(
             request.app.state.local_images.remove_session(session_id)
         except OSError:
             logger.warning("Revoked local conversation image cleanup failed")
+        try:
+            request.app.state.local_knowledge.remove_session(session_id)
+        except OSError:
+            logger.warning("Revoked local conversation attachment cleanup failed")
         try:
             request.app.state.local_drafts.remove_session(session_id)
         except (OSError, ValueError):

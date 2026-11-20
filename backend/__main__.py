@@ -1,5 +1,6 @@
 """Launch the backend with its validated binding configuration."""
 import argparse
+from contextlib import ExitStack
 
 import uvicorn
 
@@ -32,9 +33,11 @@ def main():
             app, host=host, port=port, workers=1, proxy_headers=False, timeout_graceful_shutdown=10,
         )
         address = f"[{host}]" if family == socket.AF_INET6 else host
-        with socket.socket(family, socket.SOCK_STREAM) as listener:
-            operation = "configure exclusive address use"
+        with ExitStack() as resources:
+            operation = "create"
             try:
+                listener = resources.enter_context(socket.socket(family, socket.SOCK_STREAM))
+                operation = "configure exclusive address use"
                 if sys.platform == "win32":
                     listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 operation = "bind"
@@ -50,10 +53,11 @@ def main():
                     operation = "accept"
                     probe, _ = listener.accept()
                     probe.close()
+                operation = "set nonblocking mode"
+                listener.setblocking(False)
             except OSError as exc:
                 parser.error(f"Local listener {operation} failed ({address}:{port}): {exc}")
-            listener.setblocking(False)
-            print(f"Local development workbench: http://{address}:{port}/", flush=True)
+            print(f"Starting local development workbench at http://{address}:{port}/", flush=True)
             server = uvicorn.Server(config)
             server.run(sockets=[listener])
             if not server.started:

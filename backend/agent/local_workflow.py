@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
@@ -127,6 +128,24 @@ def finding_digest(finding, *, reference=False):
     return hashlib.sha256(_json(finding.model_dump(exclude={'text', 'kind'} if reference else None))).hexdigest()
 
 
+def matches_findings(rows, proofs):
+    available = Counter(proofs)
+    edited = Counter()
+    for row in rows:
+        reference = finding_digest(row, reference=True)
+        if row.kind == 'user_edited':
+            edited[reference] += 1
+        else:
+            key = (finding_digest(row), reference)
+            if not available[key]:
+                return False
+            available[key] -= 1
+    remaining = Counter()
+    for (_, reference), count in available.items():
+        remaining[reference] += count
+    return edited <= remaining
+
+
 def workflow_image_current(state, session, identity, turn_id):
     record = state.engine._memory.read_local_turn(session, identity, turn_id)
     if 'image' not in record:
@@ -134,7 +153,7 @@ def workflow_image_current(state, session, identity, turn_id):
     from backend.multimodal.local_images import LocalImageRef
 
     try:
-        ref, _ = state.local_images.get(session, identity, record['image']['ref']['image_id'])
+        ref, _ = state.local_images.get(session, identity, record['image']['ref']['image_id'], turn_id=turn_id)
         return ref == LocalImageRef.model_validate(record['image']['ref'])
     except (KeyError, ValueError):
         return False
@@ -146,7 +165,7 @@ def current_workflow_draft(state, session, identity, draft):
         return False
     try:
         origin = state.engine._memory.read_local_turn(session, identity, draft.turn_id)
-        if origin['draft_scope']['scope']['format'] != draft.format:
+        if not draft.change and origin['draft_scope']['scope']['format'] != draft.format:
             return False
         if not workflow_image_current(state, session, identity, draft.turn_id):
             return False
@@ -156,6 +175,9 @@ def current_workflow_draft(state, session, identity, draft):
             if state.local_knowledge.public_receipt(identity[0], receipt) is None:
                 return False
         proof = WorkflowReceipt.model_validate(reply.extra_fields['local_workflow'])
+        if draft.change:
+            return matches_findings((row for row in draft.findings if row.turn_id == draft.turn_id),
+                                    zip(proof.findings, proof.references))
         return len(draft.findings) == len(proof.findings) == len(proof.references) and all(
             (finding_digest(row, reference=True) == reference if row.kind == 'user_edited' and draft.revision > 1
              else finding_digest(row) == digest)

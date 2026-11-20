@@ -310,16 +310,24 @@ class AgentEngine:
         emitted = []
         completed = False
         pending = ""
+        tool_markers = ("<tool_call", "</tool_call")
         try:
             async with aclosing(provider.chat_stream(request)) as provider_stream:
                 async for chunk in provider_stream:
                     if chunk.delta:
                         accumulated.append(chunk.delta)
                         pending += chunk.delta
-                        if "<tool_call" in pending.lower() or "</tool_call" in pending.lower():
+                        if any(marker in pending.lower() for marker in tool_markers):
                             raise RuntimeError("Invalid model response")
-                        if len(pending) > 11:
-                            visible, pending = pending[:-11], pending[-11:]
+                        visible_end = len(pending) - 11
+                        if local_turn is not None:
+                            # Hold only a suffix that could still become a tool marker.
+                            start = pending.rfind("<")
+                            visible_end = start if start >= 0 and any(
+                                marker.startswith(pending[start:].lower()) for marker in tool_markers
+                            ) else len(pending)
+                        if visible_end > 0:
+                            visible, pending = pending[:visible_end], pending[visible_end:]
                             emitted.append(visible)
                             yield visible
                     if chunk.done:
@@ -391,7 +399,11 @@ class AgentEngine:
             return
 
         if run.draft_scope is not None:
-            if run.draft_scope.workflow:
+            if run.draft_scope.refinement is not None:
+                from backend.tools.local_draft_refinement import finish_refinement
+
+                await finish_refinement(self, run, message)
+            elif run.draft_scope.workflow:
                 from backend.agent.local_workflow import finish_workflow
 
                 await finish_workflow(self, run, message, model)
@@ -538,6 +550,7 @@ class AgentEngine:
         )
         if steps is None and not model_plan:
             await run.check_model(model)
+            run.emit('agent_status', 'awaiting_model')
             async with aclosing(self.chat_stream(run.session_id, message, model, local_turn=run)) as stream:
                 async for delta in stream:
                     yield delta

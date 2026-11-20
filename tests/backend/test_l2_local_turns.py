@@ -88,7 +88,8 @@ def test_lost_final_event_replays_completion_with_one_write(workbench, capsys, m
             monkeypatch.setattr(workbench.state.model_router.get_provider("ollama"), "chat_stream", provider_stream)
             turn = await new_turn(browser)
             first = parse_events(await browser.post("/api/chat", json=turn))
-            assert [event["type"] for event in first] == ["accepted", "delta", "delta"]
+            assert [event["type"] for event in first] == ["accepted", "agent_status", "delta"]
+            assert first[1]["content"] == "awaiting_model" and first[2]["content"] == "Cedar is the name."
             assert [event["sequence"] for event in first] == [1, 2, 3]
             async with api_client(workbench) as reconnected:
                 reconnected.cookies.update(browser.cookies)

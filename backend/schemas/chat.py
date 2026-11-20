@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Optional, List, Any
 from pydantic import BaseModel, Field
 from backend.rag.local_knowledge import KnowledgeSourceIds
-from backend.tools.local_drafts import EvidenceTurns
+from backend.tools.local_drafts import DraftTarget, EvidenceTurns
 
 
 # Forward-declared here to avoid circular import;
@@ -107,6 +107,7 @@ class ChatRequest(BaseModel):
     knowledge_source_ids: KnowledgeSourceIds | None = None
     image_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
     draft_turn_ids: EvidenceTurns | None = None
+    draft_target: DraftTarget | None = None
     workflow_preview: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
 
 

@@ -284,8 +284,13 @@ async def observe_ollama(target: str, *, local_only: bool = False) -> ModelObser
 
 
 async def refresh_local_inventory(state) -> None:
+    previous = getattr(state, 'model_observation', None)
     async with state.local_inventory_lock:
         target = _tags_url(state)
+        # Concurrent turns can use the observation that finished while they waited.
+        current = getattr(state, 'model_observation', None)
+        if current is not None and current is not previous and current[0] == target:
+            return
         observation = await observe_ollama(target, local_only=True)
         state.model_observation = (target, time.monotonic(), observation)
 

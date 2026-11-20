@@ -16,7 +16,7 @@ import { useWorkbench } from '../../context/WorkbenchContext';
 import {
   createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, streamChatTextFiles,
   cancelLocalTurn, guardChatCallbacks, previewLocalWorkflow, streamLocalClarification, type TextFileBatch, type TextFileLineRange,
-  fetchLocalImages, removeLocalImage, uploadLocalImage, type LocalImageAttachment,
+  fetchLocalImages, localImageUrl, removeLocalImage, uploadLocalImage, uploadClarificationAttachment, type LocalImageAttachment,
 } from '../../api/chat';
 import { useAuth } from '../../context/AuthContext';
 import { capabilityFor, chatDisabled, describeCapability, permitsCapability, modelInInventory } from '../../api/capabilities';
@@ -25,7 +25,7 @@ import {
   ChatHistorySidebar, loadSession,
   type ChatSession,
 } from './ChatHistorySidebar';
-import { isLocalDraftRequest, latestLocalUser, needsWorkflowPreview, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
+import { draftRefinementIntent, isLocalDraftRequest, latestLocalUser, needsWorkflowPreview, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
 import {
   Clock,
   Plus,
@@ -129,10 +129,13 @@ export const ChatView: React.FC = () => {
   const [imagesRevision, setImagesRevision] = useState(0);
   const [removingImage, setRemovingImage] = useState(false);
   const [draftEvidence, setDraftEvidence] = useState<string[]>([]);
+  const [draftTarget, setDraftTarget] = useState<LocalSubmission['draft_target']>();
   const [draftsRefresh, setDraftsRefresh] = useState(0);
   const [workflowReview, setWorkflowReview] = useState<{
     command: LocalSubmission; preview?: LocalWorkflowPreview; stale?: boolean; error?: string;
   }>();
+  const [clarificationUpload, setClarificationUpload] = useState<{ file: File; error?: string }>();
+  const clarificationTransfer = useRef<AbortController | null>(null);
   const pendingLocal = useRef<LocalSubmission | null>(null);
   const sendingLocal = useRef<LocalSubmission | null>(null);
   const historyRequest = useRef(0);
@@ -171,12 +174,16 @@ export const ChatView: React.FC = () => {
   }, []);
   const clearLocalObservation = useCallback(() => {
     historyRequest.current++;
+    clarificationTransfer.current?.abort();
+    clarificationTransfer.current = null;
+    setClarificationUpload(undefined);
     pendingLocal.current = null;
     sendingLocal.current = null;
     setLocalNotice('');
     setLocalAccepted(false);
     setLocalStopping(false);
     setDraftEvidence([]);
+    setDraftTarget(undefined);
     setWorkflowReview(undefined);
     setUploadingImage(false);
     setSelectedImage(undefined);
@@ -215,6 +222,7 @@ export const ChatView: React.FC = () => {
       setMessages(session.messages);
       setSessionTitle(session.title);
       setLocalNotice(pendingLocal.current ? 'The server has not confirmed this submission. You can resend the same attempt.' : '');
+      return session;
     } catch (error) {
       if (!isCurrent()) return;
       const status = (error as {status?: number})?.status;
@@ -231,6 +239,44 @@ export const ChatView: React.FC = () => {
       }
     }
   }, [addToast, clearConversation, handleSessionExpired, updateSessionCount]);
+
+  const uploadWorkflowFile = async (file: File) => {
+    if (!activeSessionId || !lastLocalUser || !clarification || clarificationTransfer.current
+        || (clarification.reason !== 'sources' && clarification.reason !== 'image')) return;
+    const version = selectionVersion.current;
+    const turn = { session_id: activeSessionId, turn_id: lastLocalUser.id };
+    const revision = clarification.revision;
+    const controller = new AbortController();
+    clarificationTransfer.current = controller;
+    setClarificationUpload({ file });
+    const current = () => selectionVersion.current === version && clarificationTransfer.current === controller;
+    try {
+      const result = await uploadClarificationAttachment(turn, revision,
+        clarification.reason === 'sources' ? 'document' : 'image', file, controller.signal);
+      if (!current()) return;
+      setMessages(previous => previous.map(message => message.id === turn.turn_id
+        && message.localTurn?.clarification?.revision === revision ? { ...message, localTurn: result.turn } : message));
+      setClarificationUpload(undefined);
+    } catch (error) {
+      if (!current()) return;
+      if ((error as { status?: number })?.status === 401) {
+        handleSessionExpired();
+        return;
+      }
+      // A lost acknowledgement can leave a registered choice in the paused turn.
+      const history = await refreshLocalHistory(turn.session_id, version);
+      if (!current()) return;
+      const observed = history?.messages.find(message => message.id === turn.turn_id)?.localTurn;
+      if (observed && observed.clarification?.revision !== revision) {
+        setClarificationUpload(undefined);
+      } else {
+        setClarificationUpload({ file, error: controller.signal.aborted ? 'Upload cancelled.'
+          : error instanceof Error ? error.message : 'The file could not be uploaded.' });
+      }
+    } finally {
+      if (current()) clarificationTransfer.current = null;
+    }
+  };
 
   const refreshAfterSourceChange = useCallback(() => {
     setDraftsRefresh(previous => previous + 1);
@@ -251,6 +297,7 @@ export const ChatView: React.FC = () => {
     abortControllerRef.current = controller;
     sendingLocal.current = command;
     pendingLocal.current = command;
+    setReviewedWorkflow(undefined);
     setWorkflowReview(undefined);
     setLocalNotice('');
     setLocalAccepted(false);
@@ -265,7 +312,7 @@ export const ChatView: React.FC = () => {
       const callbacks = guardChatCallbacks({
         onAccepted: () => setLocalAccepted(true),
         onAgentStatus: (status: string, tool?: string) => {
-          if (status !== 'planning' && status !== 'tool_selected' && status !== 'analyzing_image' &&
+          if (status !== 'planning' && status !== 'tool_selected' && status !== 'analyzing_image' && status !== 'awaiting_model' &&
               status !== 'drafting' && status !== 'retrieving_evidence' && status !== 'comparing_evidence') return;
           const localSelectedTool = tool === 'calculator' || tool === 'unit_conversion' ? tool : undefined;
           setMessages(previous => previous.map(message =>
@@ -282,7 +329,8 @@ export const ChatView: React.FC = () => {
           if (info?.status && (reply || ['LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE', 'LOCAL_KNOWLEDGE_CHANGED',
             'LOCAL_KNOWLEDGE_QUESTION', 'LOCAL_IMAGE_UNAVAILABLE', 'LOCAL_VISION_BUSY',
             'LOCAL_IMAGE_REQUIRED', 'LOCAL_IMAGE_AMBIGUOUS', 'LOCAL_IMAGE_REQUEST_INVALID',
-            'LOCAL_DRAFT_REQUEST', 'LOCAL_DRAFT_EVIDENCE', 'TURN_CONFLICT', 'LOCAL_WORKFLOW_PREVIEW_CHANGED'].includes(info.code ?? ''))) {
+            'LOCAL_DRAFT_REQUEST', 'LOCAL_DRAFT_EVIDENCE', 'LOCAL_DRAFT_TARGET_REQUIRED',
+            'TURN_CONFLICT', 'LOCAL_WORKFLOW_PREVIEW_CHANGED'].includes(info.code ?? ''))) {
             pendingLocal.current = null;
             addToast('info', message);
             if (info.code === 'LOCAL_WORKFLOW_PREVIEW_CHANGED' && reviewed) {
@@ -341,6 +389,7 @@ export const ChatView: React.FC = () => {
       creating.current?.abort();
       creating.current = null;
       abortControllerRef.current?.abort();
+      clarificationTransfer.current?.abort();
     };
   }, [updateSessionCount]);
   useEffect(() => {
@@ -388,10 +437,16 @@ export const ChatView: React.FC = () => {
       if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current ||
           (local && (localRunning || clarification || workflowReview || localNotice || pendingLocal.current || localStopping))) return;
       const isDraft = local && isLocalDraftRequest(text);
+      const refinement = local && !isDraft ? draftRefinementIntent(text) || (draftTarget ? 'edit' : undefined) : undefined;
+      if (refinement && image) {
+        addToast('info', 'Analyze the image in chat first. Then select its completed observations in Drafts.');
+        return;
+      }
       const useDraftHistory = isDraft && draftEvidence.length > 0 && !image && !reusedImageId &&
         /^\s*(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\b/i.test(text);
-      const visualQuestion = Boolean(image || reusedImageId);
-      const knowledgeForTurn = knowledgeActive && !useDraftHistory && (!visualQuestion || isDraft);
+      const visualQuestion = !refinement && Boolean(image || reusedImageId);
+      const knowledgeForTurn = knowledgeActive && !useDraftHistory && (!visualQuestion || isDraft) &&
+        (!refinement || refinement === 'sources');
       if (local && knowledgeForTurn && !knowledgeAvailable) {
         addToast('info', 'Local knowledge is unavailable. Switch to general chat or wait for it to reconnect.');
         return;
@@ -485,7 +540,7 @@ export const ChatView: React.FC = () => {
         }
       }
       if (local) {
-        let imageId = reusedImageId;
+        let imageId = refinement ? undefined : reusedImageId;
         if (image) {
           const controller = new AbortController();
           const version = selectionVersion.current;
@@ -514,16 +569,17 @@ export const ChatView: React.FC = () => {
         const scopedDraft = isDraft && knowledgeForTurn && !knowledgeSelection && !imageId &&
           /^(?:please\s+)?(?:create|draft|prepare|make|generate|write|build)\b/i.test(text.trim());
         const question = scopedDraft ? `Use my selected documents to ${text.trim()}` :
-          knowledgeForTurn && !explicitlyScoped && !isDraft ? `According to my local sources, ${text}` : text;
+          knowledgeForTurn && !explicitlyScoped && !isDraft && !refinement ? `According to my local sources, ${text}` : text;
         setSelectedImage(undefined);
         const command: LocalSubmission = {
           session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: question,
           model: imageId ? selectedVisionModel : selectedModel,
           ...(imageId ? { image_id: imageId } : {}),
-          ...(useDraftHistory ? { draft_turn_ids: draftEvidence } : {}),
+          ...(useDraftHistory || (refinement === 'evidence' && draftEvidence.length) ? { draft_turn_ids: draftEvidence } : {}),
           ...(knowledgeForTurn && knowledgeSelection ? { knowledge_source_ids: knowledgeSelection } : {}),
+          ...(refinement && draftTarget ? { draft_target: draftTarget } : {}),
         };
-        if (needsWorkflowPreview(text, knowledgeForTurn)) await reviewLocalWorkflow(command);
+        if (!refinement && needsWorkflowPreview(text, knowledgeForTurn)) await reviewLocalWorkflow(command);
         else await runLocalSubmission(command);
         return;
       }
@@ -844,7 +900,7 @@ export const ChatView: React.FC = () => {
         if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, clarification, workflowReview, localNotice, localStopping, runLocalSubmission, reviewLocalWorkflow, knowledgeAvailable, knowledgeActive, knowledgeSelection, reusedImageId, draftEvidence]
+    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, clarification, workflowReview, localNotice, localStopping, runLocalSubmission, reviewLocalWorkflow, knowledgeAvailable, knowledgeActive, knowledgeSelection, reusedImageId, draftEvidence, draftTarget]
   );
 
   /**
@@ -1046,6 +1102,9 @@ export const ChatView: React.FC = () => {
         session_id: activeSessionId, turn_id: lastLocalUser.id, attempt: lastLocalUser.localTurn.attempt,
       };
     if (!attempt || localStopping) return;
+    clarificationTransfer.current?.abort();
+    clarificationTransfer.current = null;
+    setClarificationUpload(undefined);
     const version = selectionVersion.current;
     const observer = abortControllerRef.current;
     setLocalStopping(true);
@@ -1126,6 +1185,7 @@ export const ChatView: React.FC = () => {
     setActiveSessionId('');
     setSessionTitle('New Conversation');
     setMessages([]);
+    setReviewedWorkflow(undefined);
     addToast('info', 'Started new conversation session.');
   };
 
@@ -1140,8 +1200,11 @@ export const ChatView: React.FC = () => {
     setActiveSessionId(session.id);
     setSessionTitle(session.title);
     setMessages(session.messages);
+    setReviewedWorkflow(undefined);
     addToast('info', `Resumed session: ${session.title}`);
   };
+
+  const [reviewedWorkflow, setReviewedWorkflow] = useState<{ session: string; turn: string; message: string; draftId?: string }>();
 
   useEffect(() => {
     modelSelection.current = { selectedModel, selectedVisionModel, capabilities };
@@ -1291,12 +1354,43 @@ export const ChatView: React.FC = () => {
         onNewChat={handleStartNewChat}
         onDeleted={updateSessionCount}
         refreshKey={historyRevision}
+        workflows={local ? {
+          onOpen: async (item, action, signal, draftId) => {
+            const session = await loadSession(item.session_id);
+            if (signal.aborted) return;
+            const latest = latestLocalUser(session.messages);
+            const changed = latest?.id !== item.id || latest.localTurn?.attempt !== item.attempt ||
+              (latest.localTurn?.plan_revision ?? null) !== item.plan_revision;
+            if (action === 'resume' && (changed || latest?.localTurn?.state !== 'waiting_clarification')) {
+              throw new Error('The clarification changed. Refresh workflows to see the current state.');
+            }
+            const retry = action === 'retry' && !changed ? retryLocalSubmission(session.id, latest) : null;
+            if (action === 'retry' && !retry) throw new Error('This attempt can no longer be retried.');
+            handleSelectSession(session);
+            const turn = session.messages.find(message => message.id === item.id);
+            setReviewedWorkflow({ session: session.id, turn: item.id, message: turn?.localTurn?.assistant_id || item.id, draftId });
+            setIsHistoryOpen(false);
+            if (retry) void runLocalSubmission(retry);
+          },
+          onReuse: async (template, signal) => {
+            const created = await createSession(signal);
+            if (signal.aborted) return;
+            handleSelectSession({ id: created.session_id, title: 'New task', messages: [],
+              createdAt: Date.now(), updatedAt: Date.now(), model: '' });
+            setIsHistoryOpen(false);
+            void reviewLocalWorkflow({ session_id: created.session_id, turn_id: template.turn_id,
+              message: template.message, attempt: 1, model: selectedModel,
+              knowledge_source_ids: template.knowledge_source_ids ?? undefined });
+            if (template.requires_image_selection) addToast('info', 'Choose an image again if this task needs one.');
+          },
+        } : undefined}
         onRenamed={(id, title) => { if (id === activeSessionId) setSessionTitle(title); }}
       />}
 
       {/* 3. Message List with Visual Explanations & Mermaid Renderers */}
       <MessageList
         messages={messages}
+        focusMessageId={reviewedWorkflow?.session === activeSessionId ? reviewedWorkflow.message : undefined}
         onSelectPrompt={handleSendMessage}
         onApprove={approvalsAllowed ? handleApprove : undefined}
         onReject={approvalsAllowed ? handleReject : undefined}
@@ -1351,18 +1445,29 @@ export const ChatView: React.FC = () => {
         </section>
       )}
       {local && clarification && lastLocalUser?.localTurn && <WorkflowClarification
-        key={`${lastLocalUser.id}:${clarification.revision}`} clarification={clarification}
+        key={`${activeSessionId}:${lastLocalUser.id}:${clarification.reason}`} clarification={clarification}
         busy={isStreaming || localStopping}
+        upload={uploadWorkflowFile} uploading={Boolean(clarificationUpload && !clarificationUpload.error)}
+        uploadError={clarificationUpload?.error}
+        retryUpload={clarificationUpload?.error ? () => void uploadWorkflowFile(clarificationUpload.file) : undefined}
+        cancelUpload={() => clarificationTransfer.current?.abort()}
+        previewImage={id => localImageUrl(activeSessionId, id)}
         cancel={() => void stopLocalResponse()}
-        resume={selection => void runLocalSubmission({
-          session_id: activeSessionId, turn_id: lastLocalUser.id, attempt: lastLocalUser.localTurn!.attempt,
-          message: lastLocalUser.content, model: lastLocalUser.localTurn!.model,
-        }, { revision: clarification.revision, selection, usesImage: clarification.uses_image })}
+        resume={selection => {
+          if (clarificationTransfer.current) return;
+          void runLocalSubmission({
+            session_id: activeSessionId, turn_id: lastLocalUser.id, attempt: lastLocalUser.localTurn!.attempt,
+            message: lastLocalUser.content, model: lastLocalUser.localTurn!.model,
+          }, { revision: clarification.revision, selection, usesImage: clarification.uses_image });
+        }}
       />}
       {local && activeSessionId && <LocalDraftPanel key={activeSessionId} sessionId={activeSessionId}
         messages={messages} refreshKey={`${historyRevision}:${draftsRefresh}:${lastLocalUser?.id}:${lastLocalUser?.localTurn?.state}`}
         selected={draftEvidence} onSelection={setDraftEvidence}
-        reviewTurnId={lastLocalUser?.localTurn?.state === 'completed' ? lastLocalUser.id : undefined} />}
+        draftTarget={draftTarget} onDraftTarget={setDraftTarget}
+        reviewDraftId={reviewedWorkflow?.session === activeSessionId ? reviewedWorkflow.draftId : undefined}
+        reviewTurnId={reviewedWorkflow?.session === activeSessionId ? reviewedWorkflow.turn :
+          lastLocalUser?.localTurn?.state === 'completed' ? lastLocalUser.id : undefined} />}
       {local && (savedImages.length > 0 || uploadingImage) && (
         <div className="flex flex-wrap items-center gap-3 border-t border-slate-200 px-5 py-2 text-xs text-slate-700">
           {uploadingImage && <span role="status">Uploading and validating image.</span>}

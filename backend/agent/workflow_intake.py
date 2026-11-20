@@ -6,12 +6,13 @@ from typing import Annotated, Literal
 from pydantic import Field, StringConstraints
 
 from backend.multimodal.local_images import MAX_IMAGES, LocalImageRef
-from backend.rag.local_knowledge import KnowledgeScope, knowledge_question
+from backend.rag.local_knowledge import MAX_SOURCES, KnowledgeScope, ScopedSource, knowledge_question
 from backend.rag.local_relevance import entities, measurements, requested_fact
 from backend.tools.local_drafts import Format, StrictModel, artifact_clauses
 
 
 _TWO_DOCUMENTS = re.compile(r'\b(?:two|2|both)\s+(?:[\w-]+\s+){0,3}(?:reports|documents|sources|files|records|workbooks)\b', re.I)
+_THESE_DOCUMENTS = re.compile(r'\bthese\s+(?:[\w-]+\s+){0,3}(?:reports|documents|sources|files|workbooks)\b', re.I)
 _DOCUMENT_GOAL = re.compile(
     r'^\s*(?:please\s+)?(?:compare|contrast|analy[sz]e)\b[^\n]{0,580}\b'
     r'(?:reports?|documents?|sources?|files?|records?|workbooks?)\b', re.I,
@@ -30,17 +31,19 @@ _MEASUREMENTS = {
     'requirements': 'requirements',
 }
 _FORMATS = {'docx': 'Word report (DOCX)', 'xlsx': 'Spreadsheet (XLSX)', 'pdf': 'PDF report (ASCII text)'}
+MAX_CLARIFICATION_REVISION = MAX_SOURCES + MAX_IMAGES + 6
 
 
 class ClarificationReply(StrictModel):
-    revision: int = Field(ge=1, le=6)
+    revision: int = Field(ge=1, le=MAX_CLARIFICATION_REVISION)
     selection: list[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Field(min_length=1, max_length=2)
 
 
 class WorkflowIntake(StrictModel):
-    revision: int = Field(default=1, ge=1, le=6)
+    revision: int = Field(default=1, ge=1, le=MAX_CLARIFICATION_REVISION)
     scope: KnowledgeScope
     choose_sources: bool = False
+    source_count: Literal[1, 2] = 2
     image_options: list[LocalImageRef] = Field(default_factory=list, max_length=MAX_IMAGES)
     needs_image: bool = False
     image: LocalImageRef | None = None
@@ -54,7 +57,12 @@ class WorkflowIntake(StrictModel):
 
     def binding(self):
         # Preserve the signed L19 representation for existing draft plans.
-        return self.model_dump(exclude=None if self.answer_only else {'answer_only'})
+        excluded = set()
+        if not self.answer_only:
+            excluded.add('answer_only')
+        if self.source_count == 2:
+            excluded.add('source_count')
+        return self.model_dump(exclude=excluded)
 
     @property
     def reason(self):
@@ -72,7 +80,8 @@ class WorkflowIntake(StrictModel):
 
     def clarification(self):
         if self.reason == 'sources':
-            return self._question('Which two registered documents should I compare?', 2,
+            question = 'Which two documents should I compare?' if self.source_count == 2 else 'Which document should I use?'
+            return self._question(question, self.source_count,
                                   [(source.source_id, source.label) for source in self.scope.sources])
         if self.reason == 'image':
             return self._question('Which image should I analyze?', 1,
@@ -87,7 +96,7 @@ class WorkflowIntake(StrictModel):
 
     def _question(self, question, count, options):
         return {'revision': self.revision, 'reason': self.reason, 'question': question, 'count': count,
-                'uses_image': self.image is not None,
+                'uses_image': self.image is not None or self.reason == 'image',
                 'options': [{'id': value, 'label': label} for value, label in options]}
 
     def execution_prompt(self, objective):
@@ -116,15 +125,19 @@ def make_intake(state, session, identity, objective, selection, image, output_fo
         return None
     corpus = state.local_knowledge
     scope = corpus.bind_scope(identity[0], selection)
-    if not scope.sources and not answer_only:
+    two = bool(_TWO_DOCUMENTS.search(objective))
+    implicit_pair = bool(_COMPARISON_REQUEST.search(question) and _THESE_DOCUMENTS.search(objective))
+    choose_sources = ((two and (selection is None or len(scope.sources) != 2))
+                      or (implicit_pair and len(scope.sources) < 2) or (document_goal and not scope.sources))
+    if not scope.sources and not choose_sources:
         return None
     needs_image = document_goal and bool(_IMAGE.search(objective))
     image_options = state.local_images.list(session, identity) if needs_image and image is None else []
     if needs_image and image is None and len(image_options) == 1:
         image = image_options[0]
-    two = bool(_TWO_DOCUMENTS.search(objective))
-    choose_sources = two and (selection is None or len(scope.sources) != 2)
-    if two and not choose_sources:
+    if choose_sources and selection is not None:
+        scope = corpus.bind_scope(identity[0], None)
+    elif two:
         scope = scope.model_copy(update={'mode': 'selected'})
     tags = corpus.workflow_pumps(identity[0], scope) if pump_goal and not choose_sources else []
     fact = requested_fact(objective, measurements(objective))
@@ -140,13 +153,30 @@ def make_intake(state, session, identity, objective, selection, image, output_fo
             for part in parts
         )
     intake = WorkflowIntake(
-        scope=scope, choose_sources=choose_sources, needs_image=needs_image, image=image, image_options=image_options,
+        scope=scope, choose_sources=choose_sources, source_count=2 if two or implicit_pair else 1 if choose_sources else 2,
+        needs_image=needs_image, image=image, image_options=image_options,
         choose_equipment=pump_goal and len(tags) != 1, equipment_options=tags[:24],
         equipment=tags[0] if len(tags) == 1 else None, choose_measurement=choose_measurement, format=output_format,
         answer_only=answer_only,
     )
     # Keep the existing fully specified artifact route and its signed admission format.
     return intake if intake.reason or output_format is None or pump_goal else None
+
+
+def add_clarification_attachment(intake, attachment):
+    if intake.reason == 'sources' and isinstance(attachment, ScopedSource):
+        if attachment in intake.scope.sources:
+            return intake
+        scope = KnowledgeScope(corpus_id=intake.scope.corpus_id, mode=intake.scope.mode,
+                               sources=[*intake.scope.sources, attachment])
+        change = {'scope': scope}
+    elif intake.reason == 'image' and isinstance(attachment, LocalImageRef):
+        if attachment in intake.image_options:
+            return intake
+        change = {'image_options': [*intake.image_options, attachment]}
+    else:
+        raise ValueError('This clarification does not accept that attachment.')
+    return WorkflowIntake.model_validate({**intake.binding(), **change, 'revision': intake.revision + 1})
 
 
 def clarify_intake(intake, reply):
@@ -160,7 +190,7 @@ def clarify_intake(intake, reply):
     if intake.reason == 'sources':
         scope = KnowledgeScope(corpus_id=intake.scope.corpus_id, mode='selected',
                                sources=[source for source in intake.scope.sources if source.source_id in reply.selection])
-        changes.update(scope=scope, choose_sources=False)
+        changes.update(scope=scope, choose_sources=False, source_count=2)
     elif intake.reason == 'image':
         changes['image'] = next(ref for ref in intake.image_options if ref.image_id == choice)
     elif intake.reason == 'equipment':

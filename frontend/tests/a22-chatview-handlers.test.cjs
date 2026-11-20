@@ -50,7 +50,7 @@ const file=path.resolve(__dirname,'../src/components/chat/ChatView.tsx');const o
 function render(){cursor=0;effects=[];return mod.exports.ChatView()} function find(n,t){if(!n||typeof n!=='object')return;if(n.type===t)return n;for(let c of n.props?.children||[]){let x=find(c,t);if(x)return x}} function parts(){let tree=render();return {tree,input:find(tree,ChatInput).props,list:find(tree,MessageList).props,sidebar:find(tree,ChatHistorySidebar)?.props}} function setup(){slots=[];requests=[];parts();slots[3]='server-session';return parts()}
 function button(node, label) {
   if (Array.isArray(node)) return node.map(child => button(child, label)).find(Boolean);
-  if (node?.type === 'button' && node.props.children.includes(label)) return node.props;
+  if (node?.type === 'button' && (node.props.children.includes(label) || node.props.title === label)) return node.props;
   return node?.props ? button(node.props.children, label) : undefined;
 }
 test('chat sends draft intent with the selected conversation evidence and restores the completed draft turn', async (t) => {
@@ -115,6 +115,33 @@ test('a stale server preview requires renewed review of the same selected source
   second.resolve();
   await new Promise(setImmediate);
 });
+test('conversational refinement sends the selected revision without unrelated knowledge scope', async t => {
+  localMode = localKnowledgeAvailable = true;
+  t.after(() => {
+    localMode = localKnowledgeAvailable = false;
+    historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [] });
+  });
+  const initial = setup().tree;
+  find(initial, LocalKnowledgePanel).props.setActive(true);
+  find(initial, LocalKnowledgePanel).props.setSelection(['unrelated-source']);
+  const target = { id: 'selected-draft', revision: 3 };
+  find(initial, LocalDraftPanel).props.onDraftTarget(target);
+  const submission = parts().input.onSendMessage('Make it shorter.');
+  const [request] = requests;
+  assert.deepEqual(request.payload.draft_target, target);
+  assert.equal(request.payload.message, 'Make it shorter.');
+  assert.equal(request.payload.knowledge_source_ids, undefined);
+  assert.equal(request.payload.workflow_preview, undefined);
+  historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [{
+    id: request.payload.turn_id, role: 'user', content: request.payload.message,
+    localTurn: { state: 'completed', attempt: 1, model: 'fake', draft_target: target },
+  }] });
+  request.callbacks.onAgentStatus('drafting');
+  request.callbacks.onDone('server-session', 'fake');
+  request.resolve();
+  await submission;
+  assert.equal(find(parts().tree, LocalDraftPanel).props.reviewTurnId, request.payload.turn_id);
+});
 test('chat reconciles a previewed comparison into a same-turn clarification and evidence answer', async t => {
   localMode = localKnowledgeAvailable = true;
   api.previewLocalWorkflow = async command => ({
@@ -170,6 +197,66 @@ test('chat reconciles a previewed comparison into a same-turn clarification and 
   assert.equal(parts().list.messages.at(-1).content, 'Cited answer');
   assert.equal(requests.length, 2);
 });
+test('chat adds an uploaded file to the paused turn and continues only after confirmation', async t => {
+  localMode = localKnowledgeAvailable = true;
+  const uploaded = [];
+  const continuations = [];
+  api.previewLocalWorkflow = async command => ({ ...await defaultWorkflowPreview(command), question: 'Which documents?' });
+  api.uploadClarificationAttachment = async (turn, revision, kind, file, signal) => {
+    uploaded.push({ turn, revision, kind, file, signal });
+    if (uploaded.length === 1) throw new Error('The upload connection was lost.');
+    return { turn: { ...paused.localTurn, plan_revision: 2, clarification: {
+      ...paused.localTurn.clarification, revision: 2, options: [
+        ...paused.localTurn.clarification.options, { id: 'second', label: file.name },
+      ],
+    } } };
+  };
+  api.streamLocalClarification = (command, reply, callbacks, signal) => {
+    continuations.push({ command, reply });
+    return api.streamChat(command, callbacks, signal);
+  };
+  t.after(() => {
+    localMode = localKnowledgeAvailable = false;
+    api.previewLocalWorkflow = defaultWorkflowPreview;
+    delete api.streamLocalClarification;
+    delete api.uploadClarificationAttachment;
+    historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [] });
+  });
+  await setup().input.onSendMessage('Compare these maintenance documents and prepare a cited report.');
+  button(parts().tree, 'Continue to clarification').onClick();
+  const first = requests[0];
+  const paused = {
+    id: first.payload.turn_id, role: 'user', content: first.payload.message,
+    localTurn: {
+      model: 'fake', attempt: 1, plan_revision: 1, state: 'waiting_clarification',
+      clarification: { reason: 'sources', revision: 1, count: 2, question: 'Which documents?', uses_image: false,
+        options: [{ id: 'first', label: 'First document' }] },
+    },
+  };
+  historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [paused] });
+  first.callbacks.onDone('server-session', 'fake');
+  first.resolve();
+  await new Promise(setImmediate);
+  const clarification = () => find(parts().tree, WorkflowClarification).props;
+  const file = { name: 'Limits.pdf' };
+  clarification().upload(file);
+  await new Promise(setImmediate);
+  assert.match(clarification().uploadError, /connection was lost/);
+  clarification().retryUpload();
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 1);
+  assert.equal(uploaded.length, 2);
+  assert.deepEqual(uploaded.map(item => [item.turn.turn_id, item.revision, item.kind, item.file]), [
+    [paused.id, 1, 'document', file], [paused.id, 1, 'document', file],
+  ]);
+  assert.equal(clarification().clarification.options.at(-1).label, 'Limits.pdf');
+  clarification().resume(['first', 'second']);
+  assert.deepEqual(continuations.map(({ command, reply }) => [command.turn_id, command.attempt, reply]), [
+    [paused.id, 1, { revision: 2, selection: ['first', 'second'], usesImage: false }],
+  ]);
+  requests[1].resolve();
+});
+
 test('a second submission from the same render cannot replace the active stream', async () => {
   const { input } = setup();
   const first = input.onSendMessage('First question');
@@ -231,6 +318,41 @@ test('retry rebuilds the original source selection from history and blocks stale
   });
   turn.localTurn.knowledge_scope_stale = true;
   assert.equal(retry('owned-session', turn), null);
+});
+
+test('workflow history opens the relevant draft and starts a reused task only after preview confirmation', async t => {
+  localMode = true;
+  const first = { id: 'original-task', role: 'user', content: 'Compare two documents.',
+    localTurn: { state: 'completed', model: 'fake', attempt: 1, assistant_id: 'original-evidence' } };
+  const evidence = { id: 'original-evidence', role: 'assistant', content: 'Source-backed answer' };
+  const last = { id: 'later-task', role: 'user', content: 'Create a summary.',
+    localTurn: { state: 'completed', model: 'fake', attempt: 1 } };
+  historyImpl = async id => ({ id, title: 'Conversation', messages: [first, evidence, last] });
+  t.after(() => {
+    localMode = false;
+    historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [] });
+  });
+  setup();
+  button(parts().tree, 'Open Chat History').onClick();
+  const workflows = parts().sidebar.workflows;
+  const signal = new AbortController().signal;
+  await workflows.onOpen({ session_id: 'old-conversation', id: first.id, attempt: 1, plan_revision: null }, 'draft', signal, 'exact-draft');
+  assert.deepEqual(parts().list.messages.map(message => message.id), [first.id, evidence.id, last.id]);
+  assert.equal(parts().list.focusMessageId, evidence.id);
+  assert.equal(find(parts().tree, LocalDraftPanel).props.reviewTurnId, first.id);
+  assert.equal(find(parts().tree, LocalDraftPanel).props.reviewDraftId, 'exact-draft');
+  assert.equal(requests.length, 0);
+  await workflows.onReuse({ turn_id: 'new-task', message: first.content, knowledge_source_ids: ['selected-source'] }, signal);
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 0);
+  button(parts().tree, 'Start workflow').onClick();
+  const [request] = requests;
+  assert.equal(request.payload.turn_id, 'new-task');
+  assert.equal(request.payload.session_id, 'created-server-id');
+  assert.deepEqual(request.payload.knowledge_source_ids, ['selected-source']);
+  assert.equal(request.payload.attempt, 1);
+  request.resolve();
+  await new Promise(setImmediate);
 });
 
 test('local upload and visual question use the owned image ID and reconcile history', async (t) => {

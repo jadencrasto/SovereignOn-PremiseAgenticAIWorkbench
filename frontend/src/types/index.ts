@@ -123,7 +123,7 @@ export interface ChatMessage {
   localPreview?: boolean;
   numericSourceTurn?: number;
   numericSecondarySourceTurn?: number;
-  localAgentStatus?: 'planning' | 'tool_selected' | 'analyzing_image' | 'drafting' | 'retrieving_evidence' | 'comparing_evidence';
+  localAgentStatus?: 'planning' | 'tool_selected' | 'analyzing_image' | 'drafting' | 'retrieving_evidence' | 'comparing_evidence' | 'awaiting_model';
   localSelectedTool?: 'calculator' | 'unit_conversion';
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   // Request-scoped image previews and metadata for both attachment types.
@@ -139,6 +139,8 @@ export interface ChatMessage {
 
 export interface LocalTurnState {
   draft_turn_ids?: string[] | null;
+  draft_target?: { id: string; revision: number };
+  draft_source_ids?: string[];
   image_id?: string;
   knowledge_scope?: LocalKnowledgeScope;
   knowledge_scope_stale?: boolean;
@@ -183,6 +185,7 @@ export interface ChatRequestPayload {
   workflow_preview?: string;
   knowledge_source_ids?: string[];
   draft_turn_ids?: string[];
+  draft_target?: { id: string; revision: number };
   image_id?: string;
   session_id?: string;
   turn_id?: string;

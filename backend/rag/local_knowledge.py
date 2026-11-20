@@ -1,6 +1,6 @@
 """Bounded lexical retrieval for the explicitly registered local_dev corpus."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
@@ -284,6 +284,7 @@ class Source:
     text: str
     passages: tuple[Passage, ...]
     document: DocumentProjection | None = None
+    attachment_scope: tuple[str, str, str] | None = None
 
     def reference(self):
         return {'source_id': self.id, 'revision': self.revision, 'digest': self.digest}
@@ -446,6 +447,11 @@ class LocalKnowledge:
                     source = _source(ref.source_id, row['label'], ref.revision, row['text'].encode('utf-8'), 'text/plain')
                 if source.digest != ref.digest or source.id in sources:
                     raise ValueError
+                if 'attachment_scope' in row:
+                    scope = row['attachment_scope']
+                    if not isinstance(scope, list) or len(scope) != 3 or not all(isinstance(x, str) and x for x in scope):
+                        raise ValueError
+                    source = replace(source, attachment_scope=tuple(scope))
                 sources[source.id] = source
             self._limits(sources)
             return sources
@@ -456,7 +462,8 @@ class LocalKnowledge:
         self._limits(sources)
         if self.path is not None:
             payload = {'owner': self.owner, 'corpus': self.id, 'sources': [
-                {**source.reference(), 'label': source.label, **(
+                {**source.reference(), 'label': source.label,
+                 **({'attachment_scope': source.attachment_scope} if source.attachment_scope else {}), **(
                     {'document': source.document.model_dump(exclude_none=True)} if source.document
                     else {'text': source.text})}
                 for source in sources.values()
@@ -473,7 +480,8 @@ class LocalKnowledge:
         return {'mode': RETRIEVAL_MODE, 'retention': 'durable' if self.path else 'disposable',
                 'max_sources': MAX_SOURCES, 'max_source_bytes': MAX_TEXT_FILE_BYTES,
                 'document_formats': available_formats(), 'max_document_bytes': MAX_DOCUMENT_BYTES,
-                'max_corpus_bytes': MAX_CORPUS_BYTES, 'sources': [s.public() for s in self._sources.values()]}
+                'max_corpus_bytes': MAX_CORPUS_BYTES,
+                'sources': [s.public() for s in self._sources.values() if s.attachment_scope is None]}
 
     def _existing(self, source_id, revision):
         source = self._sources[source_id]
@@ -481,28 +489,33 @@ class LocalKnowledge:
             raise KnowledgeConflict('The source has changed. Refresh the corpus and try again.')
         return source
 
-    def register(self, owner, label, raw, media_type, *, source_id=None, revision=None):
+    def register(self, owner, label, raw, media_type, *, source_id=None, revision=None, attachment_scope=None):
         self._authorize(owner)
         return self._register(label, source_id, revision,
-                              lambda sid, rev: _source(sid, label, rev, raw, media_type))
+                              lambda sid, rev: _source(sid, label, rev, raw, media_type), attachment_scope)
 
-    def register_document(self, owner, label, projection, *, source_id=None, revision=None):
+    def register_document(self, owner, label, projection, *, source_id=None, revision=None, attachment_scope=None):
         self._authorize(owner)
         return self._register(label, source_id, revision,
-                              lambda sid, rev: _document_source(sid, label, rev, projection))
+                              lambda sid, rev: _document_source(sid, label, rev, projection), attachment_scope)
 
-    def _register(self, label, source_id, revision, build):
+    def _register(self, label, source_id, revision, build, attachment_scope):
         old = self._existing(source_id, revision) if source_id else None
         if old and old.revision >= 2**31 - 1:
             raise KnowledgeConflict('The source has reached its revision limit.')
         source = build(old.id if old else uuid4().hex, old.revision + 1 if old else 1)
+        source = replace(source, attachment_scope=old.attachment_scope if old else attachment_scope)
         if old and (source.label, source.digest) == (old.label, old.digest):
             return old.public()
-        if any(current.id != source.id and (current.digest == source.digest
-               or (current.document and source.document
-                   and current.document.content_sha256 == source.document.content_sha256)
-               or current.label.casefold() == source.label.casefold()) for current in self._sources.values()):
-            raise KnowledgeConflict('This content or filename is already registered. Replace the existing source to reindex it.')
+        for current in self._sources.values():
+            if current.id == source.id or current.attachment_scope != source.attachment_scope:
+                continue
+            same_content = current.digest == source.digest or (current.document and source.document
+                           and current.document.content_sha256 == source.document.content_sha256)
+            if same_content and attachment_scope and old is None:
+                return current.public()
+            if same_content or current.label.casefold() == source.label.casefold():
+                raise KnowledgeConflict('This content or filename is already registered. Replace the existing source to reindex it.')
         self._save({**self._sources, source.id: source})
         return source.public()
 
@@ -513,11 +526,30 @@ class LocalKnowledge:
 
     def bind_scope(self, owner, source_ids):
         self._authorize(owner)
-        if source_ids is not None and any(source_id not in self._sources for source_id in source_ids):
+        public = [source for source in self._sources.values() if source.attachment_scope is None]
+        if source_ids is not None and not set(source_ids) <= {source.id for source in public}:
             raise KeyError('Local source unavailable')
-        sources = [ScopedSource(**source.reference(), label=source.label) for source in self._sources.values()
+        sources = [ScopedSource(**source.reference(), label=source.label) for source in public
                    if source_ids is None or source.id in source_ids]
         return KnowledgeScope(corpus_id=self.id, mode='all' if source_ids is None else 'selected', sources=sources)
+
+    def remove_session(self, session):
+        sources = {key: source for key, source in self._sources.items()
+                   if not source.attachment_scope or source.attachment_scope[0] != session}
+        if len(sources) != len(self._sources):
+            self._save(sources)
+
+    def prune_revoked(self, records):
+        active = {(row['conversation_id'], row['generation']) for row in records
+                  if row['state'] == 'active' and row['owner_id'] == self.owner}
+        sources = {key: source for key, source in self._sources.items()
+                   if not source.attachment_scope or source.attachment_scope[:2] in active}
+        if len(sources) != len(self._sources):
+            self._save(sources)
+
+    def _selected_sources(self, source_ids):
+        return (source for source in self._sources.values() if (
+            source.attachment_scope is None if source_ids is None else source.id in source_ids))
 
     def check_scope(self, owner, scope):
         self._authorize(owner)
@@ -534,7 +566,7 @@ class LocalKnowledge:
                        if passage.context.searchable for tag in passage.equipment() if re.fullmatch(r'P[- ]?\d+', tag)})
 
     def _question(self, question, source_ids=None):
-        known = {tag for source in self._sources.values() if source_ids is None or source.id in source_ids
+        known = {tag for source in self._selected_sources(source_ids)
                  for passage in source.passages if passage.context.searchable for tag in passage.equipment()}
         requested, ambiguous = resolve_entities(question, known)
         pumps = {tag.replace('-', '').replace(' ', '') for tag in known if re.match(r'^P[- ]?\d', tag)}
@@ -568,9 +600,7 @@ class LocalKnowledge:
                         or target.fact and target.fact.attribute == 'requirements')):
             return ()
         ranked = []
-        for position, source in enumerate(self._sources.values()):
-            if source_ids is not None and source.id not in source_ids:
-                continue
+        for position, source in enumerate(self._selected_sources(source_ids)):
             matches = []
             for passage in source.passages:
                 if passage.context.searchable and (match := _match(target, passage, source.label)):

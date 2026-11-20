@@ -95,6 +95,22 @@ test('chat clients turn FastAPI validation details into a displayable error', as
  }
 });
 
+test('a local text turn separates waiting for the model from the first token', async t => {
+ const originalFetch = global.fetch;
+ t.after(() => { global.fetch = originalFetch; });
+ const turn = {session_id: 's', turn_id: 'pending', attempt: 1};
+ const event = (sequence, type, content) => `data: ${JSON.stringify({...turn, sequence, type, content})}\n\n`;
+ const wire = [event(1, 'accepted', ''), event(2, 'agent_status', 'awaiting_model'),
+  event(3, 'delta', 'Hi'), event(4, 'done', '')];
+ global.fetch = async () => response(wire);
+ const observed = [];
+ await streamSSE('/api/chat', turn, {...callbacks(observed), onAgentStatus: status => observed.push(['status', status])});
+ assert.deepEqual(observed, [['status', 'awaiting_model'], ['delta', 'Hi'], ['done', 's']]);
+ const vision = [];
+ await streamSSE('/api/chat', {...turn, image_id: 'image'}, callbacks(vision));
+ assert.deepEqual(vision, [['error', 'Invalid stream response']]);
+});
+
 const chatFilename = path.resolve(__dirname, '../src/api/chat.ts');
 const chatOutput = ts.transpileModule(fs.readFileSync(chatFilename, 'utf8'), {compilerOptions: {module: ts.ModuleKind.CommonJS}}).outputText;
 const chatModule = new Module(chatFilename, module); chatModule.filename = chatFilename; chatModule.paths = Module._nodeModulePaths(path.dirname(chatFilename));

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from backend.local_history import _safe_path
 from backend.multimodal.text_file import TextFileError
 from backend.tools.docx_create import DocxCreateInput, create_docx_create
-from backend.tools.local_drafts import DraftConflict, LocalDraft, MAX_EXPORT, _json
+from backend.tools.local_drafts import COLUMNS, HEADINGS, DraftConflict, DraftLayout, LocalDraft, MAX_EXPORT, _json
 from backend.tools.pdf_report import render_pdf_report
 from backend.tools.xlsx_report import XlsxReportInput, create_xlsx_report
 
@@ -48,32 +48,60 @@ def source_label(finding):
 
 
 def render_args(draft):
-    rows, references = [], {}
-    for finding in draft.findings:
+    layout = draft.layout or DraftLayout()
+    rows, references, comparison, observations = [], {}, [], []
+    for index, finding in enumerate(draft.findings):
         label = source_label(finding)
+        topic = finding.topic
         if label:
             number = references.setdefault(label, len(references) + 1)
             citation = f'[{number}] {label}' if draft.format == 'xlsx' else f'[{number}]'
             if finding.kind == 'user_edited':
                 citation = 'Original evidence reference ' + citation
+            if layout.inline_references and draft.format != 'xlsx':
+                topic = f'{topic}\n{citation} {label}'
         else:
             citation = ''
         field = finding.field if finding.kind == 'source_value' else None
-        rows.append([finding.topic, finding.text, (field or {}).get('unit') or '',
-                     ', '.join((field or {}).get('equipment', ())), ', '.join((field or {}).get('conditions', ())),
-                     f'{LABELS[finding.kind]} / {finding.coverage if finding.kind != "user_edited" else "unverified"}',
-                     citation])
-    headers = ['Finding', 'Reported value or wording', 'Unit', 'Equipment', 'Condition', 'Evidence status', 'Reference']
+        status = f'{LABELS[finding.kind]} / {finding.coverage if finding.kind != "user_edited" else "unverified"}'
+        cells = {'finding': topic, 'value': finding.text, 'unit': (field or {}).get('unit') or '',
+                 'equipment': ', '.join((field or {}).get('equipment', ())),
+                 'condition': ', '.join((field or {}).get('conditions', ())), 'status': status, 'reference': citation}
+        rows.append([cells[key] for key in layout.columns])
+        if field and (not layout.comparison_attribute or layout.comparison_attribute in field['attribute']):
+            comparison.append(index)
+        if finding.image:
+            observations.append((index, f'{status}\n{finding.text}\n{citation}'))
+    headers = [layout.headers.get(key, COLUMNS[key]) for key in layout.columns]
+    sections = []
+    for key in layout.order:
+        if key == 'summary':
+            body = f'Local export revision {draft.revision}. Summary wording is unverified. {draft.summary}'
+        elif key == 'references':
+            if not references or draft.format == 'xlsx':
+                continue
+            body = '\n'.join(f'[{n}] {source}' for source, n in references.items())
+        elif key == 'visual':
+            if not observations or draft.format == 'xlsx':
+                continue
+            body = '\n\n'.join(text for _, text in observations)
+        else:
+            body = f'Editorial wording is unverified. {layout.notes.get(key, "")}'
+        sections.append({'heading': layout.headings.get(key, HEADINGS[key]), 'body': body})
     # Exact values stay as strings, preserving signs, decimal precision and units.
     if draft.format == 'xlsx':
+        summary = '\n'.join(f'{section["heading"]}\n{section["body"]}' for section in sections)
         return XlsxReportInput(filename='report.xlsx', title=draft.title, headers=headers, rows=rows,
-                               summary_notes=f'Local export revision {draft.revision}. {draft.summary}')
-    sections = [{'heading': 'Executive summary',
-                 'body': f'Local export revision {draft.revision}. Summary wording is unverified. {draft.summary}'}]
-    if references:
-        sections.append({'heading': 'Source references', 'body': '\n'.join(f'[{n}] {source}' for source, n in references.items())})
-    return DocxCreateInput(filename='report.docx', title=draft.title, sections=sections,
-                           tables=[{'headers': headers, 'rows': rows}])
+                               summary_notes=summary or f'Local export revision {draft.revision}.',
+                               comparison_rows=comparison if layout.comparison and comparison else None)
+    if 'summary' not in layout.order:
+        sections.insert(0, {'heading': '', 'body': f'Local export revision {draft.revision}.'})
+    visual_indices = {index for index, _ in observations} if 'visual' in layout.order else set()
+    tables = [{'headers': headers, 'rows': [row for index, row in enumerate(rows) if index not in visual_indices]}]
+    if layout.comparison and comparison:
+        selected = [rows[index] for index in comparison]
+        tables.append({'headers': [f'Comparison - {headers[0]}', *headers[1:]], 'rows': selected})
+    return DocxCreateInput(filename='report.docx', title=draft.title, sections=sections, tables=tables)
 
 
 def generate_in_worker(kind, data):

@@ -44,9 +44,12 @@ def test_direct_and_automatic_verified_calculations(workbench, capsys, monkeypat
             monkeypatch.setattr(workbench.state.model_router.get_provider('ollama'), 'chat_stream', plain)
             _, _, calls = record_calls(workbench, monkeypatch)
             greeting = await new_turn(client, message='Hello!')
-            assert [event['type'] for event in parse_events(await client.post('/api/chat', json=greeting))] == [
-                'accepted', 'delta', 'delta', 'done',
+            greeting_events = parse_events(await client.post('/api/chat', json=greeting))
+            assert [event['type'] for event in greeting_events] == [
+                'accepted', 'agent_status', 'delta', 'done',
             ]
+            assert greeting_events[1]['content'] == 'awaiting_model'
+            assert greeting_events[2]['content'] == 'A conversational answer.'
             assert len(requests) == 1 and calls == []
             single = {**greeting, 'turn_id': str(uuid4()), 'message': 'What is 25 + 17?'}
             reply = await client.post('/api/chat', json={**single, 'stream': False})

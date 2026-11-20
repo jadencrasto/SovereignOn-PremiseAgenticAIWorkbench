@@ -68,7 +68,7 @@ const reasons: Record<string, string> = {
   invalid_model_inventory: 'Ollama returned an invalid or oversized inventory.',
   ollama_check_failed: 'Could not read the local Ollama inventory.',
   configured_model_missing: 'The configured model was not listed by Ollama.',
-  model_listed: 'The configured model was listed by Ollama.',
+  model_listed: 'Ollama listed the model. Sending a request checks whether it responds.',
   local_text_chat_only: 'This profile supports text chat only.',
   component_not_initialized: 'A required backend component is not initialized.',
   prerequisites_observed: 'Required models were listed. Inference was not checked.',

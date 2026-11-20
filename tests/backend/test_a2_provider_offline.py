@@ -7,6 +7,7 @@ import httpx
 from backend.agent.engine import AgentEngine
 from backend.models.base import ChatChunk, ChatRequest, Message
 from backend.models.ollama_provider import OllamaProvider
+from test_a22_async_offline import run_offline
 
 
 def immediate(coro):
@@ -92,17 +93,15 @@ def test_ollama_vision_serialization_and_model_mismatch(monkeypatch):
 def test_provider_stream_completion_and_interruption(monkeypatch):
     async def collect(obj): return [c async for c in obj.chat_stream(request())]
     lines = [json.dumps(reply('Hi')), json.dumps(reply('!', done=True))]
-    chunks = immediate(collect(provider(monkeypatch, FakeResponse(lines=lines))))
+    chunks = run_offline(collect(provider(monkeypatch, FakeResponse(lines=lines))))
     assert [(c.delta, c.done) for c in chunks] == [('Hi', False), ('!', True)]
     with pytest.raises(RuntimeError, match='interrupted'):
-        immediate(collect(provider(monkeypatch, FakeResponse(lines=lines[:1]))))
+        run_offline(collect(provider(monkeypatch, FakeResponse(lines=lines[:1]))))
     with pytest.raises(RuntimeError, match='Invalid'):
-        immediate(collect(provider(monkeypatch, FakeResponse(lines=['not json']))))
+        run_offline(collect(provider(monkeypatch, FakeResponse(lines=['not json']))))
 
 
 def test_ollama_chat_request_and_fragmented_ndjson():
-    from test_a22_async_offline import run_offline
-
     class FragmentedReply(httpx.AsyncByteStream):
         async def __aiter__(self):
             first = json.dumps(reply('Ready.')).encode()
@@ -143,7 +142,7 @@ def test_truncated_terminal_reason_is_not_a_completed_answer(monkeypatch):
         immediate(provider(monkeypatch, FakeResponse(truncated)).chat(request()))
     async def collect(obj): return [chunk async for chunk in obj.chat_stream(request())]
     with pytest.raises(RuntimeError, match='Incomplete'):
-        immediate(collect(provider(monkeypatch, FakeResponse(lines=[json.dumps(truncated)]))))
+        run_offline(collect(provider(monkeypatch, FakeResponse(lines=[json.dumps(truncated)]))))
 
 
 @pytest.mark.parametrize('bad_model', [None, '', 'different:latest', 'fake:other'])
@@ -170,7 +169,7 @@ def test_provider_rejects_non_assistant_messages(monkeypatch, message):
 
     nonterminal = {**terminal, 'done': False}
     with pytest.raises(RuntimeError, match='Invalid model response'):
-        immediate(next_chunk(provider(monkeypatch, FakeResponse(lines=[json.dumps(nonterminal)]))))
+        run_offline(next_chunk(provider(monkeypatch, FakeResponse(lines=[json.dumps(nonterminal)]))))
 
 
 @pytest.mark.parametrize('terminal', [reply('', done=True, done_reason='length'),
@@ -178,7 +177,6 @@ def test_provider_rejects_non_assistant_messages(monkeypatch, message):
                                       reply('', done=True, message={'role': 'user', 'content': 'untrusted text'})])
 def test_invalid_provider_completion_never_emits_done(tmp_path, monkeypatch, terminal):
     from test_a21_conversation_offline import make_app, setup_engine
-    from test_a22_async_offline import run_offline
     engine, _ = setup_engine(tmp_path)
     lines = [json.dumps(reply('Partial response before cutoff')), json.dumps(terminal)]
     fake_provider = provider(monkeypatch, FakeResponse(lines=lines))
@@ -215,7 +213,7 @@ def test_provider_closes_line_iterator_on_consumer_cancellation(monkeypatch):
         stream = provider(monkeypatch, Response()).chat_stream(request())
         assert (await stream.__anext__()).delta == 'partial'
         await stream.aclose()
-    immediate(exercise())
+    run_offline(exercise())
     assert closed == [True]
 
 

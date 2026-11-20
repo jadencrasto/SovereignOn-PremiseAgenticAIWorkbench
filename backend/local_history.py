@@ -226,6 +226,44 @@ class LocalHistoryStore:
             return {sid: _strict_json(data) for sid, data in
                     conn.execute("SELECT id, snapshot FROM local_history_transcripts ORDER BY id")}
 
+    def workflow_page(self, owner, status, query, limit, offset):
+        if owner != self.owner:
+            raise PermissionError("Local history access denied.")
+        # Project only the requested page. Keep this reader outside the transcript
+        # writer's transaction and never deserialize message histories for the list.
+        with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as conn:
+            return conn.execute("""
+                WITH workflows AS (
+                    SELECT t.id AS session_id, m.value ->> '$.id' AS turn_id,
+                        t.snapshot ->> '$.title' AS title, m.value ->> '$.content' AS objective,
+                        m.value ->> '$.local_turn_v1.state' AS state,
+                        m.value ->> '$.created_at' AS created_at,
+                        CASE
+                            WHEN m.key = json_array_length(t.snapshot, '$.messages') - 1
+                                THEN t.snapshot ->> '$.updated_at'
+                            WHEN m.value ->> '$.local_turn_v1.state' = 'completed'
+                                THEN json_extract(t.snapshot, '$.messages[' || (m.key + 1) || '].created_at')
+                            ELSE m.value ->> '$.created_at'
+                        END AS updated_at
+                    FROM local_history_transcripts t
+                    JOIN conversation_security_registry r ON r.conversation_id = t.id
+                        AND r.generation = t.snapshot ->> '$.conversation_generation'
+                        AND r.state = 'active' AND r.owner_id = ?
+                    CROSS JOIN json_each(t.snapshot, '$.messages') m
+                    WHERE t.snapshot ->> '$.owner_id' = r.owner_id
+                        AND m.value ->> '$.role' = 'user'
+                        AND (json_type(m.value, '$.local_turn_v1.workflow_intake') = 'object'
+                          OR json_type(m.value, '$.local_turn_v1.draft_scope') = 'object')
+                )
+                SELECT session_id, turn_id, title, substr(objective, 1, 180),
+                    state, created_at, updated_at
+                FROM workflows
+                WHERE (? = '' OR state = ?)
+                  AND (instr(lower(objective), ?) > 0 OR instr(lower(coalesce(title, '')), ?) > 0 OR ? = '')
+                ORDER BY updated_at DESC, created_at DESC, session_id DESC, turn_id DESC
+                LIMIT ? OFFSET ?
+                """, (owner, status, status, query, query, query, limit, offset)).fetchall()
+
     def save(self, snapshot):
         with self.borrow_connection() as conn:
             stored = dict(conn.execute("SELECT id, snapshot FROM local_history_transcripts"))

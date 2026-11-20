@@ -11,8 +11,10 @@ from fastapi.responses import Response
 from backend.api.local_chat import _require_local_viewer
 from backend.auth.dependencies import get_current_user
 from backend.tools.local_draft_export import MIME, generate_export
+from backend.tools.local_draft_refinement import safe_wording
 from backend.tools.local_drafts import (
-    DraftConflict, DraftEdit, DraftRevision, check_evidence, draft_origin, draft_reply, export_bytes,
+    COLUMNS, HEADINGS, DraftConflict, DraftEdit, DraftLayout, DraftOperation, DraftRevision,
+    check_evidence, draft_origin, draft_reply, export_bytes, revised_draft, revision_linked,
 )
 
 router = APIRouter(prefix='/api/chat/sessions/{session_id}/drafts')
@@ -34,31 +36,46 @@ def _owned(request, user, session_id):
     return state, identity
 
 
-def _draft(request, user, session_id, draft_id):
+def _draft(request, user, session_id, draft_id, *, allow_pending=False):
     state, identity = _owned(request, user, session_id)
     row = state.local_drafts.records.get(draft_id)
     if (row is None or (row.session, row.generation) != (session_id, identity[1])
             or not draft_origin(state.engine._memory, session_id, row)):
         raise HTTPException(404, 'Draft not found.')
+    if not allow_pending and not revision_linked(state, identity, row):
+        raise HTTPException(409, 'Retry the interrupted refinement before changing this draft.')
     return state, identity, row
 
 
-def _preview(state, identity, draft):
+def _preview(state, identity, draft, *, historical=False, pending=False):
     stale = check_evidence(state, draft.session, identity, draft)
     approved = state.local_drafts.is_approved(draft)
     state_name = ('cancelled' if draft.cancelled else 'stale' if stale else 'draft' if not approved else
-                  'exported' if draft.exported else 'approved')
+                  'exported' if (draft.exported or historical and draft.export_digest) else 'approved')
     job = state.local_export_job
     workflow = {}
-    if not draft.evidence:
+    if not draft.evidence and not draft.baseline_replaced:
         reply = draft_reply(state.engine._memory, draft.session, draft)
         if reply is not None:
             workflow = {'workflow_steps': reply.extra_fields['local_workflow']['steps']}
+    layout = draft.layout or DraftLayout()
+    change = draft.change
     return {
         'id': draft.id, 'turn_id': draft.turn_id, 'format': draft.format, 'revision': draft.revision,
         'title': draft.title, 'summary': draft.summary, 'state': state_name,
         'export_digest': draft.export_digest if state_name == 'exported' else None,
         'exporting': bool(job and job.draft_id == draft.id and job.revision == draft.revision and not job.cancelled),
+        'historical': historical, 'pending_revision': pending,
+        'available_formats': list(MIME),
+        'revision_turn_id': change.turn_id if change else None,
+        'history': [row.revision for row in state.local_drafts.history.get(draft.id, []) if row.revision < draft.revision],
+        'change': ({'parent': change.parent, 'operation': change.operation.kind, 'created_at': change.created_at,
+                    'sections': [HEADINGS[section] for section in change.sections], 'added': change.added,
+                    'removed': change.removed, 'unverified': change.unverified} if change else None),
+        'layout': {'sections': [{'id': key, 'heading': layout.headings.get(key, HEADINGS[key]),
+                                 'wording': (layout.notes.get(key) or None) if not stale else None} for key in layout.order],
+                   'columns': [layout.headers.get(key, COLUMNS[key]) for key in layout.columns],
+                   'comparison': layout.comparison, 'inline_references': layout.inline_references},
         **workflow,
         'findings': [
             {'topic': 'Prior evidence', 'text': 'Evidence has changed or was removed. Create a new draft to use current evidence.',
@@ -93,8 +110,28 @@ def _save(state, draft=None, *, remove=()):
 @router.get('')
 async def list_drafts(session_id: str, request: Request, user=Depends(get_current_user)):
     state, identity = _owned(request, user, session_id)
-    return {'drafts': [_preview(state, identity, draft) for draft in state.local_drafts.owned(session_id, identity)
-                       if draft_origin(state.engine._memory, session_id, draft)]}
+    previews = []
+    for draft in state.local_drafts.owned(session_id, identity):
+        if not draft_origin(state.engine._memory, session_id, draft):
+            continue
+        if revision_linked(state, identity, draft):
+            previews.append(_preview(state, identity, draft))
+        else:
+            archived = state.local_drafts.history.get(draft.id, [])
+            if archived and revision_linked(state, identity, archived[-1]):
+                previews.append(_preview(state, identity, archived[-1], historical=True, pending=True))
+    return {'drafts': previews}
+
+
+@router.get('/{draft_id}/revisions/{revision}')
+async def read_revision(session_id: str, draft_id: str, revision: int, request: Request, user=Depends(get_current_user)):
+    state, identity, current = _draft(request, user, session_id, draft_id)
+    if revision == current.revision:
+        return _preview(state, identity, current)
+    for row in state.local_drafts.history.get(draft_id, []):
+        if row.revision == revision and revision_linked(state, identity, row):
+            return _preview(state, identity, row, historical=True)
+    raise HTTPException(404, 'Draft revision is unavailable.')
 
 
 @router.patch('/{draft_id}')
@@ -106,8 +143,7 @@ async def edit_draft(session_id: str, draft_id: str, body: DraftEdit, request: R
             or any(not entry.strip() for entry in body.wording.values())):
         raise HTTPException(422, 'Enter a title and nonempty wording for existing findings.')
     text = [body.title, body.summary, *body.wording.values()]
-    if any(any((ord(c) < 32 and c not in '\t\n\r') or 0xd800 <= ord(c) <= 0xdfff or ord(c) in (0xfffe, 0xffff)
-               for c in part) for part in text):
+    if not all(map(safe_wording, text)):
         raise HTTPException(422, 'Draft wording contains unsupported characters.')
     findings = [
         finding.model_copy(update={'text': body.wording[index], 'kind': 'user_edited'})
@@ -116,12 +152,11 @@ async def edit_draft(session_id: str, draft_id: str, body: DraftEdit, request: R
     ]
     if (draft.title, draft.summary, draft.findings) == (body.title, body.summary, findings):
         return _preview(state, identity, draft)
-    if draft.revision >= 2**31 - 1:
-        raise HTTPException(409, 'This draft has reached its revision limit.')
-    updated = draft.model_copy(update={
-        'revision': draft.revision + 1, 'title': body.title, 'summary': body.summary,
-        'findings': findings, 'approval': None, 'exported': None, 'export_digest': None,
-    })
+    try:
+        updated = revised_draft(draft, DraftOperation(kind='manual'), title=body.title, summary=body.summary,
+                               findings=findings, sections=['summary'] if body.summary != draft.summary else [])
+    except DraftConflict as exc:
+        raise HTTPException(409, str(exc)) from None
     _save(state, updated)
     return _preview(state, identity, updated)
 
@@ -234,7 +269,10 @@ async def download_draft(session_id: str, draft_id: str, request: Request, revis
 @router.delete('/{draft_id}')
 async def remove_draft(session_id: str, draft_id: str, request: Request, revision: int = Query(ge=1),
                        user=Depends(get_current_user)):
-    state, _, draft = _draft(request, user, session_id, draft_id)
-    _require_revision(draft, revision)
+    state, identity, draft = _draft(request, user, session_id, draft_id, allow_pending=True)
+    if revision_linked(state, identity, draft):
+        _require_revision(draft, revision)
+    elif not draft.change or draft.change.parent != revision:
+        raise HTTPException(409, 'Review the current draft revision.')
     _save(state, remove=(draft.id,))
     return {'removed': True}

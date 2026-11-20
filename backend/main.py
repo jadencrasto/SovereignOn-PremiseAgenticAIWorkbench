@@ -548,6 +548,7 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
         with history.transaction():
             image_sessions = registry.rows()
         app.state.local_images.prune_revoked(image_sessions)
+        app.state.local_knowledge.prune_revoked(image_sessions)
         app.state.local_drafts = LocalDrafts(history.owner, retention.root / "artifacts", history.keys)
         active = {(row['conversation_id'], row['generation']) for row in image_sessions
                   if row['state'] == 'active' and row['owner_id'] == history.owner}
@@ -1074,6 +1075,7 @@ def create_app(custom_settings: Optional[Settings] = None, *, local_frontend: Pa
     if local:
         from backend.api.local_chat import router as local_chat_router
         from backend.api.local_drafts import router as local_draft_router
+        from backend.api.local_workflows import router as local_workflow_router
         from backend.local_dev import install_http_boundary
 
         local_paths = {
@@ -1089,6 +1091,7 @@ def create_app(custom_settings: Optional[Settings] = None, *, local_frontend: Pa
         ]))
         app.include_router(local_chat_router)
         app.include_router(local_draft_router)
+        app.include_router(local_workflow_router)
         install_http_boundary(app, active_settings, local_frontend)
         return app
 

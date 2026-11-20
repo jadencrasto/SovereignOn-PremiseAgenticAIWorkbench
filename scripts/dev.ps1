@@ -3,7 +3,7 @@ param([string]$Python)
 $ErrorActionPreference = 'Stop'
 
 if ($env:SOVEREIGNAI_RUN_PROFILE -cne 'local_dev') {
-    throw 'Development launcher disabled: R5.5 independent pre-resume observer handoff, descendant cleanup, and listener ownership are not verified. Set SOVEREIGNAI_RUN_PROFILE=local_dev to opt in to foreground text chat.'
+    throw 'Development launcher disabled: R5.5 independent pre-resume observer handoff, descendant cleanup, and listener ownership are not verified. Set SOVEREIGNAI_RUN_PROFILE=local_dev to opt in to the foreground local workbench.'
 }
 
 $root = Split-Path -Parent $PSScriptRoot

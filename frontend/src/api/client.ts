@@ -150,6 +150,7 @@ export async function streamSSE(
               ((['planning', 'drafting', 'retrieving_evidence', 'comparing_evidence'].includes(chunk.content) &&
                 chunk.tool === undefined) ||
                (visionTurn && chunk.content === 'analyzing_image' && chunk.tool === undefined) ||
+               (!visionTurn && chunk.content === 'awaiting_model' && chunk.tool === undefined) ||
                (!visionTurn && chunk.content === 'tool_selected' && (approvedTool || chunk.tool === undefined))) &&
               chunk.tool_args === undefined && chunk.summary === undefined;
             const localTool = !visionTurn && (chunk.type === 'tool_start' || chunk.type === 'tool_result') &&

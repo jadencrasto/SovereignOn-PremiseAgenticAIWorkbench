@@ -64,6 +64,17 @@ export async function streamLocalClarification(
     { ...turn, image_id: reply.usesImage ? 'attached' : undefined });
 }
 
+export function uploadClarificationAttachment(
+  turn: { session_id: string; turn_id: string }, revision: number,
+  kind: 'document' | 'image', file: File, signal: AbortSignal,
+) {
+  const root = `/api/chat/sessions/${encodeURIComponent(turn.session_id)}/turns/${encodeURIComponent(turn.turn_id)}`;
+  const query = new URLSearchParams({ revision: String(revision), kind, filename: file.name });
+  return apiRequest<{ turn: LocalTurnState }>(`${root}/clarify/attachment?${query}`, {
+    method: 'POST', body: file, signal, headers: { 'Content-Type': 'application/octet-stream' }, cache: 'no-store',
+  });
+}
+
 /**
  * Phase 5: Multimodal streaming chat.
  *

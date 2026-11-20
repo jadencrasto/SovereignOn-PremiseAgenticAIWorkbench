@@ -14,10 +14,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from starlette.requests import ClientDisconnect
 
 from backend.agent.engine import LocalToolError
-from backend.agent.memory import LocalTurnConflict, public_local_turn
-from backend.agent.workflow_intake import ClarificationReply, WorkflowIntake, clarify_intake, make_intake
+from backend.agent.memory import LocalTurnConflict, is_local_workflow, public_local_turn
+from backend.agent.workflow_intake import (
+    MAX_CLARIFICATION_REVISION, ClarificationReply, WorkflowIntake, clarify_intake, make_intake,
+)
 from backend.api.chat import StreamingResponse
 from backend.auth.dependencies import get_current_user
 from backend.auth.request_context import dispatch_identity_resolver, request_tools_enabled
@@ -26,10 +29,12 @@ from backend.multimodal.local_images import MAX_IMAGE_BYTES, LocalImageRef, imag
 from backend.multimodal.text_file import MAX_TEXT_FILE_BYTES, TextFileError
 from backend.rag.local_documents import MAX_DOCUMENT_BYTES, document_format, import_document, validate_document_upload
 from backend.rag.local_knowledge import (
-    KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeQuestionError, KnowledgeScope, knowledge_question, question_parts,
+    KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeQuestionError, KnowledgeScope, ScopedSource,
+    knowledge_question, question_parts,
 )
 from backend.schemas.chat import ChatMessage, ChatRequest, ChatResponse, MessageRole
-from backend.tools.local_drafts import DraftScope, _json, artifact_clauses, artifact_intent, evidence_messages, resolve_evidence
+from backend.tools.local_draft_refinement import admit_refinement, follows_draft, parse_refinement
+from backend.tools.local_drafts import DraftConflict, DraftScope, _json, artifact_clauses, artifact_intent, evidence_messages, resolve_evidence
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat")
@@ -38,6 +43,10 @@ _ERRORS = {
     "LOCAL_DRAFT_EVIDENCE": "Choose current findings from this conversation before requesting a draft.",
     "LOCAL_DRAFT_FAILED": "The draft could not be assembled within the local limits.",
     "LOCAL_DRAFT_REQUEST": "Enable local tools and choose current sources, an image, or one to five completed evidence turns.",
+    "LOCAL_DRAFT_TARGET_INVALID": "This draft is unavailable in the current conversation.",
+    "LOCAL_DRAFT_STALE_REVISION": "Review the current draft revision before refining it.",
+    "LOCAL_DRAFT_EDIT_INVALID": "That edit could not be applied. Check the section, finding number, or evidence selection in Drafts.",
+    "LOCAL_DRAFT_UNSUPPORTED_EVIDENCE": "The selected sources do not support that finding. The draft is unchanged.",
     "LOCAL_WORKFLOW_BUSY": "Two local workflows are running. Wait for one to finish, then retry.",
     "LOCAL_WORKFLOW_RETRY_LIMIT": "This workflow has used its three attempts. Start a new turn to try again.",
     "LOCAL_WORKFLOW_CANCELLED": "Clarification cancelled. Start a new task to continue.",
@@ -133,10 +142,13 @@ async def read_local_knowledge(request: Request, user=Depends(get_current_user))
 
 async def _read_knowledge_upload(request, limit, message):
     payload = bytearray()
-    async for chunk in request.stream():
-        if len(payload) + len(chunk) > limit:
-            raise HTTPException(413, message)
-        payload.extend(chunk)
+    try:
+        async for chunk in request.stream():
+            if len(payload) + len(chunk) > limit:
+                raise HTTPException(413, message)
+            payload.extend(chunk)
+    except ClientDisconnect:
+        raise HTTPException(400, 'The upload connection closed before the file was received.') from None
     return bytes(payload)
 
 
@@ -168,7 +180,8 @@ async def _read_local_media(request, lock, limit, label, worker_fn, *args):
     return result
 
 
-async def _register_knowledge(request, user, filename, source_id=None, revision=None):
+async def _register_knowledge(request, user, filename, source_id=None, revision=None, *,
+                              attachment_scope=None, before_save=None):
     _owned_knowledge(request, user)
     media_type = request.headers.get('content-type', '')
     try:
@@ -177,12 +190,20 @@ async def _register_knowledge(request, user, filename, source_id=None, revision=
             projection = await _read_local_media(
                 request, request.app.state.local_document_intake, MAX_DOCUMENT_BYTES, 'document', import_document, kind,
             )
+            if before_save:
+                before_save()
             return _owned_knowledge(request, user).register_document(
-                user.id, filename, projection, source_id=source_id, revision=revision,
+                user.id, filename, projection, source_id=source_id, revision=revision, attachment_scope=attachment_scope,
             )
-        payload = await _read_knowledge_upload(request, MAX_TEXT_FILE_BYTES, "The text file exceeds 2 KiB.")
+        payload = await asyncio.wait_for(
+            _read_knowledge_upload(request, MAX_TEXT_FILE_BYTES, "The text file exceeds 2 KiB."), timeout=15,
+        )
+        if before_save:
+            if await request.is_disconnected():
+                raise HTTPException(400, 'The local document upload was disconnected.')
+            before_save()
         return _owned_knowledge(request, user).register(
-            user.id, filename, payload, media_type, source_id=source_id, revision=revision,
+            user.id, filename, payload, media_type, source_id=source_id, revision=revision, attachment_scope=attachment_scope,
         )
     except TextFileError as exc:
         raise HTTPException(exc.status, str(exc)) from None
@@ -190,6 +211,8 @@ async def _register_knowledge(request, user, filename, source_id=None, revision=
         raise HTTPException(404, "Local knowledge source not found.") from None
     except KnowledgeConflict as exc:
         raise HTTPException(409, str(exc)) from None
+    except TimeoutError:
+        raise HTTPException(408, 'The local document upload timed out.') from None
     except (OSError, ValueError):
         raise HTTPException(503, "Local knowledge could not be saved.") from None
 
@@ -239,6 +262,11 @@ async def list_local_images(session_id: str, request: Request, user=Depends(get_
 @router.post("/sessions/{session_id}/images", status_code=201)
 async def upload_local_image(session_id: str, request: Request, filename: str = Query(min_length=1, max_length=128),
                              user=Depends(get_current_user)):
+    ref = await _register_image(session_id, request, user, filename)
+    return JSONResponse(ref.attachment(True), status_code=201, headers={"Cache-Control": "no-store"})
+
+
+async def _register_image(session_id, request, user, filename, *, turn_id=None, before_save=None):
     images, identity = _owned_images(request, user, session_id)
     try:
         kind = image_format(filename)
@@ -250,8 +278,9 @@ async def upload_local_image(session_id: str, request: Request, filename: str = 
         current_store, current_identity = _owned_images(request, user, session_id)
         if current_store is not images or current_identity != identity:
             raise HTTPException(404, "Conversation not found.")
-        return JSONResponse(images.register(session_id, identity, ref, encoded).attachment(True), status_code=201,
-                            headers={"Cache-Control": "no-store"})
+        if before_save:
+            before_save()
+        return images.register(session_id, identity, ref, encoded, turn_id=turn_id)
     except TextFileError as exc:
         raise HTTPException(exc.status, str(exc)) from None
     except OSError:
@@ -407,7 +436,8 @@ class LocalChatRun:
     def image_payload(self):
         self.check_access()
         try:
-            ref, payload = self.app_state.local_images.get(self.session_id, self.identity, self.image_ref.image_id)
+            ref, payload = self.app_state.local_images.get(self.session_id, self.identity, self.image_ref.image_id,
+                                                           turn_id=self.turn_id)
         except KeyError:
             raise LocalToolError('LOCAL_IMAGE_UNAVAILABLE') from None
         if ref != self.image_ref:
@@ -570,6 +600,7 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
     image_ref = None
     draft_scope = None
     intake = None
+    refinement = False
     try:
         identity = memory.stream_identity(session_id)
         try:
@@ -582,7 +613,38 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
             previous = runs.reconcile(memory, session_id, identity, turn_id, previous)
         images = app_state.local_images
         corpus = app_state.local_knowledge
-        if previous and 'workflow_intake' in previous:
+        saved_draft = (DraftScope.model_validate(previous['draft_scope']['scope'])
+                       if previous and 'draft_scope' in previous else None)
+        try:
+            operation = parse_refinement(body.message) if previous is None else None
+        except ValueError as exc:
+            raise DraftConflict('Use an existing finding number and bounded wording for the draft edit.') from exc
+        if operation and not body.draft_target and not follows_draft(memory, session_id, body.message):
+            operation = None
+        if (saved_draft and saved_draft.refinement) or operation or body.draft_target:
+            resolver = dispatch_identity_resolver.get()
+            viewer = resolver() if resolver else None
+            if viewer is None or viewer.id != app_state.local_viewer_id or viewer.role != 'viewer':
+                raise PermissionError('Draft access denied')
+            if body.image_id or preview or not body.tools_enabled or not body.planning_enabled:
+                raise DraftConflict('Refine the draft in chat using completed evidence turns for image observations.')
+            if saved_draft and (plan := saved_draft.refinement):
+                if ((body.draft_target and body.draft_target != plan.target)
+                        or (selection is not None and (not plan.sources or not plan.sources.matches_selection(selection)))
+                        or (body.draft_turn_ids is not None and body.draft_turn_ids != saved_draft.selection)):
+                    raise LocalTurnConflict('This turn is already bound to a different draft refinement.')
+                draft_scope = saved_draft
+            elif previous is not None:
+                raise LocalTurnConflict('This turn is already bound to a different task.')
+            elif operation is None:
+                raise DraftConflict('Try an edit such as Shorten the summary or Change the format to XLSX.')
+            else:
+                draft_scope = admit_refinement(app_state, session_id, identity, operation, body.draft_target,
+                                               selection, body.draft_turn_ids)
+            if attempt > 3:
+                raise LocalTurnConflict(_ERRORS['LOCAL_WORKFLOW_RETRY_LIMIT'])
+            refinement = True
+        elif previous and 'workflow_intake' in previous:
             intake = WorkflowIntake.model_validate(previous['workflow_intake']['intake'])
             model = previous['model']
             if clarification is not None:
@@ -594,7 +656,8 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
                     raise HTTPException(409, str(exc), headers={"X-Error-Code": "TURN_CONFLICT"}) from None
                 if not intake.choose_sources:
                     corpus.check_scope(identity[0], intake.scope)
-                if intake.image is not None and images.get(session_id, identity, intake.image.image_id)[0] != intake.image:
+                if (intake.image is not None and
+                        images.get(session_id, identity, intake.image.image_id, turn_id=turn_id)[0] != intake.image):
                     raise KeyError(intake.image.image_id)
             elif (selection is not None and not intake.scope.matches_selection(selection)
                   or body.image_id is not None and (intake.image is None or body.image_id != intake.image.image_id)):
@@ -607,7 +670,8 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
                 prior = [turn for turn, _, _, visual in evidence_messages(memory, session_id) if not visual]
                 prior_evidence = bool(prior and re.search(r'\b(?:compar\w*|contrast|differences?)\b', prior[-1].content, re.I))
             try:
-                chosen_image = images.get(session_id, identity, body.image_id)[0] if _valid_turn_id(body.image_id) else None
+                chosen_image = (images.get(session_id, identity, body.image_id, turn_id=turn_id)[0]
+                                if _valid_turn_id(body.image_id) else None)
                 intake = make_intake(app_state, session_id, identity, body.message, selection, chosen_image,
                                      output_format, prior_evidence=bool(prior_evidence)) if not body.image_id or chosen_image else None
             except KeyError as exc:
@@ -623,7 +687,7 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
                 raise PermissionError('Local workflow unavailable')
             if attempt > 3:
                 raise LocalTurnConflict(_ERRORS["LOCAL_WORKFLOW_RETRY_LIMIT"])
-            if not intake.scope.sources:
+            if not intake.scope.sources and not intake.choose_sources:
                 raise HTTPException(422, "Import an authorized local document before comparing sources.",
                                     headers={"X-Error-Code": "LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE"})
             if not intake.reason:
@@ -632,16 +696,16 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
                     draft_scope = DraftScope(format=intake.format, evidence=[], workflow=True)
                 if previous is None or attempt > previous['attempt'] or clarification is not None:
                     corpus.check_scope(identity[0], scope)
-                    if image_ref and images.get(session_id, identity, image_ref.image_id)[0] != image_ref:
+                    if image_ref and images.get(session_id, identity, image_ref.image_id, turn_id=turn_id)[0] != image_ref:
                         raise KeyError(image_ref.image_id)
                     if image_ref and any(run.image_ref is not None and not run.task.done() for run in runs.active.values()):
                         raise HTTPException(409, _ERRORS["LOCAL_VISION_BUSY"], headers={"X-Error-Code": "LOCAL_VISION_BUSY"})
         elif previous and 'image' in previous:
             image_ref = LocalImageRef.model_validate(previous['image']['ref'])
-        if intake is None and previous and body.image_id != (image_ref.image_id if image_ref else None):
+        if not refinement and intake is None and previous and body.image_id != (image_ref.image_id if image_ref else None):
             raise LocalTurnConflict('Turn ID is already bound to a different image.')
         new_attempt = previous is None or attempt > previous['attempt']
-        if intake is None and (output_format or body.draft_turn_ids is not None):
+        if not refinement and intake is None and (output_format or body.draft_turn_ids is not None):
             from backend.agent.local_workflow import workflow_parts, workflows_with_sources
 
             workflow = output_format is not None and body.draft_turn_ids is None and (
@@ -682,13 +746,13 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
                     code = 'LOCAL_DRAFT_EVIDENCE'
                     raise HTTPException(409, _ERRORS[code], headers={"X-Error-Code": code})
                 draft_scope = DraftScope(format=output_format, selection=body.draft_turn_ids, evidence=ids)
-        if intake is None and body.image_id is not None:
+        if not refinement and intake is None and body.image_id is not None:
             if not _valid_turn_id(body.image_id) or (
                     (selection is not None or question is not None) and not (draft_scope and draft_scope.workflow)):
                 code = 'LOCAL_IMAGE_REQUEST_INVALID'
                 raise HTTPException(422, _ERRORS[code], headers={"X-Error-Code": code})
             if new_attempt:
-                stored, _ = images.get(session_id, identity, body.image_id)
+                stored, _ = images.get(session_id, identity, body.image_id, turn_id=turn_id)
                 if image_ref is not None and image_ref != stored:
                     raise KeyError(body.image_id)
                 image_ref = stored
@@ -697,7 +761,7 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
         elif intake is None and previous is None and draft_scope is None and question is None and refers_to_image(body.message):
             code = 'LOCAL_IMAGE_AMBIGUOUS' if len(images.list(session_id, identity)) > 1 else 'LOCAL_IMAGE_REQUIRED'
             raise HTTPException(422, _ERRORS[code], headers={"X-Error-Code": code})
-        if intake is None and previous is None and question is not None:
+        if not refinement and intake is None and previous is None and question is not None:
             if not (draft_scope and draft_scope.workflow):
                 question_parts(question)
             try:
@@ -705,7 +769,7 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
             except KeyError:
                 raise HTTPException(404, "One or more selected local sources are unavailable.",
                                     headers={"X-Error-Code": "LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE"}) from None
-        elif intake is None and previous is not None:
+        elif not refinement and intake is None and previous is not None:
             if 'knowledge_scope' in previous:
                 scope = KnowledgeScope.model_validate(previous['knowledge_scope']['scope'])
                 if not scope.matches_selection(selection):
@@ -726,7 +790,7 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
         tools_enabled = (image_ref is None or bool(draft_scope and draft_scope.workflow)) and bool(
             body.tools_enabled and body.planning_enabled
         )
-        if (workflow and new_attempt and previous
+        if (new_attempt and previous and is_local_workflow(previous)
                 and previous.get('error_code') in ('LOCAL_TOOL_UNAUTHORIZED', 'CONVERSATION_UNAVAILABLE')):
             raise HTTPException(403, 'This failure cannot be retried. Start a new task if access has changed.')
         if preview or body.workflow_preview and previous is None:
@@ -748,6 +812,8 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
         raise HTTPException(404, "Conversation not found") from None
     except LocalTurnConflict as exc:
         raise HTTPException(409, str(exc), headers={"X-Error-Code": "TURN_CONFLICT"}) from None
+    except DraftConflict as exc:
+        raise HTTPException(409, str(exc), headers={"X-Error-Code": "LOCAL_DRAFT_TARGET_REQUIRED"}) from None
     except KnowledgeQuestionError:
         raise HTTPException(422, _ERRORS["LOCAL_KNOWLEDGE_QUESTION"],
                             headers={"X-Error-Code": "LOCAL_KNOWLEDGE_QUESTION"}) from None
@@ -790,7 +856,9 @@ async def submit_local_chat(body, request, engine, model_router, *, clarificatio
                   "LOCAL_TOOL_ABSOLUTE_ZERO": 422,
                   "LOCAL_TOOL_CONFIRMATION_REQUIRED": 403,
                   "LOCAL_KNOWLEDGE_CHANGED": 409, "LOCAL_KNOWLEDGE_QUESTION": 422,
-                  "LOCAL_IMAGE_UNAVAILABLE": 409,
+                  "LOCAL_IMAGE_UNAVAILABLE": 409, "LOCAL_DRAFT_TARGET_INVALID": 404,
+                  "LOCAL_DRAFT_STALE_REVISION": 409, "LOCAL_DRAFT_EDIT_INVALID": 422,
+                  "LOCAL_DRAFT_UNSUPPORTED_EVIDENCE": 422,
                   "LOCAL_TOOL_CHANGED_PLAN": 409}.get(extra["error_code"], 503)
         if record["state"] == "cancelled":
             status = 409
@@ -835,6 +903,41 @@ async def clarify_local_workflow(session_id: str, turn_id: str, reply: Clarifica
     body = ChatRequest(session_id=session_id, turn_id=turn_id, attempt=record['attempt'], message=original,
                        model=record['model'])
     return await submit_local_chat(body, request, state.engine, state.model_router, clarification=reply)
+
+
+@router.post('/sessions/{session_id}/turns/{turn_id}/clarify/attachment', status_code=201)
+async def upload_clarification_attachment(
+    session_id: str, turn_id: str, request: Request, kind: Literal['document', 'image'],
+    revision: int = Query(ge=1, le=MAX_CLARIFICATION_REVISION),
+    filename: str = Query(min_length=1, max_length=128), user=Depends(get_current_user),
+):
+    state = _require_local_viewer(request, user)
+    memory = state.engine._memory
+    try:
+        identity = memory.stream_identity(session_id)
+
+        def check_pause():
+            memory.pending_attachment(session_id, identity, turn_id, revision, kind)
+
+        check_pause()
+        if kind == 'document':
+            if not filename.lower().endswith(('.txt', '.md')) and not document_format(filename):
+                raise HTTPException(415, 'Choose a TXT, Markdown, PDF, DOCX or XLSX document.')
+            source = await _register_knowledge(request, user, filename,
+                                               attachment_scope=(session_id, identity[1], turn_id), before_save=check_pause)
+            attachment = ScopedSource.model_validate({key: source[key] for key in ('source_id', 'revision', 'digest', 'label')})
+            details = source
+        else:
+            attachment = await _register_image(session_id, request, user, filename, turn_id=turn_id, before_save=check_pause)
+            details = attachment.attachment(True)
+        turn = memory.record_clarification_attachment(session_id, identity, turn_id, revision, kind, attachment)
+    except (KeyError, PermissionError):
+        raise HTTPException(404, 'Conversation turn not found.') from None
+    except LocalTurnConflict as exc:
+        raise HTTPException(409, str(exc), headers={'X-Error-Code': 'TURN_CONFLICT'}) from None
+    except (OSError, ValueError, sqlite3.Error):
+        raise HTTPException(503, 'The attachment could not be saved to this clarification.') from None
+    return JSONResponse({'turn': turn, 'attachment': details}, status_code=201, headers={'Cache-Control': 'no-store'})
 
 
 @router.post("/sessions/{session_id}/turns/{turn_id}/attempts/{attempt}/cancel")

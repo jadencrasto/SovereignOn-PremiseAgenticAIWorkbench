@@ -80,7 +80,7 @@ def new_viewer() -> tuple[User, str]:
 
 def announce_viewer(password: str, mode: str) -> None:
     print(
-        f"Local development · non-production · text chat only · history {mode}\n"
+        f"Local development · non-production workbench · history {mode}\n"
         f"Sign in as local_dev with this run's password: {password}",
         flush=True,
     )

@@ -5,7 +5,8 @@ const React={createElement:(type,props,...children)=>({type,props:{...props,chil
 const mocksApi={fetchSessions:async()=>({sessions:ids,count:ids.length}),fetchSession:async id=>{if(!records[id])throw Error('unavailable');return records[id]},legacyExportAllowed:async()=>({allowed:false}),clearSession:async id=>{deleted.push(id);delete records[id];ids=ids.filter(x=>x!==id)},renameSession:async(id,title)=>{renamed.push([id,title]);records[id].title=title;return {title}}};
 const history={loadOwnedHistory:async(list,read,current)=>{const {sessions}=await list();if(!current())return null;const items=await Promise.all([...new Set(sessions)].map(read));return current()?items:null},deleteOwnedHistory:async(id,remove,current)=>{await remove(id);return current()}};
 class ApiError extends Error { constructor(message,status){super(message);this.status=status} }
-const mocks={react:React,'../../api/client':{ApiError},'../../api/chat':mocksApi,'./historyRequests':history,'lucide-react':new Proxy({},{get:()=>()=>null})};
+function WorkflowLibrary() {}
+const mocks={react:React,'../../api/client':{ApiError},'../../api/chat':mocksApi,'./historyRequests':history,'./WorkflowLibrary':{WorkflowLibrary},'lucide-react':new Proxy({},{get:()=>()=>null})};
 const file=path.resolve(__dirname,'../src/components/chat/ChatHistorySidebar.tsx');const out=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;const mod=new Module(file,module);mod.filename=file;mod.paths=Module._nodeModulePaths(path.dirname(file));const original=mod.require.bind(mod);mod.require=n=>Object.hasOwn(mocks,n)?mocks[n]:original(n);mod._compile(out,file);
 const props={isOpen:true,onClose(){},currentSessionId:'a',onSelectSession:s=>selected.push(s),onNewChat(){},onRenamed:(id,title)=>renamed.push(['parent',id,title])};
 function render(){cursor=0;effects=[];return mod.exports.ChatHistorySidebar(props)}
@@ -57,5 +58,25 @@ test('an explicit history selection survives a background list refresh but not d
     finishRead(records.a);
     await pending;
     assert.deepEqual(selected.map(session => session.id), closing ? [] : ['a']);
+  }
+});
+
+test('the local workflow tab shares the history drawer without reloading all conversations', async () => {
+  const previous = mocksApi.fetchSessions;
+  const onOpen = async () => {};
+  props.workflows = { onOpen, onReuse: async () => {} };
+  try {
+    const tree = await setup();
+    let loads = 0;
+    mocksApi.fetchSessions = async () => { loads++; return previous(); };
+    find(tree, node => node.type === 'button' && node.props.children.includes('Workflows')).props.onClick();
+    const workflowTree = render();
+    effects.forEach(effect => effect());
+    assert.equal(loads, 0);
+    assert.equal(find(workflowTree, node => node.type === WorkflowLibrary).props.onOpen, onOpen);
+    assert.equal(find(workflowTree, node => node.props?.role === 'group'), undefined);
+  } finally {
+    mocksApi.fetchSessions = previous;
+    delete props.workflows;
   }
 });

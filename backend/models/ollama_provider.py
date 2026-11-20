@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
-from contextlib import aclosing
+from contextlib import AsyncExitStack
 from typing import AsyncIterator, List, Optional
 
 import httpx
@@ -111,23 +111,35 @@ class OllamaProvider(BaseModelProvider):
             raise self._http_error(exc) from exc
 
     async def chat_stream(self, request: ChatRequest) -> AsyncIterator[ChatChunk]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout
         try:
-            async with asyncio.timeout(self._timeout):
-                async with self._client.stream("POST", "/api/chat", json=self._build_payload(request, stream=True)) as response:
-                    response.raise_for_status()
-                    async with aclosing(response.aiter_lines()) as lines:
-                        async for line in lines:
-                            if not line.strip():
-                                continue
-                            try:
-                                data = json.loads(line)
-                            except (ValueError, TypeError) as exc:
-                                raise RuntimeError("Invalid model response") from exc
-                            delta, done = self._decode_response(data, request.model)
-                            yield ChatChunk(delta=delta, done=done)
-                            if done:
-                                return
-                    raise RuntimeError("Model response interrupted")
+            async with AsyncExitStack() as resources:
+                async with asyncio.timeout_at(deadline):
+                    response = await resources.enter_async_context(
+                        self._client.stream("POST", "/api/chat", json=self._build_payload(request, stream=True))
+                    )
+                response.raise_for_status()
+                lines = response.aiter_lines()
+                resources.push_async_callback(lines.aclose)
+                while True:
+                    # The deadline bounds the provider request without cancelling the SSE consumer.
+                    if loop.time() >= deadline:
+                        raise TimeoutError
+                    async with asyncio.timeout_at(deadline):
+                        line = await anext(lines, None)
+                    if line is None:
+                        raise RuntimeError("Model response interrupted")
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except (ValueError, TypeError) as exc:
+                        raise RuntimeError("Invalid model response") from exc
+                    delta, done = self._decode_response(data, request.model)
+                    yield ChatChunk(delta=delta, done=done)
+                    if done:
+                        return
         except (httpx.HTTPError, TimeoutError) as exc:
             raise self._http_error(exc) from exc
 
