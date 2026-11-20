@@ -21,6 +21,7 @@ export interface ToolEvent {
 
 // Phase 5: Image attachment (client-side, no base64 in API responses)
 export interface ImageAttachment {
+  localAvailable?: boolean;
   /** UUID assigned by backend after successful upload */
   id: string;
   /** Original sanitized filename */
@@ -101,6 +102,7 @@ export interface LocalKnowledgeResult {
 
 export interface ChatMessage {
   localKnowledge?: LocalKnowledgeResult;
+  localVisual?: boolean;
   id: string;
   role: MessageRole;
   content: string;
@@ -121,7 +123,7 @@ export interface ChatMessage {
   localPreview?: boolean;
   numericSourceTurn?: number;
   numericSecondarySourceTurn?: number;
-  localAgentStatus?: 'planning' | 'tool_selected';
+  localAgentStatus?: 'planning' | 'tool_selected' | 'analyzing_image' | 'drafting';
   localSelectedTool?: 'calculator' | 'unit_conversion';
   workflowStatus?: 'planning' | 'executing' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   // Request-scoped image previews and metadata for both attachment types.
@@ -136,6 +138,8 @@ export interface ChatMessage {
 }
 
 export interface LocalTurnState {
+  draft_turn_ids?: string[] | null;
+  image_id?: string;
   knowledge_scope?: LocalKnowledgeScope;
   knowledge_scope_stale?: boolean;
   attempt: number;
@@ -153,6 +157,8 @@ export type FileComparisonSource = {
 } & ({ role: 'limits'; mime_type: 'text/plain' } | { role: 'measurements'; mime_type: 'text/csv' | 'application/json' });
 
 export interface ChatRequestPayload {
+  draft_turn_ids?: string[];
+  image_id?: string;
   session_id?: string;
   turn_id?: string;
   attempt?: number;

@@ -7,6 +7,19 @@ const mocks={'./MarkdownContent':{MarkdownContent:({content})=>React.createEleme
 m.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);m._compile(output,filename);
 test('withheld response never renders sensitive content, sources or copy control',()=>{const message={id:'x',role:'assistant',content:'synthetic-secret',timestamp:'',withheld:true,sources:[{document_id:'s'}],toolEvents:[{type:'tool_result',tool:'calculator',success:true,summary:'tool-secret'}],plan:{taskId:'t',objective:'plan-secret',steps:[{id:'s'}]}};const html=renderToStaticMarkup(React.createElement(m.exports.MessageItem,{message}));assert.match(html,/response is withheld/i);assert.doesNotMatch(html,/synthetic-secret|source-secret|tool-secret|plan-secret/);assert.doesNotMatch(html,/>Copy</)});
 
+test('visual observations render as inert text and removed images have no preview', () => {
+ const render = message => renderToStaticMarkup(React.createElement(m.exports.MessageItem, {message}));
+ const answer = render({id:'v', role:'assistant', timestamp:'', localVisual:true,
+   content:'Model-generated image observations\n\n<img src="https://example.invalid/image">'});
+ assert.match(answer, /Model-generated image observations/);
+ assert.match(answer, /&lt;img/);
+ assert.doesNotMatch(answer, /<img\b/);
+ const history = render({id:'u', role:'user', timestamp:'', content:'What is visible?',
+   attachments:[{id:'i',localAvailable:false, filename:'example.png', mimeType:'image/png', sizeBytes:24}]});
+ assert.match(history, /Image removed or unavailable for reuse/);
+ assert.doesNotMatch(history, /<img\b/);
+});
+
 test('repeated tool invocation stays running until its own result arrives',()=>{
  const message={id:'x',role:'assistant',content:'',timestamp:'',isStreaming:true,toolEvents:[{type:'tool_start',tool:'calculator'},{type:'tool_result',tool:'calculator',success:true},{type:'tool_start',tool:'calculator'}]};
  const html=renderToStaticMarkup(React.createElement(m.exports.MessageItem,{message}));

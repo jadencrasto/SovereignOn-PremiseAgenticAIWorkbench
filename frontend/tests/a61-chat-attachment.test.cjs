@@ -44,6 +44,21 @@ const question = tree => find(tree, n => n.type === 'textarea')
   .props.onChange({ target: { value: 'What color?', style: {}, scrollHeight: 1 } });
 const visiblePreview = tree => find(tree, n => n.type === 'pre' && n.props['aria-label'] === 'Text file preview');
 
+test('local composer previews supported images within its 2 MiB limit', () => {
+  setup();
+  const props = {textOnly: true, localImage: true};
+  const choose = file => find(render(props), n => n.props?.id === 'image-file-input')
+    .props.onChange({target: {files: [file], value: 'selection'}});
+  choose({name: 'large.png', type: 'image/png', size: 2 * 1024 * 1024 + 1});
+  assert.ok(find(render(props), n => String(n.props?.children).includes('exceeds the 2 MB limit')));
+  const file = {name: 'valid.png', type: 'image/png', size: 512};
+  choose(file);
+  assert.ok(find(render(props), n => n.type === 'img'));
+  question(render(props));
+  send(render(props)).props.onClick();
+  assert.deepEqual(sent, [['What color?', file]]);
+});
+
 const selectBatch = (tree, files) => find(tree, n => n.props?.id === 'text-file-input')
   .props.onChange({ target: { files, value: 'selection' } });
 

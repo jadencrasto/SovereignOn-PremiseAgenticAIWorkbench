@@ -160,6 +160,10 @@ async def chat(
         return await submit_local_chat(body, request, engine, model_router)
     if 'knowledge_source_ids' in body.model_fields_set:
         raise HTTPException(403, 'Local knowledge requires the local development profile.')
+    if 'draft_turn_ids' in body.model_fields_set:
+        raise HTTPException(403, 'Draft evidence requires the local development profile.')
+    if 'image_id' in body.model_fields_set:
+        raise HTTPException(403, 'Local image attachments require the local development profile.')
     session_id = body.session_id or str(uuid.uuid4())
     from backend.auth.request_context import request_tools_enabled
     request_tools_enabled.set(bool(body.tools_enabled))
@@ -1905,7 +1909,10 @@ async def read_session(
         created_at, updated_at = engine._memory.get_timestamps(session_id)
     except (PermissionError, KeyError):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    from backend.agent.memory import LOCAL_NUMERIC_SOURCE_FIELD, LOCAL_TURN_FIELD, public_local_turn, safe_image_attachment, safe_tool_history
+    from backend.agent.memory import (
+        LOCAL_NUMERIC_SOURCE_FIELD, LOCAL_TURN_FIELD, LOCAL_VISION_PRODUCER, public_local_turn,
+        safe_image_attachment, safe_tool_history,
+    )
     from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeScope
     from backend.multimodal.text_file import safe_text_attachment
     from backend.security.conversation_access import may_read_assistant
@@ -1969,8 +1976,19 @@ async def read_session(
         if turn:
             turn_numbers[message.id] = len(turn_numbers) + 1
             try:
+                if 'image' in turn or 'draft_scope' in turn:
+                    turn = engine._memory.read_local_turn(session_id, identity, message.id)
                 turn = local_runs.reconcile(engine._memory, session_id, identity, message.id, turn)
                 public_turn = public_local_turn(turn)
+                if 'image' in turn:
+                    from backend.multimodal.local_images import LocalImageRef
+
+                    ref = LocalImageRef.model_validate(turn['image']['ref'])
+                    try:
+                        stored, _ = request.app.state.local_images.get(session_id, identity, ref.image_id)
+                    except KeyError:
+                        stored = None
+                    attachment = ref.attachment(stored == ref)
                 if corpus and 'knowledge_scope' in public_turn:
                     try:
                         corpus.check_scope(current_user.id, KnowledgeScope.model_validate(public_turn['knowledge_scope']))
@@ -1978,6 +1996,8 @@ async def read_session(
                         public_turn['knowledge_scope_stale'] = True
             except (PermissionError, KeyError):
                 raise HTTPException(404, 'Conversation not found') from None
+            except ValueError:
+                raise HTTPException(503, 'Conversation turn could not be verified.') from None
         visible_messages.append({
             "id": message.id, "role": message.role,
             "content": message.content if allowed else '[Response withheld: source access cannot be verified.]',
@@ -1988,6 +2008,8 @@ async def read_session(
             "withheld": not allowed,
             **({"attachments": [attachment]} if attachment else {}),
             **({"turn": public_turn} if public_turn else {}),
+            **({"local_visual": True} if local_runs is not None and allowed and message.role == 'assistant'
+               and message.extra_fields.get('access_provenance_v1', {}).get('producer') == LOCAL_VISION_PRODUCER else {}),
             **({"numeric_source_turn": source_turn_number} if source_turn_number else {}),
             **({"numeric_secondary_source_turn": secondary_turn_number}
                if secondary_turn_number and secondary_turn_number != source_turn_number else {}),
@@ -2031,4 +2053,12 @@ async def clear_session(
     local_runs = getattr(request.app.state, 'local_chat_runs', None)
     if local_runs is not None:
         local_runs.stop_session(session_id)
+        try:
+            request.app.state.local_images.remove_session(session_id)
+        except OSError:
+            logger.warning("Revoked local conversation image cleanup failed")
+        try:
+            request.app.state.local_drafts.remove_session(session_id)
+        except (OSError, ValueError):
+            logger.warning("Revoked local conversation draft cleanup failed")
     return {"deleted": session_id}

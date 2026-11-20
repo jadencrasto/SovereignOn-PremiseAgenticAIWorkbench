@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Optional, List, Any
 from pydantic import BaseModel, Field
 from backend.rag.local_knowledge import KnowledgeSourceIds
+from backend.tools.local_drafts import EvidenceTurns
 
 
 # Forward-declared here to avoid circular import;
@@ -104,6 +105,8 @@ class ChatRequest(BaseModel):
     turn_id: Optional[str] = Field(default=None, description="Client UUIDv4 required by local_dev.")
     attempt: Optional[int] = Field(default=None, strict=True, ge=1, le=2_147_483_647)
     knowledge_source_ids: KnowledgeSourceIds | None = None
+    image_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
+    draft_turn_ids: EvidenceTurns | None = None
 
 
 # ---------------------------------------------------------------------------

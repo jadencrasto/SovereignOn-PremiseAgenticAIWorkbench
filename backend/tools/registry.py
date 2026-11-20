@@ -83,6 +83,7 @@ class ToolRegistry:
 
     def local_tool_status(self, name: str, user_id: str, role: str) -> dict:
         from backend.tools.calculator import CalculatorInput, CalculatorOutput, execute_calculator, verify_calculator_output
+        from backend.tools.local_drafts import DRAFT_TOOL, DraftRequest, LocalDraft, assemble_draft
         from backend.tools.unit_conversion import (
             LocalUnitConversionInput, LocalUnitConversionOutput, execute_unit_conversion, verify_local_unit_conversion,
         )
@@ -91,6 +92,7 @@ class ToolRegistry:
             "calculator": (CalculatorInput, CalculatorOutput, execute_calculator, verify_calculator_output),
             "unit_conversion": (LocalUnitConversionInput, LocalUnitConversionOutput,
                                 execute_unit_conversion, verify_local_unit_conversion),
+            DRAFT_TOOL: (DraftRequest, LocalDraft, assemble_draft, None),
         }
         tool = self.get(name) if self._local_viewer_id and user_id == self._local_viewer_id and role == "viewer" and name in contracts else None
         approved_contract = bool(tool and tool.read_only and tool.risk_level == "low"
@@ -244,6 +246,8 @@ class ToolRegistry:
             return ToolResult(tool=name, success=False, error=EXECUTION_DISABLED_MESSAGE)
 
         from backend.auth.request_context import request_tools_enabled
+        if name == 'local_grounded_draft' and self._local_viewer_id is None:
+            return ToolResult(tool=name, success=False, error="Drafting requires the local development profile.")
         if not tools_enabled or request_tools_enabled.get() is False:
             return ToolResult(tool=name, success=False, error="Tools are disabled for this request.")
 

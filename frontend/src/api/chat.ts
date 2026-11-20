@@ -209,10 +209,40 @@ export async function clearSession(sessionId: string): Promise<{ deleted: string
 }
 
 
+export interface LocalImageAttachment {
+  attachment_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  available?: boolean;
+  width?: number;
+  height?: number;
+}
+
+export function localImageUrl(sessionId: string, imageId?: string): string {
+  const base = `/api/chat/sessions/${encodeURIComponent(sessionId)}/images`;
+  return imageId ? `${base}/${encodeURIComponent(imageId)}` : base;
+}
+
+export function uploadLocalImage(sessionId: string, file: File, signal: AbortSignal): Promise<LocalImageAttachment> {
+  return apiRequest(`${localImageUrl(sessionId)}?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST', body: file, signal, headers: { 'Content-Type': file.type || 'application/octet-stream' },
+  });
+}
+
+export function fetchLocalImages(sessionId: string, signal?: AbortSignal): Promise<{ images: LocalImageAttachment[] }> {
+  return apiRequest(localImageUrl(sessionId), { signal });
+}
+
+export function removeLocalImage(sessionId: string, imageId: string): Promise<{ removed: boolean }> {
+  return apiRequest(localImageUrl(sessionId, imageId), { method: 'DELETE' });
+}
+
 interface SessionMessage {
   numeric_source_turn?: number;
   numeric_secondary_source_turn?: number;
   local_knowledge?: LocalKnowledgeResult;
+  local_visual?: boolean;
   id?: string | null;
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -221,7 +251,7 @@ interface SessionMessage {
   turn?: LocalTurnState;
   response_state?: 'interrupted' | 'failed' | null;
   tool_events?: {type: 'tool_result'; tool: string; success: boolean; invocation_id: string}[];
-  attachments?: {attachment_id: string; filename: string; mime_type: string; size_bytes: number}[];
+  attachments?: LocalImageAttachment[];
 }
 
 export async function cancelLocalTurn(sessionId: string, turnId: string, attempt: number): Promise<LocalTurnState> {

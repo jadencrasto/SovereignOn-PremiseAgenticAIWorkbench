@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { clearSession, fetchSessions, fetchSession, legacyExportAllowed, renameSession } from '../../api/chat';
+import { clearSession, fetchSessions, fetchSession, legacyExportAllowed, localImageUrl, renameSession } from '../../api/chat';
 import { ApiError } from '../../api/client';
 import { loadOwnedHistory, deleteOwnedHistory } from './historyRequests';
 import type { ChatMessage } from '../../types';
@@ -44,9 +44,15 @@ export async function loadSession(id: string): Promise<ChatSession> {
     numericSourceTurn: m.numeric_source_turn,
     numericSecondarySourceTurn: m.numeric_secondary_source_turn,
     localKnowledge: m.local_knowledge,
+    localVisual: m.local_visual === true,
     attachments: m.attachments?.map(attachment => ({
       id: attachment.attachment_id, filename: attachment.filename,
       mimeType: attachment.mime_type, sizeBytes: attachment.size_bytes,
+      ...(m.turn?.image_id === attachment.attachment_id ? {
+        localAvailable: attachment.available,
+        width: attachment.width, height: attachment.height,
+        ...(attachment.available === true ? {objectUrl: localImageUrl(id, attachment.attachment_id)} : {}),
+      } : {}),
     })),
   }));
   for (const task of record.tasks || []) {

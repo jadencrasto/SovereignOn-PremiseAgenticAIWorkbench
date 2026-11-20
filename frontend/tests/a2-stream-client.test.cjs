@@ -336,3 +336,20 @@ test('local conversion status names the tool and keeps other tools outside the s
    : [['error', 'Invalid stream response']]);
  }
 });
+
+test('visual status is accepted only for an identified image request', async () => {
+ const turn = {session_id:'s', turn_id:'image-turn', attempt:1};
+ const wire = [
+  {type:'accepted', content:''},
+  {type:'agent_status', content:'analyzing_image'},
+  {type:'done', content:''},
+ ].map((event, index) => 'data: ' + JSON.stringify({...turn, ...event, sequence:index + 1}) + '\n\n');
+ for (const useImage of [true, false]) {
+  const events = [];
+  global.fetch = async () => response(wire);
+  await streamSSE('/api/chat', useImage ? {...turn, image_id:'owned-image'} : turn, {
+   ...callbacks(events), onAgentStatus: status => events.push([status]),
+  });
+  assert.deepEqual(events, useImage ? [['analyzing_image'], ['done','s']] : [['error','Invalid stream response']]);
+ }
+});

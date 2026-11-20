@@ -100,7 +100,7 @@ def install_http_boundary(app, cfg: Settings, dist: Path) -> None:
             return JSONResponse({"detail": "Local development requires same-origin loopback access."}, 403)
         if path in _ATTACHMENT_ROUTES or (path == "/api/chat" and request.method == "POST"
                 and request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json"):
-            return JSONResponse({"detail": "Local development accepts text chat only."}, 415)
+            return JSONResponse({"detail": "This upload route is unavailable in local development."}, 415)
         if path == "/api/documents" or path.startswith("/api/documents/"):
             return JSONResponse({"detail": "Protected document retrieval is unavailable in local development."}, 503)
         if path.split("/")[1:3] in (["api", "tools"], ["api", "tasks"], ["api", "artifacts"]):

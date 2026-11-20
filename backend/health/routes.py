@@ -90,10 +90,8 @@ def model_readiness(state, selected: str, capability: str = 'chat') -> dict:
     digest = _observed_digest(observation, identity[1]) if identity else None
     status = {'state': 'unknown', 'reason': 'inference_not_checked'}
     if getattr(_settings(state), 'is_local_dev', False):
-        if capability != 'chat':
-            status = {'state': 'blocked', 'reason': 'local_text_chat_only'}
-        elif identity is None:
-            status = {'state': 'unavailable', 'reason': 'unsupported_chat_model'}
+        if identity is None or capability not in ('chat', 'vision'):
+            status = {'state': 'unavailable', 'reason': f'unsupported_{capability}_model'}
         elif observation is None:
             status = {'state': 'unknown', 'reason': 'model_check_required'}
         elif observation.state != 'available':
@@ -169,12 +167,11 @@ def _report(state, selected_model: str | None = None, vision_model: str | None =
     report['capabilities']['chat'] = status.copy()
     report['capabilities']['planning'] = status.copy() if getattr(state, 'planner', None) else {
         'state': 'unavailable', 'reason': 'component_not_initialized'}
-    image_stage = chat if vision['state'] == 'available' else vision
+    image_stage = chat if vision['state'] == 'available' and not getattr(cfg, 'is_local_dev', False) else vision
     report['capabilities']['multimodal'] = {'state': image_stage['state'], 'reason': image_stage['reason']}
     if getattr(cfg, 'is_local_dev', False):
         report['run_profile'] = 'local_dev'
         report['history_retention'] = getattr(getattr(state, 'local_retention', None), 'mode', 'disposable')
-        report['vision_models'] = []
         del report['document_intelligence']
         report['text_file_understanding'] = False
     return report

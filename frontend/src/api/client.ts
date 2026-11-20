@@ -142,18 +142,20 @@ export async function streamSSE(
                 !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
                 typeof chunk.content !== 'string') throw new Error('Invalid turn event');
             if (chunk.sequence <= sequence) continue;
+            const visionTurn = Boolean(payload.image_id);
             const approvedTool = chunk.tool === 'calculator' || chunk.tool === 'unit_conversion';
             const localStatus = chunk.type === 'agent_status' &&
-              ((chunk.content === 'planning' && chunk.tool === undefined) ||
-               (chunk.content === 'tool_selected' && (approvedTool || chunk.tool === undefined))) &&
+              (visionTurn ? chunk.content === 'analyzing_image' && chunk.tool === undefined :
+                (((chunk.content === 'planning' || chunk.content === 'drafting') && chunk.tool === undefined) ||
+                 (chunk.content === 'tool_selected' && (approvedTool || chunk.tool === undefined)))) &&
               chunk.tool_args === undefined && chunk.summary === undefined;
-            const localTool = (chunk.type === 'tool_start' || chunk.type === 'tool_result') &&
+            const localTool = !visionTurn && (chunk.type === 'tool_start' || chunk.type === 'tool_result') &&
               approvedTool && chunk.content === '' &&
               chunk.tool_args === undefined && chunk.summary === undefined &&
               (chunk.type === 'tool_result' ? typeof chunk.success === 'boolean' : chunk.success === undefined);
             if (chunk.sequence !== sequence + 1 ||
                 !(chunk.type === 'done' || chunk.type === 'error' ||
-                  (sequence === 0 ? chunk.type === 'accepted' : chunk.type === 'delta' || localStatus || localTool))) {
+                  (sequence === 0 ? chunk.type === 'accepted' : (!visionTurn && chunk.type === 'delta') || localStatus || localTool))) {
               throw new Error('Out-of-order turn event');
             }
             sequence = chunk.sequence;

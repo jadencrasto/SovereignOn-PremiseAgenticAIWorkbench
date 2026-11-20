@@ -151,9 +151,17 @@ def test_isolated_startup_authentication_and_protected_routes(monkeypatch, tmp_p
             assert app.state.settings.auth_enabled and not app.state.settings.allow_dev_clearance_simulation
             assert not hasattr(app.state, "source_recovery_registration")
             assert not hasattr(app.state, "deployment_documents")
-            assert {tool.name for tool in app.state.engine._tool_registry.list_enabled_tools()} == {
-                "calculator", "unit_conversion",
+            registry = app.state.engine._tool_registry
+            assert {tool.name for tool in registry.list_enabled_tools()} == {
+                "calculator", "unit_conversion", "local_grounded_draft",
             }
+            draft_tool = registry.get("local_grounded_draft")
+            assert draft_tool.read_only and draft_tool.risk_level == "low"
+            # Draft assembly has a server-issued turn context. Enabling the
+            # projection locally does not grant generic registry execution.
+            direct = await registry.execute("local_grounded_draft", {}, user_id=app.state.local_viewer_id,
+                                            user_role="viewer")
+            assert not direct.success
             assert app.state.engine._doc_service is None
             assert not app.state.auth_store.get_user_by_username("admin")
             credentials = {"X-User-Role": "admin", "X-Clearance-Level": "L3", "X-Requested-With": "XMLHttpRequest"}

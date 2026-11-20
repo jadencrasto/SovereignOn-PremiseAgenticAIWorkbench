@@ -1,6 +1,7 @@
-"""Run one owned, text-only local attempt and reconcile it through conversation history."""
+"""Run one owned local attempt and reconcile it through conversation history."""
 
 import asyncio
+import base64
 import json
 import logging
 import sqlite3
@@ -9,7 +10,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from backend.agent.engine import LocalToolError
@@ -18,17 +19,22 @@ from backend.api.chat import StreamingResponse
 from backend.auth.dependencies import get_current_user
 from backend.auth.request_context import dispatch_identity_resolver, request_tools_enabled
 from backend.health import routes as health
+from backend.multimodal.local_images import MAX_IMAGE_BYTES, LocalImageRef, image_format, prepare_image, refers_to_image
 from backend.multimodal.text_file import MAX_TEXT_FILE_BYTES, TextFileError
 from backend.rag.local_documents import MAX_DOCUMENT_BYTES, document_format, import_document, validate_document_upload
 from backend.rag.local_knowledge import (
     KNOWLEDGE_FIELD, KnowledgeConflict, KnowledgeQuestionError, KnowledgeScope, knowledge_question, question_parts,
 )
 from backend.schemas.chat import ChatMessage, ChatResponse, MessageRole
+from backend.tools.local_drafts import DraftScope, artifact_intent, evidence_messages, resolve_evidence
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat")
 _STREAM_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
 _ERRORS = {
+    "LOCAL_DRAFT_EVIDENCE": "Choose current findings from this conversation before requesting a draft.",
+    "LOCAL_DRAFT_FAILED": "The draft could not be assembled within the local limits.",
+    "LOCAL_DRAFT_REQUEST": "Use one to five evidence turns for a separate draft request with tools enabled.",
     "OLLAMA_UNAVAILABLE": "Start local Ollama and check its model inventory, then retry.",
     "MODEL_UNAVAILABLE": "The selected model is unavailable. Check the installed local model and retry.",
     "MODEL_TIMEOUT": "Ollama timed out. You can retry this message.",
@@ -55,6 +61,13 @@ _ERRORS = {
     "LOCAL_TOOL_ZERO_DIVISION": "Division by zero is undefined.",
     "LOCAL_KNOWLEDGE_QUESTION": "Ask a local knowledge question of 1 to 600 characters with at most four parts.",
     "LOCAL_KNOWLEDGE_CHANGED": "Selected local sources changed. Submit a new question with current sources.",
+    "LOCAL_IMAGE_UNAVAILABLE": "This image is unavailable in the current conversation. Attach an image to start a new question.",
+    "LOCAL_IMAGE_REQUIRED": "Attach or explicitly select an image in this conversation.",
+    "LOCAL_IMAGE_AMBIGUOUS": "More than one image is available. Select the image you want to ask about.",
+    "LOCAL_IMAGE_REQUEST_INVALID": "Choose one image and ask about it in a separate question from local knowledge sources.",
+    "LOCAL_VISION_BUSY": "Another image analysis is running. Wait for it to finish and try again.",
+    "LOCAL_VISION_MODEL_UNAVAILABLE": "The selected local vision model is unavailable. Check Ollama and the Models panel.",
+    "LOCAL_VISION_FAILED": "The local vision model could not complete this image analysis.",
 }
 
 
@@ -88,18 +101,22 @@ async def change_local_retention(body: RetentionChange, request: Request, user=D
         raise HTTPException(503, "Local history preference could not be saved.") from None
 
 
-def _owned_knowledge(request, user):
+def _require_local_viewer(request, user):
     state = request.app.state
     if not state.settings.is_local_dev:
-        raise HTTPException(404, "Local knowledge is unavailable.")
+        raise HTTPException(404, "Local development is unavailable.")
     resolve = dispatch_identity_resolver.get()
     current = resolve() if resolve else None
     if (current is None or current.id != user.id or current.role != 'viewer'
             or user.id != state.local_viewer_id):
-        raise HTTPException(403, "Only the local viewer can manage knowledge sources.")
+        raise HTTPException(403, "Only the local viewer can manage local sources and images.")
     if not state.startup_complete:
-        raise HTTPException(503, "Local knowledge is unavailable.")
-    return state.local_knowledge
+        raise HTTPException(503, "Local development is unavailable.")
+    return state
+
+
+def _owned_knowledge(request, user):
+    return _require_local_viewer(request, user).local_knowledge
 
 
 @router.get("/local-knowledge")
@@ -116,19 +133,18 @@ async def _read_knowledge_upload(request, limit, message):
     return bytes(payload)
 
 
-async def _read_document(request, kind):
-    lock = request.app.state.local_document_intake
+async def _read_local_media(request, lock, limit, label, worker_fn, *args):
     if lock.locked():
-        raise HTTPException(409, "A local document import is already in progress.")
+        raise HTTPException(409, f"A local {label} upload is already in progress.")
     await lock.acquire()
     try:
         raw = await asyncio.wait_for(
-            _read_knowledge_upload(request, MAX_DOCUMENT_BYTES, "The document exceeds 512 KiB."), timeout=15,
+            _read_knowledge_upload(request, limit, f"The {label} exceeds {limit // 1024} KiB."), timeout=15,
         )
-        worker = asyncio.get_running_loop().run_in_executor(None, import_document, kind, raw)
+        worker = asyncio.get_running_loop().run_in_executor(None, worker_fn, *args, raw)
     except TimeoutError:
         lock.release()
-        raise HTTPException(408, "The local document upload timed out.") from None
+        raise HTTPException(408, f"The local {label} upload timed out.") from None
     except BaseException:
         lock.release()
         raise
@@ -139,10 +155,10 @@ async def _read_document(request, kind):
             future.exception()
 
     worker.add_done_callback(release)
-    document = await asyncio.shield(worker)
+    result = await asyncio.shield(worker)
     if await request.is_disconnected():
-        raise HTTPException(400, "The local document upload was disconnected.")
-    return document
+        raise HTTPException(400, f"The local {label} upload was disconnected.")
+    return result
 
 
 async def _register_knowledge(request, user, filename, source_id=None, revision=None):
@@ -151,7 +167,9 @@ async def _register_knowledge(request, user, filename, source_id=None, revision=
     try:
         if kind := document_format(filename):
             validate_document_upload(filename, media_type, kind)
-            projection = await _read_document(request, kind)
+            projection = await _read_local_media(
+                request, request.app.state.local_document_intake, MAX_DOCUMENT_BYTES, 'document', import_document, kind,
+            )
             return _owned_knowledge(request, user).register_document(
                 user.id, filename, projection, source_id=source_id, revision=revision,
             )
@@ -195,6 +213,67 @@ async def remove_knowledge(source_id: str, request: Request, revision: int = Que
     return {"removed": True}
 
 
+def _owned_images(request, user, session_id):
+    state = _require_local_viewer(request, user)
+    try:
+        identity = state.engine._memory.stream_identity(session_id)
+    except PermissionError:
+        raise HTTPException(404, "Conversation not found.") from None
+    return state.local_images, identity
+
+
+@router.get("/sessions/{session_id}/images")
+async def list_local_images(session_id: str, request: Request, user=Depends(get_current_user)):
+    images, identity = _owned_images(request, user, session_id)
+    return JSONResponse({"images": [ref.attachment(True) for ref in images.list(session_id, identity)]},
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/sessions/{session_id}/images", status_code=201)
+async def upload_local_image(session_id: str, request: Request, filename: str = Query(min_length=1, max_length=128),
+                             user=Depends(get_current_user)):
+    images, identity = _owned_images(request, user, session_id)
+    try:
+        kind = image_format(filename)
+        mime = request.headers.get('content-type', '').lower().strip()
+        if mime not in ('application/octet-stream', f'image/{kind}'):
+            raise HTTPException(415, "The image media type does not match the selected format.")
+        ref, encoded = await _read_local_media(request, request.app.state.local_image_intake, MAX_IMAGE_BYTES,
+                                                'image', prepare_image, filename, kind)
+        current_store, current_identity = _owned_images(request, user, session_id)
+        if current_store is not images or current_identity != identity:
+            raise HTTPException(404, "Conversation not found.")
+        return JSONResponse(images.register(session_id, identity, ref, encoded).attachment(True), status_code=201,
+                            headers={"Cache-Control": "no-store"})
+    except TextFileError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    except OSError:
+        raise HTTPException(503, "The local image could not be saved.") from None
+
+
+@router.get("/sessions/{session_id}/images/{image_id}")
+async def read_local_image(session_id: str, image_id: str, request: Request, user=Depends(get_current_user)):
+    images, identity = _owned_images(request, user, session_id)
+    try:
+        _, encoded = images.get(session_id, identity, image_id)
+    except KeyError:
+        raise HTTPException(404, _ERRORS["LOCAL_IMAGE_UNAVAILABLE"]) from None
+    return Response(base64.b64decode(encoded), media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/sessions/{session_id}/images/{image_id}")
+async def delete_local_image(session_id: str, image_id: str, request: Request, user=Depends(get_current_user)):
+    images, identity = _owned_images(request, user, session_id)
+    try:
+        images.remove(session_id, identity, image_id)
+    except KeyError:
+        raise HTTPException(404, _ERRORS["LOCAL_IMAGE_UNAVAILABLE"]) from None
+    except OSError:
+        raise HTTPException(503, "The local image could not be removed.") from None
+    return {"removed": True}
+
+
 def _event(session_id, turn_id, attempt, sequence, kind, content="", **extra):
     return "data: " + json.dumps({
         "session_id": session_id, "turn_id": turn_id, "attempt": attempt, "sequence": sequence,
@@ -233,7 +312,7 @@ class LocalChatRun:
     """A single attempt's task and bounded, disposable outgoing SSE queue."""
 
     def __init__(self, app_state, engine, session_id, turn_id, attempt, identity, *, stream, tools_enabled,
-                 knowledge_scope=None):
+                 knowledge_scope=None, image_ref=None, draft_scope=None):
         self.app_state = app_state
         self.engine = engine
         self.session_id = session_id
@@ -242,6 +321,8 @@ class LocalChatRun:
         self.identity = identity
         self.tools_enabled = tools_enabled
         self.knowledge_scope = knowledge_scope
+        self.image_ref = image_ref
+        self.draft_scope = draft_scope
         self.resolve_user = dispatch_identity_resolver.get()
         self.queue = asyncio.Queue(maxsize=64) if stream else None
         self.sequence = 0
@@ -258,6 +339,7 @@ class LocalChatRun:
             raise PermissionError("Conversation unavailable")
         user = self.resolve_user() if self.resolve_user else None
         if (user is None or user.id != self.identity[0] or
+                (self.image_ref is not None and (user.role != 'viewer' or user.id != self.app_state.local_viewer_id)) or
                 self.engine._memory.stream_identity(self.session_id) != self.identity):
             raise PermissionError("Conversation unavailable")
         return user
@@ -297,13 +379,25 @@ class LocalChatRun:
             if self.started:
                 self.task.cancel()
 
-    async def check_model(self, model):
+    async def check_model(self, model, capability='chat'):
         await health.refresh_local_inventory(self.app_state)
         self.check_access()
-        readiness = health.model_readiness(self.app_state, model)
+        readiness = health.model_readiness(self.app_state, model, capability)
         if readiness["state"] != "available":
             code = "OLLAMA_UNAVAILABLE" if readiness["reason"] == "ollama_check_failed" else "MODEL_UNAVAILABLE"
+            if capability == 'vision':
+                code = "LOCAL_VISION_MODEL_UNAVAILABLE"
             raise LocalToolError(code)
+
+    def image_payload(self):
+        self.check_access()
+        try:
+            ref, payload = self.app_state.local_images.get(self.session_id, self.identity, self.image_ref.image_id)
+        except KeyError:
+            raise LocalToolError('LOCAL_IMAGE_UNAVAILABLE') from None
+        if ref != self.image_ref:
+            raise LocalToolError('LOCAL_IMAGE_UNAVAILABLE')
+        return payload
 
     async def generate(self, message, model):
         self.started = True
@@ -331,7 +425,7 @@ class LocalChatRun:
         except RuntimeError as exc:
             failure = ("failed", _provider_error(exc))
         except Exception:
-            logger.warning("Local text generation failed")
+            logger.warning("Local generation failed")
             failure = ("failed", "CHAT_UNAVAILABLE")
 
         try:
@@ -393,14 +487,20 @@ async def submit_local_chat(body, request, engine, model_router):
     memory = engine._memory
     app_state = request.app.state
     runs = app_state.local_chat_runs
-    model = "/".join(model_router.resolve_model(body.model))
+    selected = body.model
+    if body.image_id is not None and selected is None:
+        selected = model_router.configured_model_id('vision')
+    model = "/".join(model_router.resolve_model(selected))
     selection = body.knowledge_source_ids
     if selection is not None and len(selection) != len(set(selection)):
         raise HTTPException(422, "Choose each local source only once.")
+    output_format = artifact_intent(body.message)
     question = knowledge_question(body.message)
     if selection is not None and question is None:
         question = body.message.strip()
     scope = None
+    image_ref = None
+    draft_scope = None
     try:
         identity = memory.stream_identity(session_id)
         try:
@@ -409,6 +509,48 @@ async def submit_local_chat(body, request, engine, model_router):
             previous = None
         else:
             previous = runs.reconcile(memory, session_id, identity, turn_id, previous)
+        images = app_state.local_images
+        if previous and 'image' in previous:
+            image_ref = LocalImageRef.model_validate(previous['image']['ref'])
+        if previous and body.image_id != (image_ref.image_id if image_ref else None):
+            raise LocalTurnConflict('Turn ID is already bound to a different image.')
+        new_attempt = previous is None or attempt > previous['attempt']
+        if output_format or body.draft_turn_ids is not None:
+            if (not output_format or body.image_id is not None or selection is not None
+                    or not body.tools_enabled or not body.planning_enabled
+                    or (body.draft_turn_ids is not None
+                        and (not body.draft_turn_ids or len(set(body.draft_turn_ids)) != len(body.draft_turn_ids)))):
+                code = 'LOCAL_DRAFT_REQUEST'
+                raise HTTPException(422, _ERRORS[code], headers={"X-Error-Code": code})
+            question = None
+            if previous:
+                if 'draft_scope' not in previous:
+                    raise LocalTurnConflict('Turn ID is already bound to a different submission.')
+                draft_scope = DraftScope.model_validate(previous['draft_scope']['scope'])
+                if draft_scope.selection != body.draft_turn_ids or draft_scope.format != output_format:
+                    raise LocalTurnConflict('Turn ID is already bound to a different draft selection.')
+            else:
+                eligible = [turn.id for turn, _, _, visual in evidence_messages(memory, session_id)
+                            if not visual]
+                ids = body.draft_turn_ids if body.draft_turn_ids is not None else eligible[-1:]
+                if not ids or len(resolve_evidence(app_state, session_id, identity, ids)) != len(ids):
+                    code = 'LOCAL_DRAFT_EVIDENCE'
+                    raise HTTPException(409, _ERRORS[code], headers={"X-Error-Code": code})
+                draft_scope = DraftScope(format=output_format, selection=body.draft_turn_ids, evidence=ids)
+        if body.image_id is not None:
+            if not _valid_turn_id(body.image_id) or selection is not None or question is not None:
+                code = 'LOCAL_IMAGE_REQUEST_INVALID'
+                raise HTTPException(422, _ERRORS[code], headers={"X-Error-Code": code})
+            if new_attempt:
+                stored, _ = images.get(session_id, identity, body.image_id)
+                if image_ref is not None and image_ref != stored:
+                    raise KeyError(body.image_id)
+                image_ref = stored
+                if any(run.image_ref is not None and not run.task.done() for run in runs.active.values()):
+                    raise HTTPException(409, _ERRORS["LOCAL_VISION_BUSY"], headers={"X-Error-Code": "LOCAL_VISION_BUSY"})
+        elif previous is None and draft_scope is None and question is None and refers_to_image(body.message):
+            code = 'LOCAL_IMAGE_AMBIGUOUS' if len(images.list(session_id, identity)) > 1 else 'LOCAL_IMAGE_REQUIRED'
+            raise HTTPException(422, _ERRORS[code], headers={"X-Error-Code": code})
         corpus = app_state.local_knowledge
         if previous is None and question is not None:
             question_parts(question)
@@ -428,11 +570,14 @@ async def submit_local_chat(body, request, engine, model_router):
                 raise LocalTurnConflict('Turn ID is already bound to a different submission.')
             elif question is not None and attempt > previous['attempt']:
                 raise KnowledgeConflict('The original question has no saved source scope. Submit a new question.')
-        tools_enabled = bool(body.tools_enabled and body.planning_enabled)
+        tools_enabled = image_ref is None and bool(body.tools_enabled and body.planning_enabled)
         record, admitted = memory.claim_local_turn(
             session_id, identity, turn_id, attempt, body.message, model, tools_enabled=tools_enabled,
-            knowledge_scope=scope,
+            knowledge_scope=scope, image_ref=image_ref, draft_scope=draft_scope,
         )
+    except KeyError:
+        raise HTTPException(404, _ERRORS["LOCAL_IMAGE_UNAVAILABLE"],
+                            headers={"X-Error-Code": "LOCAL_IMAGE_UNAVAILABLE"}) from None
     except PermissionError:
         raise HTTPException(404, "Conversation not found") from None
     except LocalTurnConflict as exc:
@@ -447,7 +592,7 @@ async def submit_local_chat(body, request, engine, model_router):
 
     if admitted:
         run = LocalChatRun(app_state, engine, session_id, turn_id, attempt, identity, stream=body.stream,
-                           tools_enabled=tools_enabled, knowledge_scope=scope)
+                           tools_enabled=tools_enabled, knowledge_scope=scope, image_ref=image_ref, draft_scope=draft_scope)
         runs.start(run, body.message, model)
         if body.stream:
             return StreamingResponse(run.events(), media_type="text/event-stream", headers=_STREAM_HEADERS)
@@ -475,6 +620,7 @@ async def submit_local_chat(body, request, engine, model_router):
                   "LOCAL_TOOL_ABSOLUTE_ZERO": 422,
                   "LOCAL_TOOL_CONFIRMATION_REQUIRED": 403,
                   "LOCAL_KNOWLEDGE_CHANGED": 409, "LOCAL_KNOWLEDGE_QUESTION": 422,
+                  "LOCAL_IMAGE_UNAVAILABLE": 409,
                   "LOCAL_TOOL_CHANGED_PLAN": 409}.get(extra["error_code"], 503)
         if record["state"] == "cancelled":
             status = 409

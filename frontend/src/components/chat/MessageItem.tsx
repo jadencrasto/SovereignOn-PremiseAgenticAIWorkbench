@@ -200,7 +200,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                   /> : <p className="px-2 text-xs text-slate-500">
                     {att.mimeType === 'text/csv' ? 'CSV · Attach again to ask about it' :
                       att.mimeType === 'application/json' ? 'JSON · Attach again to ask about it' :
-                      att.mimeType === 'text/plain' ? 'Text file · Attach again to ask about it' : 'Image preview unavailable in history'}
+                      att.mimeType === 'text/plain' ? 'Text file · Attach again to ask about it' : att.localAvailable === false ? 'Image removed or unavailable for reuse' : 'Image preview unavailable in history'}
                   </p>}
                   <div className="flex items-center justify-between px-2 py-1.5 text-xs font-medium text-slate-700">
                     <span className="max-w-[180px] break-all">
@@ -222,6 +222,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                 OLLAMA_UNAVAILABLE: 'Ollama is unavailable. Start it and retry.',
                 MODEL_UNAVAILABLE: 'The selected local model is unavailable.',
                 MODEL_TIMEOUT: 'Ollama timed out.',
+                LOCAL_VISION_MODEL_UNAVAILABLE: 'The selected local vision model is unavailable. Check Ollama and the Models panel.',
+                LOCAL_VISION_FAILED: 'The local vision model could not complete this image analysis.',
+                LOCAL_IMAGE_UNAVAILABLE: 'This image is unavailable. Attach an image to start a new question.',
+                LOCAL_DRAFT_EVIDENCE: 'Choose current findings from this conversation before requesting a draft.',
+                LOCAL_DRAFT_FAILED: 'The draft could not be assembled within the local limits.',
                 MODEL_INCOMPLETE: 'Ollama returned an incomplete or invalid response.',
                 LOCAL_TOOL_UNAUTHORIZED: 'Local chat can run arithmetic and unit conversions only.',
                 LOCAL_TOOL_APPROVAL_REQUIRED: 'This operation requires approval and is unavailable in local chat.',
@@ -372,7 +377,8 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                     <p className="mb-2 text-xs font-medium text-slate-600">Local knowledge</p>
                     <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
                   </>
-                ) : message.textFileAnswer ? <FileAnswer message={message} />
+                ) : message.localVisual ? <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
+                  : message.textFileAnswer ? <FileAnswer message={message} />
                   : <MarkdownContent content={message.content} />}
               </div>
             ) : (
@@ -384,7 +390,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, onRetry, onAp
                       uploading: 'Uploading image…',
                       analyzing_image: 'Analyzing image…',
                       reasoning: 'Preparing image answer…',
-                    }[message.imageProgress] : message.localAgentStatus === 'planning' ? 'Planning…'
+                    }[message.imageProgress] : message.localAgentStatus === 'drafting' ? 'Assembling evidence draft.'
+                      : message.localAgentStatus === 'analyzing_image' ? 'Analyzing image.'
+                      : message.localAgentStatus === 'planning' ? 'Planning…'
                       : message.localAgentStatus === 'tool_selected' && !hasToolEvents
                         ? (message.localSelectedTool === 'unit_conversion' ? 'Unit conversion selected' : 'Calculator selected')
                         : hasToolEvents ? 'Running tools...' : 'Thinking...'}

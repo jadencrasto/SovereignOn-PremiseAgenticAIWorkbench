@@ -119,9 +119,10 @@ export function chatDisabled(report: CapabilityReport | null, image = false, sel
   if (capability.state !== 'available') return true;
   if (!selectedModel || !report || !modelInInventory(report, selectedModel)) return true;
   const checked = image ? report.selected_vision_model : report.selected_chat_model;
-  if (report.run_profile === 'local_dev' && !image) {
+  if (report.run_profile === 'local_dev') {
     return checked?.id !== selectedModel || checked.state !== 'available' ||
-      checked.reason !== 'model_listed' || checked.identity_evidence !== 'provider_digest';
+      checked.reason !== 'model_listed' || checked.identity_evidence !== 'provider_digest' ||
+      (image && !report.vision_models?.includes(selectedModel));
   }
   return !checked || checked.id !== selectedModel || checked.state !== 'available' ||
     (image && (!report.vision_models?.includes(selectedModel) || checked.identity_evidence !== 'provider_digest')) ||
@@ -165,7 +166,7 @@ export function parseCapabilityReport(value: unknown): CapabilityReport {
       !isModelReadiness(report.selected_chat_model, report.run_profile === 'local_dev') ||
       (report.vision_models !== undefined &&
         (!Array.isArray(report.vision_models) || !report.vision_models.every(name => typeof name === 'string'))) ||
-      (report.selected_vision_model !== undefined && !isModelReadiness(report.selected_vision_model)) ||
+      (report.selected_vision_model !== undefined && !isModelReadiness(report.selected_vision_model, report.run_profile === 'local_dev')) ||
       (report.text_file_understanding !== undefined && typeof report.text_file_understanding !== 'boolean')) {
     throw new Error('Invalid capability response');
   }

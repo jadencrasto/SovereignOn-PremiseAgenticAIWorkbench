@@ -16,6 +16,11 @@ def create_pdf_report(sandbox_dir: Path, report: ReportInput, sources: dict[str,
     if not isinstance(report, ReportInput) or report.output_format != 'pdf':
         raise ValueError('A PDF report is required')
     args = tool_arguments(report.model_copy(update={'output_format':'docx'}), sources)
+    return render_pdf_report(sandbox_dir, args)
+
+
+def render_pdf_report(sandbox_dir, args):
+    """Render server-assembled document sections and tables to PDF."""
     blocks = [args.title]
     for section in args.sections or []:
         blocks.extend([section['heading'], section['body']])
@@ -30,11 +35,11 @@ def create_pdf_report(sandbox_dir: Path, report: ReportInput, sources: dict[str,
             lines.extend(textwrap.wrap(line, width=80, replace_whitespace=True, drop_whitespace=True) or [''])
     if len(lines) > 1000: raise ValueError('PDF page limit exceeded')
     try:
-        import fitz
+        import pymupdf
         from pypdf import PdfReader
     except ImportError as exc:
         raise RuntimeError('PDF renderer unavailable') from exc
-    document=fitz.open()
+    document=pymupdf.open()
     try:
         for start in range(0, len(lines), 50):
             page=document.new_page()

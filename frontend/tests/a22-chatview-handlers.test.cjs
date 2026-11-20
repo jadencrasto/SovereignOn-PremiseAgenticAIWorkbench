@@ -11,6 +11,7 @@ let localOffline = false;
 let localKnowledgeAvailable = false;
 let historyImpl = async () => ({id:'server-session',title:'Conversation',messages:[]});
 const api={createSession:signal=>createImpl(signal),fetchSessions:async()=>({count:0}),streamChat(payload,callbacks,signal){let resolve;let p=new Promise(r=>resolve=r);requests.push({payload,callbacks,signal,resolve});return p},guardChatCallbacks(callbacks,active){return new Proxy(callbacks,{get:(t,p)=>(...a)=>{if(active())t[p](...a)}})}};
+api.fetchLocalImages = async () => ({images: []});
 api.streamChatMultimodal = api.streamChat;
 api.streamChatTextFile = (file, session_id, model, message, callbacks, signal, range) =>
   api.streamChat({ file, session_id, model, message, range }, callbacks, signal);
@@ -28,6 +29,8 @@ localTurnsMod._compile(ts.transpileModule(fs.readFileSync(localTurnsFile,'utf8')
 const mocks={react:React,'./MessageList':{MessageList},'./ChatInput':{ChatInput},'./ChatHistorySidebar':{ChatHistorySidebar,loadSession:async()=>({id:'server-session',title:'Conversation',messages:[]})},'../../context/AuthContext':{useAuth:()=>({user:{id:'a'},refreshUser:async()=>{authRefreshes++;}})},'../../api/chat':api,'../../context/WorkbenchContext':{useWorkbench:()=>({selectedModel:textModel,selectedVisionModel:visionModel,addToast(){},capabilities:{text_file_understanding:true},isCheckingHealth:false})},'../../api/capabilities':{capabilityFor:()=>({state:'available'}),chatDisabled:(_report,image)=>image?false:textBlocked,describeCapability:()=>'',permitsCapability:()=>false},'../../api/tasks':{},'lucide-react':{Clock:()=>null,Plus:()=>null}};
 mocks['./localTurns']=localTurnsMod.exports;
 mocks['./LocalKnowledgePanel']={LocalKnowledgePanel};
+function LocalDraftPanel(){}
+mocks['./LocalDraftPanel']={LocalDraftPanel};
 mocks['./ChatHistorySidebar'].loadSession = id => historyImpl(id);
 const mockWorkbench = mocks['../../context/WorkbenchContext'].useWorkbench;
 mocks['../../context/WorkbenchContext'].useWorkbench = () => {
@@ -38,6 +41,29 @@ mocks['../../context/WorkbenchContext'].useWorkbench = () => {
 };
 const file=path.resolve(__dirname,'../src/components/chat/ChatView.tsx');const out=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;const mod=new Module(file,module);mod.filename=file;mod.paths=Module._nodeModulePaths(path.dirname(file));let orig=mod.require.bind(mod);mod.require=n=>Object.hasOwn(mocks,n)?mocks[n]:orig(n);mod._compile(out,file);
 function render(){cursor=0;effects=[];return mod.exports.ChatView()} function find(n,t){if(!n||typeof n!=='object')return;if(n.type===t)return n;for(let c of n.props?.children||[]){let x=find(c,t);if(x)return x}} function parts(){let tree=render();return {tree,input:find(tree,ChatInput).props,list:find(tree,MessageList).props,sidebar:find(tree,ChatHistorySidebar)?.props}} function setup(){slots=[];requests=[];parts();slots[3]='server-session';return parts()}
+test('chat sends draft intent with the selected conversation evidence and restores the completed draft turn', async (t) => {
+  localMode = localKnowledgeAvailable = true;
+  t.after(() => {
+    localMode = localKnowledgeAvailable = false;
+    historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [] });
+  });
+  const initial = setup().tree;
+  find(initial, LocalKnowledgePanel).props.setActive(true);
+  find(initial, LocalDraftPanel).props.onSelection(['first-evidence', 'second-evidence']);
+  const pending = parts().input.onSendMessage('Create an XLSX comparison.');
+  const [request] = requests;
+  assert.equal(request.payload.message, 'Create an XLSX comparison.');
+  assert.deepEqual(request.payload.draft_turn_ids, ['first-evidence', 'second-evidence']);
+  assert.equal(request.payload.knowledge_source_ids, undefined);
+  historyImpl = async () => ({ id: 'server-session', title: 'Conversation', messages: [{
+    id: 'draft-reply', role: 'assistant', content: 'Your evidence draft is ready to review in the Drafts panel.',
+  }] });
+  request.callbacks.onAgentStatus('drafting');
+  request.callbacks.onDone('server-session', 'fake');
+  request.resolve();
+  await pending;
+  assert.equal(parts().list.messages[0].id, 'draft-reply');
+});
 test('a second submission from the same render cannot replace the active stream', async () => {
   const { input } = setup();
   const first = input.onSendMessage('First question');
@@ -99,6 +125,53 @@ test('retry rebuilds the original source selection from history and blocks stale
   });
   turn.localTurn.knowledge_scope_stale = true;
   assert.equal(retry('owned-session', turn), null);
+});
+
+test('local upload and visual question use the owned image ID and reconcile history', async (t) => {
+  localMode = true;
+  const image = new File(['synthetic'], 'sample.png', {type: 'image/png'});
+  let finishUpload;
+  api.uploadLocalImage = (session, file, signal) => {
+    assert.equal(session, 'server-session');
+    assert.equal(file, image);
+    assert.equal(signal.aborted, false);
+    return new Promise(resolve => { finishUpload = resolve; });
+  };
+  historyImpl = async () => ({id: 'server-session', title: 'Conversation', messages: [
+    {id: 'visual-answer', role: 'assistant', content: 'Model-generated image observations', localVisual: true},
+  ]});
+  t.after(() => {
+    localMode = false;
+    delete api.uploadLocalImage;
+    historyImpl = async () => ({id: 'server-session', title: 'Conversation', messages: []});
+  });
+  const pending = setup().input.onSendMessage('What is visible?', image);
+  assert.equal(parts().input.isStreaming, true);
+  assert.equal(requests.length, 0);
+  finishUpload({attachment_id: 'owned-image'});
+  await Promise.resolve();
+  const request = requests[0];
+  assert.equal(request.payload.image_id, 'owned-image');
+  assert.equal(request.payload.model, 'ollama/vision:7b');
+  assert.equal(request.payload.knowledge_source_ids, undefined);
+  request.callbacks.onAgentStatus('analyzing_image');
+  assert.equal(parts().list.messages[1].localAgentStatus, 'analyzing_image');
+  request.resolve();
+  await pending;
+  assert.equal(parts().list.messages[0].localVisual, true);
+});
+
+test('image retry is pinned to an available attachment from the original turn', () => {
+  const retry = localTurnsMod.exports.retryLocalSubmission;
+  const message = {id: 'visual-turn', content: 'What is visible?', localTurn: {
+    attempt: 1, state: 'cancelled', model: 'ollama/vision:7b', image_id: 'owned', tools_enabled: false,
+  }, attachments: [{id: 'owned', localAvailable: true}]};
+  assert.deepEqual(retry('server-session', message), {
+    session_id: 'server-session', turn_id: 'visual-turn', attempt: 2, model: 'ollama/vision:7b',
+    message: 'What is visible?', image_id: 'owned', tools_enabled: false,
+  });
+  message.attachments[0].localAvailable = false;
+  assert.equal(retry('server-session', message), null);
 });
 test('image chat pins the selected vision model, shows progress and handles a terminal error', async (t) => {
   const { input } = setup();

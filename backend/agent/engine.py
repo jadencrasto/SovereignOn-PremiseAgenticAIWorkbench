@@ -384,6 +384,14 @@ class AgentEngine:
         )
         from backend.rag.local_knowledge import knowledge_question
 
+        if run.draft_scope is not None:
+            await self._finish_local_draft(run)
+            return
+
+        if run.image_ref is not None:
+            await self._finish_local_image(run, message, model)
+            return
+
         if run.knowledge_scope is not None:
             question = knowledge_question(message)
             await self._finish_local_knowledge(run, message.strip() if question is None else question, model)
@@ -685,6 +693,83 @@ class AgentEngine:
             local_turn=(run.turn_id, run.attempt), local_plan_digest=digest, local_numeric_source=source_link,
         )
         yield answer
+
+    async def _finish_local_draft(self, run):
+        from backend.auth.request_context import local_chat_tool_turn, local_draft_scope, request_tools_enabled
+        from backend.tools.local_drafts import (
+            DRAFT_PRODUCER, DRAFT_TOOL, DraftConflict, DraftRequest, LocalDraft, check_evidence,
+        )
+
+        user = run.check_access()
+        registry = self._tool_registry
+        if not run.tools_enabled or not registry.allows_local_tool(DRAFT_TOOL, user.id, user.role):
+            raise LocalToolError('LOCAL_TOOL_UNAUTHORIZED')
+        registration = registry.registration_token(DRAFT_TOOL)
+        args = DraftRequest(turn_id=run.turn_id, attempt=run.attempt, scope=run.draft_scope)
+        run.emit('agent_status', 'drafting')
+        await asyncio.sleep(0)
+        run.check_access()
+        store = run.app_state.local_drafts
+        draft = next((row for row in store.owned(run.session_id, run.identity) if row.turn_id == run.turn_id), None)
+        if draft is None:
+            scope = local_chat_tool_turn.set((run.session_id, user.id, run.turn_id, DRAFT_TOOL))
+            binding = local_draft_scope.set((run.app_state, run.identity, args))
+            enabled = request_tools_enabled.set(True)
+            try:
+                result = await self._dispatch_tool(DRAFT_TOOL, args.model_dump(), session_id=run.session_id,
+                                                   user_id=user.id, step_id=run.turn_id,
+                                                   expected_registration=registration)
+            finally:
+                request_tools_enabled.reset(enabled)
+                local_draft_scope.reset(binding)
+                local_chat_tool_turn.reset(scope)
+            if not result.success:
+                code = ('LOCAL_DRAFT_EVIDENCE' if result.error == 'Selected evidence is unavailable or stale.'
+                        else 'LOCAL_DRAFT_FAILED')
+                raise LocalToolError(code)
+            draft = LocalDraft.model_validate(result.result)
+        run.check_access()
+        if (draft.session != run.session_id or draft.generation != run.identity[1] or draft.turn_id != run.turn_id
+                or draft.format != args.scope.format or [ref.turn_id for ref in draft.evidence] != args.scope.evidence
+                or check_evidence(run.app_state, run.session_id, run.identity, draft)):
+            raise LocalToolError('LOCAL_DRAFT_EVIDENCE')
+        try:
+            store.save(draft)
+        except DraftConflict:
+            raise LocalToolError('LOCAL_DRAFT_FAILED') from None
+        self._memory.record_plain_response(
+            run.session_id, run.identity, 'Your evidence draft is ready to review in the Drafts panel.',
+            producer=DRAFT_PRODUCER, local_turn=(run.turn_id, run.attempt), local_draft_id=draft.id,
+        )
+
+    async def _finish_local_image(self, run, question, model):
+        from backend.agent.memory import LOCAL_VISION_PRODUCER
+        from backend.multimodal.service import MultimodalService
+
+        run.emit('agent_status', 'analyzing_image')
+        try:
+            async with asyncio.timeout(min(60, run.app_state.settings.model_timeout_seconds)):
+                await run.check_model(model, 'vision')
+                image = run.image_payload()
+                provider, model_name = self._router.get_provider_for_model(model)
+                answer = await MultimodalService(provider, model_name).analyze_image(image, question, local_answer=True)
+        except TimeoutError:
+            raise LocalToolError('MODEL_TIMEOUT') from None
+        except LocalToolError:
+            raise
+        except RuntimeError as exc:
+            code = {
+                'Selected model is unavailable': 'LOCAL_VISION_MODEL_UNAVAILABLE',
+                'Model request timed out': 'MODEL_TIMEOUT',
+            }.get(str(exc), 'LOCAL_VISION_FAILED')
+            raise LocalToolError(code) from None
+        if len(answer) > 8192:
+            raise LocalToolError('LOCAL_VISION_FAILED')
+        run.image_payload()
+        self._memory.record_plain_response(
+            run.session_id, run.identity, 'Model-generated image observations\n\n' + answer.strip(),
+            producer=LOCAL_VISION_PRODUCER, local_turn=(run.turn_id, run.attempt),
+        )
 
     async def _finish_local_knowledge(self, run, question, model):
         """Select exact scoped evidence through Ollama without a tool-capable plan."""

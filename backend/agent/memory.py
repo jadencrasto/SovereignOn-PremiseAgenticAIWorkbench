@@ -81,6 +81,9 @@ def _local_result_value(value, tool, unit):
 class LocalTurnConflict(Exception):
     """The turn ID, attempt, or conversation state does not permit submission."""
 
+LOCAL_VISION_PRODUCER = 'local-image-vision'
+_LOCAL_IMAGE_FIELD = 'local_image_v1'
+
 
 def public_local_turn(record):
     fields = ('attempt', 'state', 'model', 'error_code', 'assistant_id')
@@ -89,6 +92,10 @@ def public_local_turn(record):
         public['tools_enabled'] = False
     if 'knowledge_scope' in record:
         public['knowledge_scope'] = record['knowledge_scope']['scope']
+    if 'image' in record:
+        public['image_id'] = record['image']['ref']['image_id']
+    if 'draft_scope' in record:
+        public['draft_turn_ids'] = record['draft_scope']['scope']['selection']
     return public
 
 
@@ -308,6 +315,12 @@ class ConversationMemory:
                     if 'numeric_tool' in turn or 'calculator_progress' in turn:
                         raise ValueError('Invalid mixed local turn state')
                     fields.add('knowledge_scope')
+                if 'image' in turn:
+                    self._verified_local_image(sid, (owner, active[sid]), message)
+                    fields.add('image')
+                if 'draft_scope' in turn:
+                    self._verified_draft_scope(sid, (owner, active[sid]), message)
+                    fields.add('draft_scope')
                 if state == 'completed' and set(turn) == fields | {'assistant_id'}:
                     expected_assistant = turn['assistant_id']
                     if not isinstance(expected_assistant, str) or not expected_assistant:
@@ -551,16 +564,33 @@ class ConversationMemory:
         from backend.rag.local_knowledge import KNOWLEDGE_FIELD
         if KNOWLEDGE_FIELD in message.extra_fields:
             fields.append(message.extra_fields[KNOWLEDGE_FIELD])
+        if _LOCAL_IMAGE_FIELD in message.extra_fields:
+            fields.append(message.extra_fields[_LOCAL_IMAGE_FIELD])
+        if 'local_draft_id' in message.extra_fields:
+            fields.append(message.extra_fields['local_draft_id'])
         payload = json.dumps(fields, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('ascii')
         return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
     @_synchronized
     def verify_assistant_provenance(self, session_id: str, message: Message, *, plain_only=False) -> bool:
         from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KNOWLEDGE_PRODUCER, KnowledgeReceipt
+        from backend.tools.local_drafts import DRAFT_PRODUCER
 
         proof = message.extra_fields.get('access_provenance_v1')
         status = message.extra_fields.get('response_state_v1', 'completed')
         allowed_fields = {'access_provenance_v1', 'response_state_v1'}
+        visual = isinstance(proof, dict) and proof.get('producer') == LOCAL_VISION_PRODUCER
+        draft = isinstance(proof, dict) and proof.get('producer') == DRAFT_PRODUCER
+        if draft:
+            draft_id = message.extra_fields.get('local_draft_id')
+            if (plain_only or proof.get('kind') != _PLAIN_CHAT or status != 'completed'
+                    or not isinstance(draft_id, str) or not re.fullmatch(r'[0-9a-f]{32}', draft_id)):
+                return False
+            allowed_fields.add('local_draft_id')
+        if visual:
+            if plain_only or proof.get('kind') != _PLAIN_CHAT or status != 'completed':
+                return False
+            allowed_fields.add(_LOCAL_IMAGE_FIELD)
         knowledge_claim = None
         if isinstance(proof, dict) and proof.get('kind') == _KNOWLEDGE:
             if proof.get('producer') != KNOWLEDGE_PRODUCER or KNOWLEDGE_FIELD not in message.extra_fields:
@@ -622,6 +652,34 @@ class ConversationMemory:
         if (not owner or owner != self._current_owner() or not generation
                 or position >= len(messages) or messages[position].id != message.id):
             return False
+        if draft:
+            if position == 0:
+                return False
+            turn = messages[position - 1]
+            record = turn.extra_fields.get(LOCAL_TURN_FIELD, {})
+            if (turn.role != 'user' or record.get('state') != 'completed'
+                    or record.get('assistant_id') != message.id):
+                return False
+            try:
+                if self._verified_draft_scope(session_id, identity, turn) is None:
+                    return False
+            except (ValueError, KeyError, TypeError):
+                return False
+        if visual:
+            if position == 0:
+                return False
+            source_turn = messages[position - 1]
+            record = source_turn.extra_fields.get(LOCAL_TURN_FIELD, {})
+            try:
+                ref = self._verified_local_image(session_id, identity, source_turn)
+            except (KeyError, TypeError, ValueError):
+                return False
+            if (ref is None or source_turn.role != 'user' or record.get('state') != 'completed'
+                    or record.get('assistant_id') != message.id or message.extra_fields.get(_LOCAL_IMAGE_FIELD) != {
+                        'turn_id': source_turn.id, 'attempt': record.get('attempt'), 'image_id': ref.image_id,
+                        'sha256': ref.normalized_sha256,
+                    }):
+                return False
         if knowledge_claim is not None:
             if position == 0:
                 return False
@@ -653,7 +711,11 @@ class ConversationMemory:
         return self.verify_assistant_provenance(session_id, message, plain_only=True)
 
     def verify_local_reply(self, session_id: str, message: Message) -> bool:
+        from backend.tools.local_drafts import DRAFT_PRODUCER
+
         proof = message.extra_fields.get('access_provenance_v1')
+        if isinstance(proof, dict) and proof.get('producer') in (LOCAL_VISION_PRODUCER, DRAFT_PRODUCER):
+            return self.verify_assistant_provenance(session_id, message)
         if isinstance(proof, dict) and proof.get('kind') == _KNOWLEDGE:
             return self.verify_assistant_provenance(session_id, message)
         if isinstance(proof, dict) and proof.get('producer') in (_LOCAL_CALCULATOR, _LOCAL_CONVERSION):
@@ -695,10 +757,14 @@ class ConversationMemory:
 
     @_synchronized
     def claim_local_turn(self, session_id, identity, turn_id, attempt, content, model, *, tools_enabled=True,
-                         knowledge_scope=None):
+                         knowledge_scope=None, image_ref=None, draft_scope=None):
         """Atomically persist admission or return the existing attempt's state."""
         if self.stream_identity(session_id) != identity:
             raise PermissionError('Conversation unavailable')
+        if image_ref is not None and (tools_enabled or knowledge_scope is not None):
+            raise ValueError('Invalid mixed image turn')
+        if draft_scope is not None and (not tools_enabled or image_ref is not None or knowledge_scope is not None):
+            raise ValueError('Invalid mixed draft turn')
         conv = self._store[session_id]
         turn = next((message for message in conv.messages if message.id == turn_id), None)
         if turn is not None:
@@ -709,6 +775,10 @@ class ConversationMemory:
                 raise LocalTurnConflict('Turn ID is already bound to a different tool preference.')
             if self._verified_knowledge_scope(session_id, identity, turn) != knowledge_scope:
                 raise LocalTurnConflict('Turn ID is already bound to a different local source scope.')
+            if self._verified_local_image(session_id, identity, turn) != image_ref:
+                raise LocalTurnConflict('Turn ID is already bound to a different image.')
+            if self._verified_draft_scope(session_id, identity, turn) != draft_scope:
+                raise LocalTurnConflict('Turn ID is already bound to a different draft scope.')
             if attempt == record['attempt']:
                 return dict(record), False
             if (attempt != record['attempt'] + 1 or record['state'] not in {'failed', 'cancelled', 'interrupted'}
@@ -734,6 +804,14 @@ class ConversationMemory:
             record['knowledge_scope'] = {
                 'scope': scope, 'mac': self._knowledge_scope_mac(session_id, identity, turn, model, scope),
             }
+        if image_ref is not None:
+            ref = image_ref.model_dump()
+            record['image'] = {
+                'ref': ref, 'mac': self._local_image_mac(session_id, identity, turn, record, ref),
+            }
+        if draft_scope is not None:
+            scope = draft_scope.model_dump()
+            record['draft_scope'] = {'scope': scope, 'mac': self._draft_scope_mac(session_id, identity, turn, record, scope)}
         turn.extra_fields[LOCAL_TURN_FIELD] = record
         conv.extra_fields['updated_at'] = datetime.now(timezone.utc).isoformat()
         self._save()
@@ -743,7 +821,55 @@ class ConversationMemory:
     def read_local_turn(self, session_id, identity, turn_id):
         turn = self._owned_local_turn(session_id, identity, turn_id)
         self._verified_knowledge_scope(session_id, identity, turn)
+        self._verified_local_image(session_id, identity, turn)
+        self._verified_draft_scope(session_id, identity, turn)
         return dict(turn.extra_fields[LOCAL_TURN_FIELD])
+
+    def _draft_scope_mac(self, session_id, identity, turn, record, scope):
+        payload = json.dumps(['local-draft-turn-v1', session_id, *identity, turn.id, turn.content,
+                              record['model'], record['attempt'], scope],
+                             sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+        return hmac.new(self._provenance_key[1], payload, hashlib.sha256).hexdigest()
+
+    def _verified_draft_scope(self, session_id, identity, turn):
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if 'draft_scope' not in record:
+            return None
+        from backend.tools.local_drafts import DraftScope
+
+        binding = record['draft_scope']
+        if (not isinstance(binding, dict) or binding.keys() != {'scope', 'mac'}
+                or not isinstance(binding['mac'], str) or record.get('tools_enabled') is not True
+                or {'knowledge_scope', 'image', 'calculator_progress', 'numeric_tool'} & record.keys()):
+            raise ValueError('Invalid local draft binding')
+        scope = DraftScope.model_validate(binding['scope'])
+        expected = self._draft_scope_mac(session_id, identity, turn, record, scope.model_dump())
+        if not hmac.compare_digest(binding['mac'], expected):
+            raise ValueError('Invalid local draft proof')
+        return scope
+
+    def _local_image_mac(self, session_id, identity, turn, record, ref):
+        fields = ['local-image-turn-v1', session_id, *identity, turn.id, turn.content,
+                  record['model'], record['attempt'], ref]
+        payload = json.dumps(fields, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
+        return hmac.new(self._provenance_key[1], payload, hashlib.sha256).hexdigest()
+
+    def _verified_local_image(self, session_id, identity, turn):
+        record = turn.extra_fields[LOCAL_TURN_FIELD]
+        if 'image' not in record:
+            return None
+        from backend.multimodal.local_images import LocalImageRef
+
+        binding = record['image']
+        if (not isinstance(binding, dict) or binding.keys() != {'ref', 'mac'}
+                or not isinstance(binding['mac'], str) or record.get('tools_enabled') is not False
+                or {'knowledge_scope', 'calculator_progress', 'numeric_tool'} & record.keys()):
+            raise ValueError('Invalid local image binding')
+        ref = LocalImageRef.model_validate(binding['ref'])
+        expected = self._local_image_mac(session_id, identity, turn, record, ref.model_dump())
+        if not hmac.compare_digest(binding['mac'], expected):
+            raise ValueError('Invalid local image proof')
+        return ref
 
     def _knowledge_scope_mac(self, session_id, identity, turn, model, scope):
         payload = json.dumps(['local-knowledge-scope-v1', session_id, *identity, turn.id, turn.content, model, scope],
@@ -952,10 +1078,15 @@ class ConversationMemory:
     def record_plain_response(
         self, session_id, identity, content, *, status=None, producer=None,
         access_provenance=None, calculation=False, local_turn=None, local_plan_digest=None, local_numeric_source=None,
-        local_knowledge=None,
+        local_knowledge=None, local_draft_id=None,
     ):
         """Finalize the original live conversation and authenticate only eligible output."""
         from backend.rag.local_knowledge import KNOWLEDGE_FIELD, KNOWLEDGE_PRODUCER, KnowledgeReceipt
+        from backend.tools.local_drafts import DRAFT_PRODUCER
+
+        if local_draft_id is not None and (producer != DRAFT_PRODUCER or local_turn is None
+                                           or not re.fullmatch(r'[0-9a-f]{32}', local_draft_id)):
+            raise ValueError('Invalid local draft response')
 
         if local_knowledge is not None:
             if (local_turn is None or producer != KNOWLEDGE_PRODUCER or local_plan_digest is not None
@@ -981,6 +1112,12 @@ class ConversationMemory:
             if (turn is not conv.messages[-1] or record['attempt'] != attempt or record['state'] != 'running'
                     or not producer or status is not None or not content.strip()):
                 raise LocalTurnConflict('Turn is no longer eligible to complete.')
+            image = self._verified_local_image(session_id, identity, turn)
+            if (image is not None) != (producer == LOCAL_VISION_PRODUCER):
+                raise LocalTurnConflict('Response does not match the admitted image turn.')
+            if ((self._verified_draft_scope(session_id, identity, turn) is not None)
+                    != (producer == DRAFT_PRODUCER and local_draft_id is not None)):
+                raise LocalTurnConflict('Response does not match the admitted draft turn.')
             if local_plan_digest is not None:
                 steps = self.local_calculator_receipts(session_id, identity, turn_id, attempt, local_plan_digest)
                 if not steps:
@@ -1000,6 +1137,12 @@ class ConversationMemory:
                     raise LocalTurnConflict('Local knowledge receipt does not match the admitted source scope.')
                 local_knowledge = receipt.model_dump(exclude_none=True)
         msg = conv.add_message('assistant', content)
+        if local_draft_id is not None:
+            msg.extra_fields['local_draft_id'] = local_draft_id
+        if local_turn is not None and image is not None:
+            msg.extra_fields[_LOCAL_IMAGE_FIELD] = {
+                'turn_id': turn_id, 'attempt': attempt, 'image_id': image.image_id, 'sha256': image.normalized_sha256,
+            }
         if local_knowledge is not None:
             msg.extra_fields[KNOWLEDGE_FIELD] = local_knowledge
         if local_numeric_source is not None:

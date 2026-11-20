@@ -137,12 +137,8 @@ def validate_document_upload(filename, media_type, kind):
         raise TextFileError('The local parser for this format is unavailable.', status=503)
 
 
-def import_document(kind, raw):
-    """Run one killable parser process with an admission deadline."""
-    if len(raw) > MAX_DOCUMENT_BYTES:
-        raise TextFileError('The document exceeds 512 KiB.', status=413)
-    if not raw.startswith(b'%PDF-' if kind == 'pdf' else b'PK\x03\x04'):
-        raise TextFileError('The file signature does not match its declared format.', status=415)
+def run_local_parser(kind, raw):
+    """Run the fixed local media worker with a killable wall-clock deadline."""
     env = {key: os.environ[key] for key in ('SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')
            if key in os.environ}
     try:
@@ -169,17 +165,26 @@ def import_document(kind, raw):
                 raise TextFileError('Document extraction exceeded the local time limit.', status=422)
     except OSError:
         raise TextFileError('The local document parser could not start.', status=503) from None
+    return worker.returncode, output
+
+
+def import_document(kind, raw):
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        raise TextFileError('The document exceeds 512 KiB.', status=413)
+    if not raw.startswith(b'%PDF-' if kind == 'pdf' else b'PK\x03\x04'):
+        raise TextFileError('The file signature does not match its declared format.', status=415)
+    code, output = run_local_parser(kind, raw)
     errors = {
         2: ('The document is malformed or contains unsupported or unsafe content.', 422),
         3: ('The document has no supported extractable content. Scanned PDFs require OCR.', 422),
         4: ('The document exceeds a local parsing limit.', 413),
         5: ('The local parser for this format is unavailable.', 503),
     }
-    if worker.returncode in errors:
-        message, status = errors[worker.returncode]
+    if code in errors:
+        message, status = errors[code]
         raise TextFileError(message, status=status)
     try:
-        if worker.returncode or len(output) > 64 * 1024:
+        if code or len(output) > 64 * 1024:
             raise ValueError
         projection = DocumentProjection.model_validate_json(output)
         if projection.format != kind or projection.content_sha256 != hashlib.sha256(raw).hexdigest():

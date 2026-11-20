@@ -23,6 +23,7 @@ interface ChatInputProps {
   sendBlocked: boolean;
   imageBlocked: boolean;
   textOnly?: boolean;
+  localImage?: boolean;
   hasEarlierImage?: boolean;
   hasEarlierTextFile?: boolean;
   hasEarlierCsvFile?: boolean;
@@ -67,6 +68,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   sendBlocked,
   imageBlocked,
   textOnly,
+  localImage,
   hasEarlierImage,
   hasEarlierTextFile,
   hasEarlierCsvFile,
@@ -195,19 +197,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     e.target.value = '';
     removeTextFile();
 
-    if (!ALLOWED_IMAGE_TYPES.includes(file.type as any)) {
+    if (!ALLOWED_IMAGE_TYPES.includes(file.type as any) &&
+        !(localImage && !file.type && /\.(?:png|jpe?g|webp)$/i.test(file.name))) {
       setAttachedImage(null);
       if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
       setImagePreviewUrl(null);
       setImageError(`INVALID FORMAT: Allowed PNG, JPEG, WebP.`);
       return;
     }
-    if (file.size === 0 || file.size > MAX_IMAGE_SIZE_BYTES) {
+    const sizeLimit = localImage ? 2 * 1024 * 1024 : MAX_IMAGE_SIZE_BYTES;
+    if (file.size === 0 || file.size > sizeLimit) {
       setAttachedImage(null);
       if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
       setImagePreviewUrl(null);
       const mb = (file.size / (1024 * 1024)).toFixed(1);
-      setImageError(file.size === 0 ? 'Image file is empty.' : `OVERSIZE ERROR: (${mb} MB exceeds 10 MB limit).`);
+      setImageError(file.size === 0 ? 'Image file is empty.' : `Image size ${mb} MB exceeds the ${sizeLimit / 1048576} MB limit.`);
       return;
     }
 
@@ -478,7 +482,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* Input row */}
       <div className="flex items-end gap-3">
-        {!textOnly && <>
+        {(!textOnly || localImage) && <>
         <input
           ref={fileInputRef}
           type="file"
@@ -487,9 +491,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onChange={handleFileSelect}
           id="image-file-input"
         />
-        <input ref={textInputRef} type="file" accept={onSendTextFiles ? '.txt,.csv,.json,text/plain,text/csv,application/json' : '.txt,.csv,text/plain,text/csv'} className="hidden"
+        {!textOnly && <input ref={textInputRef} type="file" accept={onSendTextFiles ? '.txt,.csv,.json,text/plain,text/csv,application/json' : '.txt,.csv,text/plain,text/csv'} className="hidden"
           multiple={onSendTextFiles ? true : undefined}
-          onChange={handleTextFileSelect} id="text-file-input" />
+          onChange={handleTextFileSelect} id="text-file-input" />}
 
         {/* Attach button */}
         <button
@@ -508,11 +512,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         >
           <Paperclip className="w-5 h-5" />
         </button>
-        <button type="button" disabled={isStreaming || !textFileSupported} onClick={() => textInputRef.current?.click()}
+        {!textOnly && <button type="button" disabled={isStreaming || !textFileSupported} onClick={() => textInputRef.current?.click()}
           aria-label={onSendTextFiles ? 'Attach TXT, CSV or JSON files' : 'Attach text or CSV file'} aria-describedby="chat-file-support"
           className="h-11 shrink-0 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-600 hover:bg-blue-50 disabled:opacity-50">
           {onSendTextFiles ? 'TXT / CSV / JSON' : 'TXT / CSV'}
-        </button>
+        </button>}
         </>}
 
         {/* Text Area */}
@@ -581,6 +585,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
         <span>Enter to send, Shift + Enter for new line</span>
+        {localImage && <span className="text-slate-600">
+          {imageBlocked && imageStatus ? imageStatus : 'Local images · PNG, JPEG and WebP · up to 2 MiB'}
+        </span>}
         {!textOnly && <span id="chat-file-support" className="text-slate-600">
           {textFileSupported ? (onSendTextFiles
             ? 'Pick up to three TXT, CSV or JSON files, 2 KiB each and 4 KiB total. A new pick replaces the set.'

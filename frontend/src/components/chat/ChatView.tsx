@@ -10,10 +10,12 @@ import type { ChatMessage, ImageAttachment, SourceReference, StreamChunkPayload,
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { LocalKnowledgePanel } from './LocalKnowledgePanel';
+import { LocalDraftPanel } from './LocalDraftPanel';
 import { useWorkbench } from '../../context/WorkbenchContext';
 import {
   createSession, fetchSessions, streamChat, streamChatMultimodal, streamChatTextFile, streamChatTextFiles,
   cancelLocalTurn, guardChatCallbacks, type TextFileBatch, type TextFileLineRange,
+  fetchLocalImages, removeLocalImage, uploadLocalImage, type LocalImageAttachment,
 } from '../../api/chat';
 import { useAuth } from '../../context/AuthContext';
 import { capabilityFor, chatDisabled, describeCapability, permitsCapability, modelInInventory } from '../../api/capabilities';
@@ -22,7 +24,7 @@ import {
   ChatHistorySidebar, loadSession,
   type ChatSession,
 } from './ChatHistorySidebar';
-import { latestLocalUser, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
+import { isLocalDraftRequest, latestLocalUser, reconcileLocalSubmission, retryLocalSubmission, type LocalSubmission } from './localTurns';
 import {
   Clock,
   Plus,
@@ -120,6 +122,13 @@ export const ChatView: React.FC = () => {
   const [localNotice, setLocalNotice] = useState('');
   const [localAccepted, setLocalAccepted] = useState(false);
   const [localStopping, setLocalStopping] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [localImages, setLocalImages] = useState<{ session: string; files: LocalImageAttachment[] }>();
+  const [selectedImage, setSelectedImage] = useState<{ session: string; id: string }>();
+  const [imagesRevision, setImagesRevision] = useState(0);
+  const [removingImage, setRemovingImage] = useState(false);
+  const [draftEvidence, setDraftEvidence] = useState<string[]>([]);
+  const [draftsRefresh, setDraftsRefresh] = useState(0);
   const pendingLocal = useRef<LocalSubmission | null>(null);
   const sendingLocal = useRef<LocalSubmission | null>(null);
   const historyRequest = useRef(0);
@@ -136,13 +145,14 @@ export const ChatView: React.FC = () => {
   const [knowledgeActive, setKnowledgeActive] = useState(false);
   const [knowledgeSelection, setKnowledgeSelection] = useState<string[] | null>(null);
   const knowledgeAvailable = capabilities?.local_knowledge?.available === true;
+  const savedImages = localImages?.session === activeSessionId ? localImages?.files ?? [] : [];
+  const reusedImageId = selectedImage?.session === activeSessionId ? selectedImage?.id : undefined;
   const lastLocalUser = local ? latestLocalUser(messages) : undefined;
   const localRunning = lastLocalUser?.localTurn?.state === 'running';
   const modelSelection = useRef({ selectedModel, selectedVisionModel, capabilities });
   const approvalsAllowed = permitsCapability(capabilities, 'approval_resume');
   const textDisabled = chatDisabled(capabilities, false, selectedModel);
-  // Image requests also use the selected text model for the reasoning stage.
-  const imageDisabled = chatDisabled(capabilities, true, selectedVisionModel) || textDisabled;
+  const imageDisabled = chatDisabled(capabilities, true, selectedVisionModel) || (!local && textDisabled);
   const chatStatus = capabilityFor(capabilities, capabilities ? 'chat' : 'backend', !isCheckingHealth);
   const imageStatus = capabilityFor(capabilities, 'multimodal', !isCheckingHealth);
   const selectedModelMissing = capabilities?.capabilities?.ollama?.state === 'available' &&
@@ -161,6 +171,9 @@ export const ChatView: React.FC = () => {
     setLocalNotice('');
     setLocalAccepted(false);
     setLocalStopping(false);
+    setDraftEvidence([]);
+    setUploadingImage(false);
+    setSelectedImage(undefined);
   }, []);
   const clearConversation = useCallback(() => {
     selectionVersion.current++;
@@ -214,6 +227,7 @@ export const ChatView: React.FC = () => {
   }, [addToast, clearConversation, handleSessionExpired, updateSessionCount]);
 
   const refreshAfterSourceChange = useCallback(() => {
+    setDraftsRefresh(previous => previous + 1);
     setMessages(previous => previous.map(message => message.localKnowledge ? {
       ...message, content: '', withheld: true, localKnowledge: { state: 'unavailable', citations: [] },
     } : message));
@@ -243,7 +257,7 @@ export const ChatView: React.FC = () => {
       await streamChat(command, guardChatCallbacks({
         onAccepted: () => setLocalAccepted(true),
         onAgentStatus: (status: string, tool?: string) => {
-          if (status !== 'planning' && status !== 'tool_selected') return;
+          if (status !== 'planning' && status !== 'tool_selected' && status !== 'analyzing_image' && status !== 'drafting') return;
           const localSelectedTool = tool === 'calculator' || tool === 'unit_conversion' ? tool : undefined;
           setMessages(previous => previous.map(message =>
             message.id === previewId ? { ...message, localAgentStatus: status, localSelectedTool } : message));
@@ -257,7 +271,9 @@ export const ChatView: React.FC = () => {
         onError: (message: string, info?: StreamErrorInfo) => {
           if (info?.status === 401) handleSessionExpired();
           if (info?.status && ['LOCAL_KNOWLEDGE_SOURCE_UNAVAILABLE', 'LOCAL_KNOWLEDGE_CHANGED',
-            'LOCAL_KNOWLEDGE_QUESTION'].includes(info.code ?? '')) {
+            'LOCAL_KNOWLEDGE_QUESTION', 'LOCAL_IMAGE_UNAVAILABLE', 'LOCAL_VISION_BUSY',
+            'LOCAL_IMAGE_REQUIRED', 'LOCAL_IMAGE_AMBIGUOUS', 'LOCAL_IMAGE_REQUEST_INVALID',
+            'LOCAL_DRAFT_REQUEST', 'LOCAL_DRAFT_EVIDENCE'].includes(info.code ?? '')) {
             pendingLocal.current = null;
             addToast('info', message);
           }
@@ -334,11 +350,18 @@ export const ChatView: React.FC = () => {
     async (text: string, image?: File, textFile?: File, lineRange?: TextFileLineRange, batch?: TextFileBatch) => {
       if (!text.trim() || isStreaming || abortControllerRef.current || restoring || creating.current ||
           (local && (localRunning || localNotice || pendingLocal.current || localStopping))) return;
-      if (local && knowledgeActive && !knowledgeAvailable) {
+      const isDraft = local && isLocalDraftRequest(text);
+      if (isDraft && image) {
+        addToast('info', 'Analyze the image first, then select the completed image turn in Drafts.');
+        return;
+      }
+      const visualQuestion = Boolean(image || (!isDraft && reusedImageId));
+      const knowledgeForTurn = knowledgeActive && !visualQuestion && !isDraft;
+      if (local && knowledgeForTurn && !knowledgeAvailable) {
         addToast('info', 'Local knowledge is unavailable. Switch to general chat or wait for it to reconnect.');
         return;
       }
-      if (local && knowledgeActive && knowledgeSelection?.length === 0) {
+      if (local && knowledgeForTurn && knowledgeSelection?.length === 0) {
         addToast('info', 'Choose at least one registered local source.');
         return;
       }
@@ -347,7 +370,7 @@ export const ChatView: React.FC = () => {
         return;
       }
       const textReady = local || !chatDisabled(capabilities, false, selectedModel);
-      if (!textReady || (image && chatDisabled(capabilities, true, selectedVisionModel))) {
+      if (!textReady || (visualQuestion && chatDisabled(capabilities, true, selectedVisionModel))) {
         addToast('info', describeCapability(textReady ? imageStatus : chatStatus));
         return;
       }
@@ -427,12 +450,41 @@ export const ChatView: React.FC = () => {
         }
       }
       if (local) {
+        let imageId = isDraft ? undefined : reusedImageId;
+        if (image) {
+          const controller = new AbortController();
+          const version = selectionVersion.current;
+          abortControllerRef.current = controller;
+          setUploadingImage(true);
+          setIsStreaming(true);
+          try {
+            imageId = (await uploadLocalImage(sessionId, image, controller.signal)).attachment_id;
+            if (controller.signal.aborted || selectionVersion.current !== version) return;
+          } catch (error) {
+            if (!controller.signal.aborted && selectionVersion.current === version) {
+              if ((error as {status?: number})?.status === 401) handleSessionExpired();
+              else addToast('error', error instanceof Error ? error.message : 'Local image upload failed.');
+            }
+            return;
+          } finally {
+            if (abortControllerRef.current === controller) {
+              abortControllerRef.current = null;
+              setUploadingImage(false);
+              setIsStreaming(false);
+              setImagesRevision(previous => previous + 1);
+            }
+          }
+        }
         const explicitlyScoped = /^\s*(?:according to|from|using|use)\s+(?:(?:my|the|our|your)\s+)?(?:registered\s+)?local\s+(?:knowledge(?:\s+sources)?|sources)\b/i.test(text);
-        const question = knowledgeActive && !explicitlyScoped
+        const question = knowledgeForTurn && !explicitlyScoped
           ? `According to my local sources, ${text}` : text;
+        setSelectedImage(undefined);
         await runLocalSubmission({
-          session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: question, model: selectedModel,
-          ...(knowledgeActive && knowledgeSelection ? { knowledge_source_ids: knowledgeSelection } : {}),
+          session_id: sessionId, turn_id: crypto.randomUUID(), attempt: 1, message: question,
+          model: imageId ? selectedVisionModel : selectedModel,
+          ...(imageId ? { image_id: imageId } : {}),
+          ...(isDraft && draftEvidence.length ? { draft_turn_ids: draftEvidence } : {}),
+          ...(knowledgeForTurn && knowledgeSelection ? { knowledge_source_ids: knowledgeSelection } : {}),
         });
         return;
       }
@@ -753,7 +805,7 @@ export const ChatView: React.FC = () => {
         if (abortControllerRef.current === controller) abortControllerRef.current = null;
       }
     },
-    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, localNotice, localStopping, runLocalSubmission, knowledgeAvailable, knowledgeActive, knowledgeSelection]
+    [activeSessionId, selectedModel, selectedVisionModel, capabilities, isStreaming, addToast, sessionTitle, messages, persistSession, updateSessionCount, approvalsAllowed, chatStatus, imageStatus, restoring, clearConversation, handleSessionExpired, local, localRunning, localNotice, localStopping, runLocalSubmission, knowledgeAvailable, knowledgeActive, knowledgeSelection, reusedImageId, draftEvidence]
   );
 
   /**
@@ -985,6 +1037,10 @@ export const ChatView: React.FC = () => {
 
   const handleStopStream = () => {
     if (local) {
+      if (uploadingImage) {
+        abortControllerRef.current?.abort();
+        return;
+      }
       void stopLocalResponse();
       return;
     }
@@ -1065,6 +1121,10 @@ export const ChatView: React.FC = () => {
       if (!prompt) return;
 
       if (isMultimodal) {
+        if (local) {
+          addToast('info', 'Attach an image from your device to try local image chat.');
+          return;
+        }
         const version = selectionVersion.current;
         const canSend = () => !lifetime.signal.aborted && selectionVersion.current === version;
         try {
@@ -1095,7 +1155,18 @@ export const ChatView: React.FC = () => {
       lifetime.abort();
       window.removeEventListener('workbench:preload-demo', handlePreloadDemo);
     };
-  }, [handleSendMessage, imageDisabled, addToast]);
+  }, [handleSendMessage, imageDisabled, addToast, local]);
+
+  useEffect(() => {
+    if (!local || !activeSessionId) return;
+    const request = new AbortController();
+    void fetchLocalImages(activeSessionId, request.signal).then(({ images }) => {
+      if (!request.signal.aborted) setLocalImages({ session: activeSessionId, files: images });
+    }).catch(() => {
+      if (!request.signal.aborted) setLocalImages({ session: activeSessionId, files: [] });
+    });
+    return () => request.abort();
+  }, [activeSessionId, imagesRevision, local]);
 
   useEffect(() => {
     if (!local || !activeSessionId || isStreaming || localStopping) return;
@@ -1215,14 +1286,56 @@ export const ChatView: React.FC = () => {
       {local && <LocalKnowledgePanel available={knowledgeAvailable} active={knowledgeActive}
         setActive={setKnowledgeActive} selection={knowledgeSelection} setSelection={setKnowledgeSelection}
         onRevision={refreshAfterSourceChange} />}
+      {local && activeSessionId && <LocalDraftPanel key={activeSessionId} sessionId={activeSessionId}
+        messages={messages} refreshKey={`${historyRevision}:${draftsRefresh}:${lastLocalUser?.id}:${lastLocalUser?.localTurn?.state}`}
+        selected={draftEvidence} onSelection={setDraftEvidence} />}
+      {local && (savedImages.length > 0 || uploadingImage) && (
+        <div className="flex flex-wrap items-center gap-3 border-t border-slate-200 px-5 py-2 text-xs text-slate-700">
+          {uploadingImage && <span role="status">Uploading and validating image.</span>}
+          {!!savedImages.length && <>
+            <label className="flex items-center gap-2">
+              Reuse image
+              <select value={reusedImageId ?? ''} disabled={isStreaming || localRunning || removingImage}
+                className="max-w-56 rounded border border-slate-300 px-2 py-1"
+                onChange={event => setSelectedImage(event.target.value
+                  ? { session: activeSessionId, id: event.target.value } : undefined)}>
+                <option value="">Choose a saved image</option>
+                {savedImages.map(file => <option key={file.attachment_id} value={file.attachment_id}>
+                  {file.filename} ({file.width} × {file.height})
+                </option>)}
+              </select>
+            </label>
+            {reusedImageId && <button type="button" className="underline" disabled={isStreaming || localRunning || removingImage}
+              onClick={async () => {
+                const version = selectionVersion.current;
+                setRemovingImage(true);
+                try {
+                  await removeLocalImage(activeSessionId, reusedImageId);
+                  if (selectionVersion.current !== version) return;
+                  setSelectedImage(undefined);
+                  setImagesRevision(previous => previous + 1);
+                  setDraftsRefresh(previous => previous + 1);
+                  await refreshLocalHistory(activeSessionId, version);
+                } catch (error) {
+                  if (selectionVersion.current !== version) return;
+                  if ((error as {status?: number})?.status === 401) handleSessionExpired();
+                  else addToast('error', 'The image could not be removed.');
+                } finally {
+                  setRemovingImage(false);
+                }
+              }}>Remove selected image</button>}
+          </>}
+        </div>
+      )}
       {/* 4. Input Composer */}
       <ChatInput
         key={activeSessionId ? activeSessionId + ':' + draftRevision : 'new-draft-' + draftRevision}
         onSendMessage={handleSendMessage}
-        sendBlocked={(!local && textDisabled) || restoring || (local && Boolean(localNotice || localStopping))}
+        sendBlocked={(!local && textDisabled) || restoring || (local && Boolean(localNotice || localStopping || (reusedImageId && imageDisabled)))}
         imageBlocked={imageDisabled || restoring}
         textOnly={local}
-        hasEarlierImage={messages.some(message => message.attachments?.some(file => file.mimeType.startsWith('image/')))}
+        localImage={local}
+        hasEarlierImage={!local && messages.some(message => message.attachments?.some(file => file.mimeType.startsWith('image/')))}
         hasEarlierTextFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/plain'))}
         hasEarlierCsvFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'text/csv'))}
         hasEarlierJsonFile={messages.some(message => message.attachments?.some(file => file.mimeType === 'application/json'))}
@@ -1244,9 +1357,10 @@ export const ChatView: React.FC = () => {
           ? 'The selected model was not found in the checked inventory. Select an available model.'
           : textDisabled && chatStatus.state === 'available' ? 'Verify the selected text model in Models before sending.'
             : textDisabled || chatStatus.state === 'unknown' ? describeCapability(chatStatus) : undefined}
-        imageStatus={imageDisabled ? (textDisabled ? 'The selected chat model is unavailable. Choose an available model before sending an image.' : describeCapability(imageStatus)) : undefined}
+        imageStatus={imageDisabled ? (local ? 'The local vision model is unavailable. Check the Models panel.'
+          : textDisabled ? 'The selected chat model is unavailable. Choose an available model before sending an image.' : describeCapability(imageStatus)) : undefined}
         onStopStream={handleStopStream}
-        stopDisabled={local && (localStopping || (!localAccepted && !localRunning))}
+        stopDisabled={local && (localStopping || (!uploadingImage && !localAccepted && !localRunning))}
         isStreaming={isStreaming || localRunning}
         onClearSession={handleStartNewChat}
       />

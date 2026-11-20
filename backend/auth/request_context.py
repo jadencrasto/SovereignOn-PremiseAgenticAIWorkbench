@@ -7,6 +7,7 @@ local_legacy_access = ContextVar('local_legacy_access', default=False)
 request_tools_enabled = ContextVar('request_tools_enabled', default=None)
 # Set by the owned local chat task around one permitted tool dispatch.
 local_chat_tool_turn = ContextVar('local_chat_tool_turn', default=None)
+local_draft_scope = ContextVar('local_draft_scope', default=None)
 # Bound only after server authentication; never populated from tool arguments.
 dispatch_identity_resolver = ContextVar('dispatch_identity_resolver', default=None)
 http_request_active = ContextVar('http_request_active', default=False)

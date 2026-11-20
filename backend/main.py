@@ -505,6 +505,7 @@ async def lifespan(app: FastAPI):
 
 async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
     from asyncio import Lock
+    from secrets import token_bytes, token_hex
     from tempfile import TemporaryDirectory
 
     from backend.agent.conversation_registry import ConversationRegistry
@@ -513,7 +514,10 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
     from backend.health.routes import refresh_local_inventory
     from backend.local_dev import announce_viewer, new_viewer, runtime_settings, validate_profile
     from backend.local_history import LocalHistoryStore, LocalRetention, exclusive_history
+    from backend.multimodal.local_images import LocalImages
     from backend.rag.local_knowledge import LocalKnowledge
+    from backend.security.provenance_keystore import ProvenanceKeyRing
+    from backend.tools.local_drafts import DRAFT_TOOL, DraftRequest, LocalDraft, LocalDrafts, assemble_draft
 
     requested = app.state.settings
     validate_profile(requested)
@@ -540,13 +544,28 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
         app.state.local_viewer_id = history.owner
         app.state.local_knowledge = LocalKnowledge(history.owner, path=retention.root / "knowledge-v1.json",
                                                   keys=history.keys)
+        app.state.local_images = LocalImages(history.owner, retention.root / "images-v1.json", history.keys)
+        with history.transaction():
+            image_sessions = registry.rows()
+        app.state.local_images.prune_revoked(image_sessions)
+        app.state.local_drafts = LocalDrafts(history.owner, retention.root / "artifacts", history.keys)
+        active = {(row['conversation_id'], row['generation']) for row in image_sessions
+                  if row['state'] == 'active' and row['owner_id'] == history.owner}
+        revoked = [draft.id for draft in app.state.local_drafts.records.values()
+                   if (draft.session, draft.generation) not in active]
+        if revoked:
+            app.state.local_drafts.save(remove=revoked)
     else:
         cfg = runtime_settings(requested, root)
         store = AuthStore(cfg.tasks_db_path)
         store.create_user(viewer)
         app.state.local_viewer_id = viewer.id
         app.state.local_knowledge = LocalKnowledge(viewer.id)
+        app.state.local_images = LocalImages(viewer.id)
         keys = startup_provenance_keys(cfg.provenance_key_mode)
+        draft_key_id = token_hex(16)
+        draft_keys = ProvenanceKeyRing(draft_key_id, {draft_key_id: token_bytes(32)})
+        app.state.local_drafts = LocalDrafts(viewer.id, root / "artifacts", draft_keys)
         registry = ConversationRegistry(cfg.tasks_db_path)
         memory = ConversationMemory(storage_file=cfg.conversation_memory_path, provenance_keys=keys)
         memory.attach_security_registry(registry)
@@ -572,6 +591,10 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
         input_schema=CalculatorInput, execute_fn=execute_calculator,
     ))
     register_unit_conversion(local_tools, local=True)
+    local_tools.register(ToolDefinition(
+        name=DRAFT_TOOL, description="Assemble a preview from admitted local evidence turns.",
+        input_schema=DraftRequest, execute_fn=assemble_draft, result_schema=LocalDraft,
+    ))
     app.state.conversation_registry = registry
     app.state.conversation_persistence_initialized = memory.persistence_configured
     app.state.engine = AgentEngine(
@@ -580,7 +603,8 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
         system_prompt=(
             "You are Sovereign Assistant in local development. Answer in plain conversation. "
             "You can use the conversation history and your general knowledge. "
-            "If asked to perform an action or consult a source, explain that this profile supports text chat only."
+            "Only discuss actions as suggestions. Image questions need an explicit attachment. "
+            "Knowledge questions use the authorized local sources."
         ),
     )
     app.state.engine.set_planner(AgentPlanner(max_plan_steps=LOCAL_PLAN_LIMIT))
@@ -588,6 +612,8 @@ async def _start_local_chat(app: FastAPI, stack: AsyncExitStack) -> None:
     app.state.local_inventory_lock = Lock()
     app.state.local_chat_runs = local_runs = LocalChatRuns()
     app.state.local_document_intake = Lock()
+    app.state.local_image_intake = Lock()
+    app.state.local_export_job = None
     stack.push_async_callback(local_runs.close)
     await refresh_local_inventory(app.state)
     app.state.startup_complete = True
@@ -1047,6 +1073,7 @@ def create_app(custom_settings: Optional[Settings] = None, *, local_frontend: Pa
     # ---- Routes ----
     if local:
         from backend.api.local_chat import router as local_chat_router
+        from backend.api.local_drafts import router as local_draft_router
         from backend.local_dev import install_http_boundary
 
         local_paths = {
@@ -1061,6 +1088,7 @@ def create_app(custom_settings: Optional[Settings] = None, *, local_frontend: Pa
             for route in router.routes if route.path in local_paths
         ]))
         app.include_router(local_chat_router)
+        app.include_router(local_draft_router)
         install_http_boundary(app, active_settings, local_frontend)
         return app
 
